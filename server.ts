@@ -247,13 +247,14 @@ Available tools:
 - check_messages: Manually check for new messages (call this periodically if you're expecting replies)
 
 DESKTOP/COWORK SESSIONS ONLY — before doing anything else:
-- This MCP server is shared across ALL Desktop/Cowork sessions on the machine. You MUST pass \`session_id\` on every tool call EXCEPT list_peers, or your call will error out.
-- To get your session_id, run \`pwd\` via Bash. The output is your sandbox CWD — use that exact path as session_id in every claude-peers tool call.
-- Remember your session_id for the entire conversation and pass it consistently. If you forget it, run \`pwd\` again.
+- This MCP server is shared across ALL Desktop/Cowork sessions on the machine. You MUST pass \`peer_session\` on every tool call EXCEPT list_peers, or your call will error out.
+- The parameter is \`peer_session\`, NOT \`session_id\`. Claude Desktop reserves the name \`session_id\` and strips it in transit, so a value passed under that name never arrives.
+- To get your peer_session, run \`pwd\` via Bash. The output is your sandbox CWD — use that exact path as peer_session in every claude-peers tool call.
+- Remember your peer_session for the entire conversation and pass it consistently. If you forget it, run \`pwd\` again.
 
 CRITICAL FIRST STEPS — do these immediately when you start:
-1. (Desktop only) Run \`pwd\` via Bash to capture your session_id.
-2. Call set_summary with your role/name and what you're working on (e.g. "Design agent. Reviewing clinician UX mockups."), passing session_id if you are on Desktop.
+1. (Desktop only) Run \`pwd\` via Bash to capture your peer_session.
+2. Call set_summary with your role/name and what you're working on (e.g. "Design agent. Reviewing clinician UX mockups."), passing peer_session if you are on Desktop.
 3. Call list_peers with scope "machine" to see who else is online and learn your own peer ID.
 4. If you have access to the Monitor tool (Claude Code v2.1.98+), start watching for incoming peer messages IMMEDIATELY:
      Monitor(command: "bun /Users/deansingh/git/claude-peers-mcp/cli.ts watch <your-peer-id>")
@@ -282,11 +283,24 @@ export const SESSION_ID_REQUIRED_TOOLS = [
   "check_messages",
 ];
 
-// Claude Desktop's localMcpBridge re-announces our tools to remote/Cowork
-// sessions as { name, description, inputSchema } only — the server-level
-// `instructions` field is dropped entirely. The per-tool schema is therefore
-// the ONLY channel through which a remote session learns that session_id is
-// mandatory, so it has to carry that requirement itself.
+// NOTE: this parameter must NOT be named `session_id`.
+//
+// Claude Desktop's remote-tools device dispatcher reserves that exact key. It
+// destructures it out of the arguments before dispatching:
+//
+//   const {session_id: R, ...D} = L;
+//   ... W.has(I) ? E.handleCall(I, D, x)     // D = args WITHOUT session_id
+//
+// and hands it to the bridge as a separate session-context argument, which
+// localMcpBridge then drops (it forwards only `g` to callTool). A tool
+// parameter named `session_id` is therefore silently swallowed in transit and
+// can never reach this server over the remote-devices path.
+//
+// Related: the bridge re-announces our tools as {name, description,
+// inputSchema} only — the server-level `instructions` field is dropped — so
+// the per-tool schema is the only channel that can carry this requirement.
+export const SESSION_PARAM = "peer_session";
+
 const SESSION_ID_PROP_DESKTOP = {
   type: "string" as const,
   description:
@@ -313,7 +327,7 @@ export function buildTools(peerType: "cli" | "desktop") {
     ? SESSION_ID_PROP_DESKTOP
     : SESSION_ID_PROP_CLI;
   const withSessionId = (required: string[]): string[] =>
-    isDesktop ? [...required, "session_id"] : required;
+    isDesktop ? [...required, SESSION_PARAM] : required;
 
   return [
   {
@@ -331,7 +345,7 @@ export function buildTools(peerType: "cli" | "desktop") {
         },
         // list_peers is exempt from the runtime guard (read-only, and
         // sessions need it for discovery), so session_id stays optional here.
-        session_id: SESSION_ID_PROP_CLI,
+        [SESSION_PARAM]: SESSION_ID_PROP_CLI,
       },
       required: ["scope"],
     },
@@ -351,7 +365,7 @@ export function buildTools(peerType: "cli" | "desktop") {
           type: "string" as const,
           description: "The message to send",
         },
-        session_id: SESSION_ID_PROP,
+        [SESSION_PARAM]: SESSION_ID_PROP,
       },
       required: withSessionId(["to_id", "message"]),
     },
@@ -367,7 +381,7 @@ export function buildTools(peerType: "cli" | "desktop") {
           type: "string" as const,
           description: "A 1-2 sentence summary of your current work",
         },
-        session_id: SESSION_ID_PROP,
+        [SESSION_PARAM]: SESSION_ID_PROP,
       },
       required: withSessionId(["summary"]),
     },
@@ -379,7 +393,7 @@ export function buildTools(peerType: "cli" | "desktop") {
     inputSchema: {
       type: "object" as const,
       properties: {
-        session_id: SESSION_ID_PROP,
+        [SESSION_PARAM]: SESSION_ID_PROP,
       },
       required: withSessionId([]),
     },
@@ -404,21 +418,23 @@ function missingSessionIdError(toolName: string): string {
       exampleArgs = '"to_id": "...", "message": "...",';
       break;
   }
-  return `❌ claude-peers: Desktop sessions must pass \`session_id\` on "${toolName}" calls.
+  return `❌ claude-peers: Desktop sessions must pass \`${SESSION_PARAM}\` on "${toolName}" calls.
 
-This MCP server is shared across all Desktop/Cowork sessions on this machine. Without \`session_id\`, your tool call collides with every other session's host peer — summaries get overwritten and messages get routed to the wrong session.
+This MCP server is shared across all Desktop/Cowork sessions on this machine. Without \`${SESSION_PARAM}\`, your tool call cannot be attributed to your session — summaries get overwritten and messages get routed to the wrong session.
 
-To find your session_id:
+NOTE: the parameter is \`${SESSION_PARAM}\`, NOT \`session_id\`. Claude Desktop's remote-tools layer reserves the name \`session_id\` and strips it before the call reaches this server, so a value passed under that name is silently discarded.
+
+To find your ${SESSION_PARAM}:
 1. Run \`pwd\` via the Bash tool to get your current sandbox working directory.
-2. Pass that exact path as \`session_id\` in every claude-peers tool call.
+2. Pass that exact path as \`${SESSION_PARAM}\` in every claude-peers tool call.
 
 Example:
   ${toolName}({
     ${exampleArgs}
-    "session_id": "<your pwd output>"
+    "${SESSION_PARAM}": "<your pwd output>"
   })
 
-Retry this call with session_id included.`;
+Retry this call with ${SESSION_PARAM} included.`;
 }
 
 mcp.setRequestHandler(ListToolsRequestSchema, async () => {
@@ -440,7 +456,12 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => {
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   log(`Tool call raw request: ${JSON.stringify(req.params)}`);
   const { name, arguments: args } = req.params;
-  const sessionId = args?.session_id as string | undefined;
+  // Prefer SESSION_PARAM. `session_id` is still accepted for direct MCP
+  // clients (Claude Code CLI, .mcp.json), where nothing strips it — but it
+  // never survives Desktop's remote-devices path. See SESSION_PARAM above.
+  const sessionId = (args?.[SESSION_PARAM] ?? args?.session_id) as
+    | string
+    | undefined;
 
   // GUARD: desktop sessions must pass session_id for identity-bearing tools.
   // The MCP server process is shared across all Desktop/Cowork sessions, so
@@ -449,7 +470,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   // exempt because it's read-only and sessions need it for discovery.
   if (PEER_TYPE === "desktop" && !sessionId && name !== "list_peers") {
     log(
-      `REJECTED ${name}: no session_id. arg keys=[${Object.keys(args ?? {}).join(", ")}]`
+      `REJECTED ${name}: no ${SESSION_PARAM}. arg keys=[${Object.keys(args ?? {}).join(", ")}]`
     );
     return {
       content: [
@@ -484,7 +505,7 @@ async function handleTool(name: string, args: Record<string, unknown> | undefine
 
         const header = effectivePeerId
           ? `Your peer ID: ${effectivePeerId}\n\n`
-          : `⚠️ You have no peer identity yet. Desktop/Cowork sessions must run \`pwd\` via Bash and pass the result as \`session_id\` on every claude-peers tool call (except list_peers). Until you do, other peers cannot message you and set_summary/send_message will error.\n\n`;
+          : `⚠️ You have no peer identity yet. Desktop/Cowork sessions must run \`pwd\` via Bash and pass the result as \`${SESSION_PARAM}\` on every claude-peers tool call (except list_peers). Note the parameter is \`${SESSION_PARAM}\`, NOT \`session_id\` — Claude Desktop reserves that name and strips it in transit. Until you do, other peers cannot message you and set_summary/send_message will error.\n\n`;
 
         if (peers.length === 0) {
           return {
