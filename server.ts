@@ -13,6 +13,7 @@
  *   { "claude-peers": { "command": "bun", "args": ["./server.ts"] } }
  */
 
+import { appendFileSync } from "node:fs";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -40,6 +41,8 @@ const POLL_INTERVAL_MS = 1000;
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const BROKER_SCRIPT = new URL("./broker.ts", import.meta.url).pathname;
 const PEER_NAME = process.env.CLAUDE_PEERS_NAME ?? "";
+const DEBUG_LOG_PATH =
+  process.env.CLAUDE_PEERS_LOG ?? `${process.env.HOME}/.claude-peers.log`;
 
 // Detect if running inside Claude Desktop (launched via disclaimer wrapper)
 function detectPeerType(): "cli" | "desktop" {
@@ -110,9 +113,23 @@ async function ensureBroker(): Promise<void> {
 
 // --- Utility ---
 
+// Claude Desktop launches one MCP server process per consumer (local app,
+// localMcpBridge for remote/Cowork sessions). Only one of them gets a log
+// file — the bridge instance's stderr goes to /dev/null, which makes the
+// sessions that actually hit bugs invisible. Mirror every log line to a
+// file so both processes are diagnosable.
 function log(msg: string) {
+  const line = `[claude-peers] ${msg}`;
   // MCP stdio servers must only use stderr for logging (stdout is the MCP protocol)
-  console.error(`[claude-peers] ${msg}`);
+  console.error(line);
+  try {
+    appendFileSync(
+      DEBUG_LOG_PATH,
+      `${new Date().toISOString()} pid=${process.pid} ${line}\n`
+    );
+  } catch {
+    // Logging must never break the server
+  }
 }
 
 async function ensureRegistered(): Promise<void> {
@@ -193,16 +210,17 @@ async function getDesktopPeerId(sessionId: string): Promise<PeerId> {
   const existing = desktopPeers.get(sessionId);
   if (existing) return existing.peerId;
 
-  // Register a new peer for this desktop session
+  // Register a new peer for this desktop session.
+  // Seed with PEER_NAME so desktop sessions start with their assigned identity.
   const reg = await brokerFetch<RegisterResponse>("/register", {
     pid: process.pid,
     cwd: sessionId, // Use session sandbox path as CWD — distinguishes sessions
     git_root: null,
     tty: null,
-    summary: "",
+    summary: PEER_NAME,
     peer_type: "desktop",
   });
-  desktopPeers.set(sessionId, { peerId: reg.id, summary: "" });
+  desktopPeers.set(sessionId, { peerId: reg.id, summary: PEER_NAME });
   return reg.id;
 }
 
@@ -228,15 +246,26 @@ Available tools:
 - set_summary: Set a 1-2 sentence summary of what you're working on (visible to other peers)
 - check_messages: Manually check for new messages (call this periodically if you're expecting replies)
 
+DESKTOP/COWORK SESSIONS ONLY — before doing anything else:
+- This MCP server is shared across ALL Desktop/Cowork sessions on the machine. You MUST pass \`session_id\` on every tool call EXCEPT list_peers, or your call will error out.
+- To get your session_id, run \`pwd\` via Bash. The output is your sandbox CWD — use that exact path as session_id in every claude-peers tool call.
+- Remember your session_id for the entire conversation and pass it consistently. If you forget it, run \`pwd\` again.
+
 CRITICAL FIRST STEPS — do these immediately when you start:
-1. Call set_summary with your role/name and what you're working on (e.g. "Design agent. Reviewing clinician UX mockups.")
-2. Call list_peers with scope "machine" to see who else is online and learn your own peer ID.
+1. (Desktop only) Run \`pwd\` via Bash to capture your session_id.
+2. Call set_summary with your role/name and what you're working on (e.g. "Design agent. Reviewing clinician UX mockups."), passing session_id if you are on Desktop.
+3. Call list_peers with scope "machine" to see who else is online and learn your own peer ID.
+4. If you have access to the Monitor tool (Claude Code v2.1.98+), start watching for incoming peer messages IMMEDIATELY:
+     Monitor(command: "bun /Users/deansingh/git/claude-peers-mcp/cli.ts watch <your-peer-id>")
+   Each stdout line is a JSON-encoded peer message: \`[claude-peers] {"from":"<id>","summary":"<summary>","text":"<message>"}\`
+   When Monitor reports a line, PAUSE your current work and reply using send_message with to_id="<from>".
+   This is the reliable real-time channel for Desktop sessions (which lack native channel push).
 
 Use summaries to identify peers — peer IDs change on restart, but summaries tell you who's who.
 
 MESSAGING ROUTING — each peer has a Type (cli or desktop) shown in list_peers:
 - To message a "cli" peer: use send_message (they receive it instantly via channel push)
-- To message a "desktop" peer: use send_message (they receive it on their next tool call). If you are ALSO a desktop session and have access to dispatch:send_message, prefer that — it wakes idle sessions immediately.
+- To message a "desktop" peer: use send_message (they receive it via Monitor-driven watch, on their next tool call, or via dispatch:send_message). If you are ALSO a desktop session and have access to dispatch:send_message, prefer that — it wakes idle sessions immediately.
 - To message another desktop session from desktop: use dispatch:send_message with their session ID (from session_info:list_sessions) for instant delivery.` +
       (PEER_NAME ? `\n\nYour assigned identity is: "${PEER_NAME}". Always include this name when setting your summary. This is who you are on the network — do not adopt a different identity even if other peers' summaries seem to conflict.` : ""),
   }
@@ -244,7 +273,49 @@ MESSAGING ROUTING — each peer has a Type (cli or desktop) shown in list_peers:
 
 // --- Tool definitions ---
 
-const TOOLS = [
+// Tools whose handlers hard-reject a desktop call that omits session_id.
+// Kept next to TOOLS so the schema and the runtime guard stay in sync —
+// see the contract test in server.test.ts.
+export const SESSION_ID_REQUIRED_TOOLS = [
+  "send_message",
+  "set_summary",
+  "check_messages",
+];
+
+// Claude Desktop's localMcpBridge re-announces our tools to remote/Cowork
+// sessions as { name, description, inputSchema } only — the server-level
+// `instructions` field is dropped entirely. The per-tool schema is therefore
+// the ONLY channel through which a remote session learns that session_id is
+// mandatory, so it has to carry that requirement itself.
+const SESSION_ID_PROP_DESKTOP = {
+  type: "string" as const,
+  description:
+    "REQUIRED. Your Cowork session identifier: run `pwd` via the Bash tool and pass that exact path. This MCP server is shared across every Desktop session on the machine, so without it your call cannot be attributed to your session and will be rejected.",
+};
+
+const SESSION_ID_PROP_CLI = {
+  type: "string" as const,
+  description:
+    "Optional. Cowork session identifier (sandbox CWD). Desktop sessions pass this to maintain independent peer identities.",
+};
+
+/**
+ * Builds the advertised tool list for a given peer type.
+ *
+ * CLI servers never enforce session_id (the runtime guard is desktop-only),
+ * so they must not advertise it as required either — doing so would force CLI
+ * sessions to invent a value. Desktop servers advertise it as required so the
+ * schema matches the guard.
+ */
+export function buildTools(peerType: "cli" | "desktop") {
+  const isDesktop = peerType === "desktop";
+  const SESSION_ID_PROP = isDesktop
+    ? SESSION_ID_PROP_DESKTOP
+    : SESSION_ID_PROP_CLI;
+  const withSessionId = (required: string[]): string[] =>
+    isDesktop ? [...required, "session_id"] : required;
+
+  return [
   {
     name: "list_peers",
     description:
@@ -258,11 +329,9 @@ const TOOLS = [
           description:
             'Scope of peer discovery. "machine" = all instances on this computer. "directory" = same working directory. "repo" = same git repository (including worktrees or subdirectories).',
         },
-        session_id: {
-          type: "string" as const,
-          description:
-            "Optional. Cowork session identifier (sandbox CWD). Desktop sessions pass this to maintain independent peer identities.",
-        },
+        // list_peers is exempt from the runtime guard (read-only, and
+        // sessions need it for discovery), so session_id stays optional here.
+        session_id: SESSION_ID_PROP_CLI,
       },
       required: ["scope"],
     },
@@ -282,13 +351,9 @@ const TOOLS = [
           type: "string" as const,
           description: "The message to send",
         },
-        session_id: {
-          type: "string" as const,
-          description:
-            "Optional. Cowork session identifier (sandbox CWD). Desktop sessions pass this to maintain independent peer identities.",
-        },
+        session_id: SESSION_ID_PROP,
       },
-      required: ["to_id", "message"],
+      required: withSessionId(["to_id", "message"]),
     },
   },
   {
@@ -302,13 +367,9 @@ const TOOLS = [
           type: "string" as const,
           description: "A 1-2 sentence summary of your current work",
         },
-        session_id: {
-          type: "string" as const,
-          description:
-            "Optional. Cowork session identifier (sandbox CWD). Desktop sessions pass this to maintain independent peer identities.",
-        },
+        session_id: SESSION_ID_PROP,
       },
-      required: ["summary"],
+      required: withSessionId(["summary"]),
     },
   },
   {
@@ -318,20 +379,47 @@ const TOOLS = [
     inputSchema: {
       type: "object" as const,
       properties: {
-        session_id: {
-          type: "string" as const,
-          description:
-            "Optional. Cowork session identifier (sandbox CWD). Desktop sessions pass this to maintain independent peer identities.",
-        },
+        session_id: SESSION_ID_PROP,
       },
+      required: withSessionId([]),
     },
   },
-];
+  ];
+}
+
+const TOOLS = buildTools(PEER_TYPE);
 
 // --- Tool handlers ---
 
 // Track pending message previews for dynamic tool descriptions
 let pendingMessagePreview = "";
+
+function missingSessionIdError(toolName: string): string {
+  let exampleArgs = "";
+  switch (toolName) {
+    case "set_summary":
+      exampleArgs = '"summary": "...",';
+      break;
+    case "send_message":
+      exampleArgs = '"to_id": "...", "message": "...",';
+      break;
+  }
+  return `❌ claude-peers: Desktop sessions must pass \`session_id\` on "${toolName}" calls.
+
+This MCP server is shared across all Desktop/Cowork sessions on this machine. Without \`session_id\`, your tool call collides with every other session's host peer — summaries get overwritten and messages get routed to the wrong session.
+
+To find your session_id:
+1. Run \`pwd\` via the Bash tool to get your current sandbox working directory.
+2. Pass that exact path as \`session_id\` in every claude-peers tool call.
+
+Example:
+  ${toolName}({
+    ${exampleArgs}
+    "session_id": "<your pwd output>"
+  })
+
+Retry this call with session_id included.`;
+}
 
 mcp.setRequestHandler(ListToolsRequestSchema, async () => {
   if (!pendingMessagePreview) return { tools: TOOLS };
@@ -353,6 +441,27 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   log(`Tool call raw request: ${JSON.stringify(req.params)}`);
   const { name, arguments: args } = req.params;
   const sessionId = args?.session_id as string | undefined;
+
+  // GUARD: desktop sessions must pass session_id for identity-bearing tools.
+  // The MCP server process is shared across all Desktop/Cowork sessions, so
+  // without session_id, tool calls collapse onto the host peer (myId) and
+  // multiple sessions overwrite each other's summaries. list_peers is
+  // exempt because it's read-only and sessions need it for discovery.
+  if (PEER_TYPE === "desktop" && !sessionId && name !== "list_peers") {
+    log(
+      `REJECTED ${name}: no session_id. arg keys=[${Object.keys(args ?? {}).join(", ")}]`
+    );
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: missingSessionIdError(name),
+        },
+      ],
+      isError: true,
+    };
+  }
+
   const effectivePeerId =
     sessionId && PEER_TYPE === "desktop"
       ? await getDesktopPeerId(sessionId)
@@ -373,7 +482,9 @@ async function handleTool(name: string, args: Record<string, unknown> | undefine
           exclude_id: effectivePeerId,
         });
 
-        const header = `Your peer ID: ${effectivePeerId}\n\n`;
+        const header = effectivePeerId
+          ? `Your peer ID: ${effectivePeerId}\n\n`
+          : `⚠️ You have no peer identity yet. Desktop/Cowork sessions must run \`pwd\` via Bash and pass the result as \`session_id\` on every claude-peers tool call (except list_peers). Until you do, other peers cannot message you and set_summary/send_message will error.\n\n`;
 
         if (peers.length === 0) {
           return {
@@ -703,7 +814,7 @@ async function pollForPeer(peerId: PeerId) {
           }],
           maxTokens: 1024,
           includeContext: "thisServer",
-          systemPrompt: `You are a Claude Code instance connected to the claude-peers network. You just received a message from another peer. Process it and respond appropriately using the send_message tool. Your peer ID is ${myId}.`,
+          systemPrompt: `You are a Claude Code instance connected to the claude-peers network. You just received a message from another peer. Process it and respond appropriately using the send_message tool. Your peer ID is ${peerId}.`,
         }).then(() => {
           log(`Sampling delivered message from ${msg.from_id}`);
         }).catch((e) => {
@@ -782,83 +893,83 @@ async function main() {
   log(`Git root: ${myGitRoot ?? "(none)"}`);
   log(`TTY: ${tty ?? "(unknown)"}`);
 
-  // 3. Generate initial summary via gpt-5.4-nano (non-blocking, best-effort)
-  // CLAUDE_PEERS_NAME takes priority — it's the fixed identity for this session.
-  let initialSummary = PEER_NAME;
+  // 3. Register with broker
   if (PEER_NAME) {
     log(`Fixed identity: ${PEER_NAME}`);
   }
-  const summaryPromise = (async () => {
-    try {
-      const branch = await getGitBranch(myCwd);
-      const recentFiles = await getRecentFiles(myCwd);
-      const summary = await generateSummary({
-        cwd: myCwd,
-        git_root: myGitRoot,
-        git_branch: branch,
-        recent_files: recentFiles,
-      });
-      if (summary && !PEER_NAME) {
-        initialSummary = summary;
-        log(`Auto-summary: ${summary}`);
-      }
-    } catch (e) {
-      log(`Auto-summary failed (non-critical): ${e instanceof Error ? e.message : String(e)}`);
-    }
-  })();
-
-  // Wait briefly for summary, but don't block startup
-  await Promise.race([summaryPromise, new Promise((r) => setTimeout(r, 3000))]);
-
-  // 4. Register with broker
   log(`Peer type: ${PEER_TYPE}`);
-  const reg = await brokerFetch<RegisterResponse>("/register", {
-    pid: process.pid,
-    cwd: myCwd,
-    git_root: myGitRoot,
-    tty,
-    summary: initialSummary,
-    peer_type: PEER_TYPE,
-  });
-  myId = reg.id;
-  log(`Registered as peer ${myId}`);
 
-  // If broker restored a cached summary from a previous session, use it
-  if (reg.restored_summary) {
-    myLastSummary = reg.restored_summary;
-    initialSummary = reg.restored_summary;
-    log(`Restored summary from previous session: "${reg.restored_summary}"`);
-  } else if (initialSummary) {
-    myLastSummary = initialSummary;
-  }
-
-  // If summary generation is still running, update it when done
-  if (!initialSummary) {
-    summaryPromise.then(async () => {
-      if (initialSummary && myId) {
-        try {
-          await brokerFetch("/set-summary", { id: myId, summary: initialSummary });
-          myLastSummary = initialSummary;
-          log(`Late auto-summary applied: ${initialSummary}`);
-        } catch {
-          // Non-critical
-        }
-      }
+  if (PEER_TYPE === "desktop") {
+    // Desktop: the MCP server process is shared across all Cowork sessions.
+    // Do NOT register a host peer — it would become a "ghost" that collides
+    // with real sessions whenever they call a tool without session_id.
+    // Sessions register themselves lazily via getDesktopPeerId() when they
+    // pass session_id on their first tool call.
+    log("Desktop MCP server — skipping host peer registration. Sessions register lazily via session_id.");
+    myId = null;
+  } else {
+    // CLI: register the host peer normally, with cached summary restore
+    // and auto-summary fallback. The broker will return `restored_summary`
+    // if a previous session in this workspace cached one.
+    const reg = await brokerFetch<RegisterResponse>("/register", {
+      pid: process.pid,
+      cwd: myCwd,
+      git_root: myGitRoot,
+      tty,
+      summary: PEER_NAME,
+      peer_type: PEER_TYPE,
     });
+    myId = reg.id;
+    log(`Registered as peer ${myId}`);
+
+    if (reg.restored_summary) {
+      myLastSummary = reg.restored_summary;
+      log(`Restored summary from previous session: "${reg.restored_summary}"`);
+    } else if (PEER_NAME) {
+      myLastSummary = PEER_NAME;
+    } else {
+      // 4. No cached or fixed summary — generate one via gpt-5.4-nano (best-effort)
+      (async () => {
+        try {
+          const branch = await getGitBranch(myCwd);
+          const recentFiles = await getRecentFiles(myCwd);
+          const summary = await generateSummary({
+            cwd: myCwd,
+            git_root: myGitRoot,
+            git_branch: branch,
+            recent_files: recentFiles,
+          });
+          if (summary && myId && !myLastSummary) {
+            await brokerFetch("/set-summary", { id: myId, summary });
+            myLastSummary = summary;
+            log(`Auto-summary applied: ${summary}`);
+          }
+        } catch (e) {
+          log(`Auto-summary failed (non-critical): ${e instanceof Error ? e.message : String(e)}`);
+        }
+      })();
+    }
   }
 
   // 5. Connect MCP over stdio
+  // Register oninitialized BEFORE connect so it's in place when the client
+  // sends the initialized notification. Capabilities are only available
+  // after the handshake completes — checking after connect() is a race.
+  mcp.oninitialized = () => {
+    try {
+      // Claude Desktop declares some capabilities under `experimental` rather
+      // than the standard fields, so cast once to read everything we need.
+      const caps = mcp.getClientCapabilities() as
+        | { sampling?: unknown; elicitation?: unknown; experimental?: unknown }
+        | undefined;
+      hasSamplingSupport = !!caps?.sampling;
+      log(`Client capabilities: sampling=${hasSamplingSupport}, elicitation=${!!caps?.elicitation}, experimental=${JSON.stringify(caps?.experimental)}`);
+    } catch (e) {
+      log(`Could not read client capabilities: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
   await mcp.connect(new StdioServerTransport());
   log("MCP connected");
-
-  // 5b. Detect client capabilities for message delivery
-  try {
-    const caps = mcp.getClientCapabilities();
-    hasSamplingSupport = !!caps?.sampling;
-    log(`Client capabilities: sampling=${hasSamplingSupport}`);
-  } catch {
-    log("Could not read client capabilities");
-  }
 
   // 6. Start polling for inbound messages
   const pollTimer = setInterval(pollAndPushMessages, POLL_INTERVAL_MS);
@@ -913,7 +1024,9 @@ async function main() {
   process.on("SIGTERM", cleanup);
 }
 
-main().catch((e) => {
-  log(`Fatal: ${e instanceof Error ? e.message : String(e)}`);
-  process.exit(1);
-});
+if (import.meta.main) {
+  main().catch((e) => {
+    log(`Fatal: ${e instanceof Error ? e.message : String(e)}`);
+    process.exit(1);
+  });
+}

@@ -83,8 +83,11 @@ function cleanStalePeers() {
     }
   }
 
-  // Clean stale desktop peers by heartbeat timeout (PID check doesn't work — shared VM)
-  const staleTimeout = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+  // Clean stale desktop peers by heartbeat timeout (PID check doesn't work — shared VM).
+  // 30 minutes: desktop sessions can be idle for long stretches (user reading, thinking,
+  // working in another session). The MCP server process may be suspended by Claude Desktop
+  // when idle, stopping heartbeats — so a short timeout causes false positives.
+  const staleTimeout = new Date(Date.now() - 30 * 60 * 1000).toISOString();
   db.run("DELETE FROM messages WHERE delivered = 0 AND to_id IN (SELECT id FROM peers WHERE peer_type = 'desktop' AND last_seen < ?)", [staleTimeout]);
   db.run("DELETE FROM peers WHERE peer_type = 'desktop' AND last_seen < ?", [staleTimeout]);
 
