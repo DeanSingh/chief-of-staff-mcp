@@ -44,8 +44,12 @@ const PEER_NAME = process.env.CLAUDE_PEERS_NAME ?? "";
 const DEBUG_LOG_PATH =
   process.env.CLAUDE_PEERS_LOG ?? `${process.env.HOME}/.claude-peers.log`;
 
-// Detect if running inside Claude Desktop (launched via disclaimer wrapper)
+// Detect if running inside Claude Desktop (launched via disclaimer wrapper).
+// CLAUDE_PEERS_PEER_TYPE forces the result — useful for tests and as an
+// escape hatch if the ps-based detection ever misfires.
 function detectPeerType(): "cli" | "desktop" {
+  const forced = process.env.CLAUDE_PEERS_PEER_TYPE;
+  if (forced === "desktop" || forced === "cli") return forced;
   try {
     const ppid = process.ppid;
     if (ppid) {
@@ -203,8 +207,33 @@ let myLastSummary: string = ""; // Track the most recent summary for re-registra
 let hasSamplingSupport = false; // Whether the client supports sampling (createMessage)
 
 // For desktop (Cowork), multiple sessions share this server process.
-// Each session registers as a separate peer, keyed by session_id.
+// Each session registers as a separate peer, keyed by its peer_session value.
 const desktopPeers = new Map<string, { peerId: PeerId; summary: string }>();
+
+/**
+ * Session paths that are NOT unique per session and therefore cannot be used
+ * as an identity key.
+ *
+ * Cloud Cowork sessions all run with cwd `/home/claude`, so keying on `pwd`
+ * silently aliases every cloud session onto ONE peer: summaries overwrite each
+ * other and a message addressed to that peer can be delivered back to the
+ * sender. Local Cowork sandboxes get genuinely distinct paths
+ * (e.g. /sessions/busy-peaceful-goodall) and are fine.
+ *
+ * Nothing in the request carries a usable discriminator — the remote-tools
+ * dispatcher holds a per-session id but localMcpBridge drops it, and no _meta
+ * reaches us — so ambiguous sessions must claim a minted token instead.
+ */
+const AMBIGUOUS_SESSION_PATHS = new Set(["/home/claude", "/", "/root", "/app"]);
+
+export function isAmbiguousSession(value: string): boolean {
+  return AMBIGUOUS_SESSION_PATHS.has(value.trim().replace(/\/+$/, "") || "/");
+}
+
+/** Mints an unguessable, collision-free session token. */
+function mintSessionToken(): string {
+  return `cs_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
+}
 
 async function getDesktopPeerId(sessionId: string): Promise<PeerId> {
   const existing = desktopPeers.get(sessionId);
@@ -214,7 +243,7 @@ async function getDesktopPeerId(sessionId: string): Promise<PeerId> {
   // Seed with PEER_NAME so desktop sessions start with their assigned identity.
   const reg = await brokerFetch<RegisterResponse>("/register", {
     pid: process.pid,
-    cwd: sessionId, // Use session sandbox path as CWD — distinguishes sessions
+    cwd: sessionId, // Use session key as CWD — distinguishes sessions
     git_root: null,
     tty: null,
     summary: PEER_NAME,
@@ -241,6 +270,7 @@ IMPORTANT: When you receive a <channel source="claude-peers" ...> message, RESPO
 Read the from_id, from_summary, and from_cwd attributes to understand who sent the message. Reply by calling send_message with their from_id.
 
 Available tools:
+- claim_session: (Desktop only) Claim a unique peer identity and get your peer_session token. Call this first.
 - list_peers: Discover other Claude Code instances (scope: machine/directory/repo). Shows YOUR peer ID and all other peers with their IDs and summaries.
 - send_message: Send a message to another instance by peer ID
 - set_summary: Set a 1-2 sentence summary of what you're working on (visible to other peers)
@@ -249,11 +279,12 @@ Available tools:
 DESKTOP/COWORK SESSIONS ONLY — before doing anything else:
 - This MCP server is shared across ALL Desktop/Cowork sessions on the machine. You MUST pass \`peer_session\` on every tool call EXCEPT list_peers, or your call will error out.
 - The parameter is \`peer_session\`, NOT \`session_id\`. Claude Desktop reserves the name \`session_id\` and strips it in transit, so a value passed under that name never arrives.
-- To get your peer_session, run \`pwd\` via Bash. The output is your sandbox CWD — use that exact path as peer_session in every claude-peers tool call.
-- Remember your peer_session for the entire conversation and pass it consistently. If you forget it, run \`pwd\` again.
+- To get your peer_session: call \`claim_session\` with a short label for this session (e.g. "PM agent"). It returns a token like "cs_1a2b3c4d5e6f" — that token is your peer_session.
+- Do NOT use \`pwd\` as your peer_session. Every cloud Cowork session runs in /home/claude, so keying on it makes all cloud sessions share ONE identity: summaries overwrite each other and messages come back to the sender instead of reaching the intended agent. The server rejects it.
+- Remember your peer_session for the entire conversation and pass it consistently. Call claim_session again only if you have genuinely lost the token — each claim creates a new peer identity.
 
 CRITICAL FIRST STEPS — do these immediately when you start:
-1. (Desktop only) Run \`pwd\` via Bash to capture your peer_session.
+1. (Desktop only) Call \`claim_session\` with a short label to get your peer_session token.
 2. Call set_summary with your role/name and what you're working on (e.g. "Design agent. Reviewing clinician UX mockups."), passing peer_session if you are on Desktop.
 3. Call list_peers with scope "machine" to see who else is online and learn your own peer ID.
 4. If you have access to the Monitor tool (Claude Code v2.1.98+), start watching for incoming peer messages IMMEDIATELY:
@@ -330,6 +361,24 @@ export function buildTools(peerType: "cli" | "desktop") {
     isDesktop ? [...required, SESSION_PARAM] : required;
 
   return [
+  // Desktop only: CLI sessions get a host peer at startup and have no need to
+  // claim one — offering it there would just register a bogus desktop peer.
+  ...(!isDesktop ? [] : [{
+    name: "claim_session",
+    description:
+      "Claim a unique peer identity for this session. Call this FIRST if your working directory is not unique to your session — every cloud Cowork session runs in /home/claude, so `pwd` cannot tell them apart. Returns a peer_session token to pass on every subsequent call.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        label: {
+          type: "string" as const,
+          description:
+            'Short name for this session, e.g. "PM agent" or "Design Agent". Shown to other peers so they can tell your session apart.',
+        },
+      },
+      required: ["label"],
+    },
+  }]),
   {
     name: "list_peers",
     description:
@@ -424,17 +473,32 @@ This MCP server is shared across all Desktop/Cowork sessions on this machine. Wi
 
 NOTE: the parameter is \`${SESSION_PARAM}\`, NOT \`session_id\`. Claude Desktop's remote-tools layer reserves the name \`session_id\` and strips it before the call reaches this server, so a value passed under that name is silently discarded.
 
-To find your ${SESSION_PARAM}:
-1. Run \`pwd\` via the Bash tool to get your current sandbox working directory.
-2. Pass that exact path as \`${SESSION_PARAM}\` in every claude-peers tool call.
+To get your ${SESSION_PARAM}:
+1. Call claim_session({ "label": "<short name for this session, e.g. PM agent>" }).
+2. It returns a token like "cs_1a2b3c4d5e6f".
+3. Pass that token as \`${SESSION_PARAM}\` on every claude-peers tool call.
+
+Do NOT use \`pwd\` — every cloud Cowork session shares /home/claude, so it cannot tell sessions apart and the server rejects it.
 
 Example:
   ${toolName}({
     ${exampleArgs}
-    "${SESSION_PARAM}": "<your pwd output>"
+    "${SESSION_PARAM}": "cs_1a2b3c4d5e6f"
   })
 
 Retry this call with ${SESSION_PARAM} included.`;
+}
+
+function ambiguousSessionError(toolName: string, value: string): string {
+  return `❌ claude-peers: "${value}" is not a unique session identifier, so "${toolName}" was rejected.
+
+Every cloud Cowork session runs with this same working directory. If sessions keyed on it, they would all share ONE peer identity: your summary would overwrite another agent's, and a message addressed to that peer could be delivered back to you instead of the agent you meant to reach.
+
+Fix — claim your own identity, then reuse it:
+1. Call claim_session({ "label": "<short name for this session, e.g. PM agent>" }).
+2. It returns a token like "cs_1a2b3c4d5e6f".
+3. Pass that token as \`${SESSION_PARAM}\` on EVERY later claude-peers call, including a retry of this one.
+4. Remember the token for the whole conversation. If you lose it, call claim_session again — but reuse it whenever you still have it, since each claim creates a new peer identity.`;
 }
 
 mcp.setRequestHandler(ListToolsRequestSchema, async () => {
@@ -463,12 +527,33 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     | string
     | undefined;
 
-  // GUARD: desktop sessions must pass session_id for identity-bearing tools.
-  // The MCP server process is shared across all Desktop/Cowork sessions, so
-  // without session_id, tool calls collapse onto the host peer (myId) and
-  // multiple sessions overwrite each other's summaries. list_peers is
-  // exempt because it's read-only and sessions need it for discovery.
-  if (PEER_TYPE === "desktop" && !sessionId && name !== "list_peers") {
+  // Tools that establish identity rather than requiring one.
+  const EXEMPT = name === "list_peers" || name === "claim_session";
+
+  // GUARD 2: reject session keys that are not unique per session. Accepting
+  // /home/claude silently aliases every cloud Cowork session onto one peer —
+  // summaries overwrite each other and messages can be delivered back to the
+  // sender. Failing loudly here is strictly better than aliasing quietly.
+  if (PEER_TYPE === "desktop" && !EXEMPT && sessionId && isAmbiguousSession(sessionId)) {
+    log(`REJECTED ${name}: ambiguous ${SESSION_PARAM}="${sessionId}"`);
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: ambiguousSessionError(name, sessionId),
+        },
+      ],
+      isError: true,
+    };
+  }
+
+  // GUARD 1: desktop sessions must pass a session key for identity-bearing
+  // tools. The MCP server process is shared across all Desktop/Cowork
+  // sessions, so without one, tool calls collapse onto the host peer (myId)
+  // and multiple sessions overwrite each other's summaries. list_peers is
+  // exempt because it's read-only and sessions need it for discovery;
+  // claim_session is exempt because it is how a session gets a key.
+  if (PEER_TYPE === "desktop" && !sessionId && !EXEMPT) {
     log(
       `REJECTED ${name}: no ${SESSION_PARAM}. arg keys=[${Object.keys(args ?? {}).join(", ")}]`
     );
@@ -493,6 +578,49 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
 
 async function handleTool(name: string, args: Record<string, unknown> | undefined, effectivePeerId: PeerId | null, sessionId: string | undefined): Promise<any> {
   switch (name) {
+    case "claim_session": {
+      const label = ((args as { label?: string })?.label ?? "").trim();
+      const token = mintSessionToken();
+      try {
+        const reg = await brokerFetch<RegisterResponse>("/register", {
+          pid: process.pid,
+          cwd: label ? `${myCwd} (${label})` : myCwd,
+          git_root: null,
+          tty: null,
+          summary: label || PEER_NAME,
+          peer_type: "desktop",
+        });
+        desktopPeers.set(token, { peerId: reg.id, summary: label || PEER_NAME });
+        log(`Claimed session ${token} -> peer ${reg.id} (${label})`);
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `✅ Session claimed. Your peer ID is ${reg.id}.
+
+Your ${SESSION_PARAM} token is:
+
+    ${token}
+
+Pass \`"${SESSION_PARAM}": "${token}"\` on EVERY subsequent claude-peers call (send_message, set_summary, check_messages). Remember it for the whole conversation — do not call claim_session again unless you have lost it, because each claim creates a new peer identity.
+
+Next: call set_summary (with your token) to tell other peers what you are working on.`,
+            },
+          ],
+        };
+      } catch (e) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Error claiming session: ${e instanceof Error ? e.message : String(e)}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+
     case "list_peers": {
       const scope = (args as { scope: string }).scope as "machine" | "directory" | "repo";
       try {
@@ -505,7 +633,7 @@ async function handleTool(name: string, args: Record<string, unknown> | undefine
 
         const header = effectivePeerId
           ? `Your peer ID: ${effectivePeerId}\n\n`
-          : `⚠️ You have no peer identity yet. Desktop/Cowork sessions must run \`pwd\` via Bash and pass the result as \`${SESSION_PARAM}\` on every claude-peers tool call (except list_peers). Note the parameter is \`${SESSION_PARAM}\`, NOT \`session_id\` — Claude Desktop reserves that name and strips it in transit. Until you do, other peers cannot message you and set_summary/send_message will error.\n\n`;
+          : `⚠️ You have no peer identity yet. Desktop/Cowork sessions must call \`claim_session\` (with a short label) to get a \`${SESSION_PARAM}\` token, then pass that token on every claude-peers tool call except list_peers. Do NOT use \`pwd\` — every cloud session shares /home/claude and would collide onto one identity. Note the parameter is \`${SESSION_PARAM}\`, NOT \`session_id\` — Claude Desktop reserves that name and strips it in transit. Until you claim one, other peers cannot message you and set_summary/send_message will error.\n\n`;
 
         if (peers.length === 0) {
           return {
