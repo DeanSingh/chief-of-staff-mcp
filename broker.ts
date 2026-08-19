@@ -60,6 +60,14 @@ db.run(`
   )
 `);
 
+// Migration: desktop peers are keyed by their claimed session token so the id
+// survives MCP server process churn.
+const peerCols = (db.query("PRAGMA table_info(peers)").all() as { name: string }[]).map((c) => c.name);
+if (!peerCols.includes("session_token")) {
+  db.run("ALTER TABLE peers ADD COLUMN session_token TEXT");
+}
+db.run("CREATE INDEX IF NOT EXISTS idx_peers_session_token ON peers(session_token)");
+
 // Cache summaries by workspace so they survive across sessions
 db.run(`
   CREATE TABLE IF NOT EXISTS summary_cache (
@@ -71,7 +79,12 @@ db.run(`
 
 // Clean up stale peers (PIDs that no longer exist) on startup
 function cleanStalePeers() {
-  const peers = db.query("SELECT id, pid, peer_type FROM peers").all() as { id: string; pid: number; peer_type: string }[];
+  // PID liveness applies to CLI peers only. A desktop peer's pid is whichever
+  // MCP server process happened to serve its last call — Desktop spawns
+  // several and respawns them on bridge reconnects — so reaping desktop peers
+  // by pid deleted live sessions (and their undelivered messages) every time
+  // a bridge process exited. Desktop peers are reaped by heartbeat below.
+  const peers = db.query("SELECT id, pid, peer_type FROM peers WHERE peer_type != 'desktop'").all() as { id: string; pid: number; peer_type: string }[];
   for (const peer of peers) {
     try {
       // Check if process is still alive (signal 0 doesn't kill, just checks)
@@ -107,8 +120,16 @@ setInterval(cleanStalePeers, 30_000);
 // --- Prepared statements ---
 
 const insertPeer = db.prepare(`
-  INSERT INTO peers (id, pid, cwd, git_root, tty, summary, peer_type, registered_at, last_seen)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO peers (id, pid, cwd, git_root, tty, summary, peer_type, registered_at, last_seen, session_token)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`);
+
+const selectPeerBySessionToken = db.prepare(`
+  SELECT * FROM peers WHERE session_token = ?
+`);
+
+const touchPeerBySessionToken = db.prepare(`
+  UPDATE peers SET pid = ?, last_seen = ?, summary = CASE WHEN ? = '' THEN summary ELSE ? END WHERE session_token = ?
 `);
 
 const updateLastSeen = db.prepare(`
@@ -193,11 +214,24 @@ function getCachedSummary(cwd: string, git_root: string | null): string | null {
 // --- Request handlers ---
 
 function handleRegister(body: RegisterRequest): RegisterResponse {
-  const id = generateId();
   const now = new Date().toISOString();
 
   const peerType = body.peer_type ?? "cli";
   const isCli = peerType !== "desktop";
+
+  // Desktop sessions keyed by token get their existing peer back. This is
+  // what keeps a Cowork session's peer id stable across the several MCP
+  // server processes Desktop runs (and respawns) for the same session.
+  const token = !isCli && body.session_token ? body.session_token : null;
+  if (token) {
+    const existing = selectPeerBySessionToken.get(token) as Peer | null;
+    if (existing) {
+      touchPeerBySessionToken.run(body.pid, now, body.summary ?? "", body.summary ?? "", token);
+      return { id: existing.id, restored_summary: body.summary ? undefined : existing.summary };
+    }
+  }
+
+  const id = generateId();
 
   // Remove any existing registration for this PID (re-registration).
   // Desktop sessions share one VM PID, so PID-based dedup would delete other active sessions.
@@ -219,7 +253,7 @@ function handleRegister(body: RegisterRequest): RegisterResponse {
     cacheSummary(body.cwd, body.git_root, summary);
   }
 
-  insertPeer.run(id, body.pid, body.cwd, body.git_root, body.tty, summary, peerType, now, now);
+  insertPeer.run(id, body.pid, body.cwd, body.git_root, body.tty, summary, peerType, now, now, token);
   return { id, restored_summary: summary !== body.summary ? summary : undefined };
 }
 

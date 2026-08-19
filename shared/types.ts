@@ -33,6 +33,13 @@ export interface RegisterRequest {
   tty: string | null;
   summary: string;
   peer_type: PeerType;
+  /**
+   * Desktop only: the session's claimed peer_session token. The broker keys
+   * the peer on it so the SAME peer id is returned no matter which MCP
+   * server process (Desktop spawns several, and respawns them on bridge
+   * reconnects) is serving the call.
+   */
+  session_token?: string;
 }
 
 export interface RegisterResponse {

@@ -261,15 +261,23 @@ async function getDesktopPeerId(sessionId: string): Promise<PeerId> {
 
   // Register a new peer for this desktop session.
   // Seed with PEER_NAME so desktop sessions start with their assigned identity.
+  // The broker keys desktop peers on session_token, so if another server
+  // process (or a previous incarnation of this one) already registered this
+  // session we get the SAME peer id back — no identity rotation.
   const reg = await brokerFetch<RegisterResponse>("/register", {
     pid: process.pid,
     cwd: sessionId, // Use session key as CWD — distinguishes sessions
     git_root: null,
     tty: null,
-    summary: PEER_NAME,
+    summary: "", // keep whatever summary the session already set
     peer_type: "desktop",
+    session_token: sessionId,
   });
-  desktopPeers.set(sessionId, { peerId: reg.id, summary: PEER_NAME });
+  const summary = reg.restored_summary ?? PEER_NAME;
+  if (!reg.restored_summary && PEER_NAME) {
+    await brokerFetch("/set-summary", { id: reg.id, summary: PEER_NAME }).catch(() => {});
+  }
+  desktopPeers.set(sessionId, { peerId: reg.id, summary });
   return reg.id;
 }
 
@@ -610,6 +618,7 @@ async function handleTool(name: string, args: Record<string, unknown> | undefine
           tty: null,
           summary: label || PEER_NAME,
           peer_type: "desktop",
+          session_token: token,
         });
         desktopPeers.set(token, { peerId: reg.id, summary: label || PEER_NAME });
         log(`Claimed session ${token} -> peer ${reg.id} (${label})`);
@@ -781,6 +790,7 @@ ${watchInstructions(reg.id)}`,
                 tty: null,
                 summary,
                 peer_type: "desktop",
+                session_token: sessionId,
               });
               desktopPeers.set(sessionId, { peerId: reg.id, summary });
               log(`Re-registered desktop session ${sessionId} as peer ${reg.id}`);

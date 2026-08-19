@@ -92,7 +92,7 @@ describe("broker /watch WebSocket feed", () => {
     const peek = await post<{ messages: Array<{ id: number; delivered: number }> }>("/peek-messages", { id: finance });
     expect(peek.messages).toHaveLength(1);
     expect(peek.messages[0]!.delivered).toBe(0);
-    expect(peek.messages[0]!.id).toBe(frame.id);
+    expect(peek.messages[0]!.id).toBe(frame.id as number);
 
     w.ws.close();
   });
@@ -108,6 +108,24 @@ describe("broker /watch WebSocket feed", () => {
     await Bun.sleep(100);
     expect(w.frames).toHaveLength(0);
     w.ws.close();
+  });
+
+  test("desktop peers keyed by session_token keep their id across server processes", async () => {
+    const reg = (pid: number, summary: string) => post<{ id: string; restored_summary?: string }>("/register", {
+      pid, cwd: "cs_tok1", git_root: null, tty: null, summary, peer_type: "desktop", session_token: "cs_tok1",
+    });
+    const first = await reg(LIVE_PIDS[0]!, "Finance agent");
+    // A different MCP server process (different pid) re-registers the same token
+    // with an empty summary — same id, and the summary the session set survives.
+    const second = await reg(LIVE_PIDS[1]!, "");
+    expect(second.id).toBe(first.id);
+    expect(second.restored_summary).toBe("Finance agent");
+    // Same token with a new summary updates in place, still same id.
+    const third = await reg(LIVE_PIDS[0]!, "Finance agent — closing Q3");
+    expect(third.id).toBe(first.id);
+    const peers = await post<Array<{ id: string; summary: string }>>("/list-peers", { scope: "machine", cwd: "/", git_root: null });
+    expect(peers.filter((p) => p.id === first.id)).toHaveLength(1);
+    expect(peers.find((p) => p.id === first.id)!.summary).toBe("Finance agent — closing Q3");
   });
 
   test("rejects browser upgrades (Origin header present)", async () => {
