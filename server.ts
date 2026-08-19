@@ -55,7 +55,9 @@ export function watchInstructions(peerId: PeerId): string {
 
     Monitor({ ws: { url: "${watchUrl(peerId)}" }, description: "claude-peers inbox ${peerId}", persistent: true, timeout_ms: 3600000 })
 
-Each frame is JSON: {"type":"peer_message","from_id":"...","from_summary":"...","text":"..."}. When one arrives, PAUSE your current work, reply with send_message(to_id=from_id), then call check_messages to ack. If your Monitor lacks the ws option, use command: "bun ${import.meta.dir}/cli.ts watch ${peerId}" instead.`;
+Each frame is JSON: {"type":"peer_message","from_id":"...","from_summary":"...","text":"..."}. When one arrives, PAUSE your current work, reply with send_message(to_id=from_id), then call check_messages to ack. If your Monitor lacks the ws option, use command: "bun ${import.meta.dir}/cli.ts watch ${peerId}" instead.
+
+ONLY IF YOU RUN ON THIS MACHINE. The feed is on the broker host's loopback. If \`pwd\` is /home/claude you are a cloud Cowork sandbox and cannot reach it — skip the Monitor (it will fail with close code 1006); you will receive peer messages on your next claude-peers tool call or via check_messages.`;
 }
 const POLL_INTERVAL_MS = 1000;
 const HEARTBEAT_INTERVAL_MS = 15_000;
