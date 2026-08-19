@@ -140,57 +140,48 @@ switch (cmd) {
     // Stream incoming messages to stdout, one line per message.
     // Designed for use with Claude Code's Monitor tool — each stdout line
     // becomes a notification that Claude reacts to mid-conversation.
+    // (Monitor's native `ws` source can subscribe to the same URL directly;
+    // this command is the fallback for harnesses without it.)
+    //
+    // Subscribes to the broker's WebSocket feed (ws://.../watch/<peer>), which
+    // is a wake signal only: nothing is acked, so the MCP server's
+    // check_messages / piggyback fallback still works.
     //
     // Format: single-line JSON so multi-line message text is preserved.
     // Claude sees: [claude-peers] {"from":"abc","summary":"...","text":"..."}
-    console.error(`[claude-peers] Watching peer ${peerId} for incoming messages (Ctrl+C to stop)`);
+    const wsUrl = `${BROKER_URL.replace(/^http/, "ws")}/watch/${encodeURIComponent(peerId)}`;
+    console.error(`[claude-peers] Watching peer ${peerId} for incoming messages via ${wsUrl} (Ctrl+C to stop)`);
 
-    // Track last seen id so we only report new messages (peek, don't ack,
-    // so the MCP server's piggyback/check_messages fallback still works).
-    let sinceId = 0;
-    let peersCache: Array<{ id: string; summary: string }> = [];
-    let peersCacheTime = 0;
-
+    let backoff = 1000;
     while (true) {
-      try {
-        const result = await brokerFetch<{
-          messages: Array<{ id: number; from_id: string; text: string; sent_at: string }>;
-        }>("/peek-messages", { id: peerId, since_id: sinceId });
-
-        if (result.messages.length > 0) {
-          // Refresh peer cache at most once per 10s for sender summaries
-          if (Date.now() - peersCacheTime > 10_000) {
-            try {
-              peersCache = await brokerFetch<Array<{ id: string; summary: string }>>(
-                "/list-peers",
-                { scope: "machine", cwd: "/", git_root: null }
-              );
-              peersCacheTime = Date.now();
-            } catch {
-              // Non-critical
-            }
-          }
-
-          for (const msg of result.messages) {
-            if (msg.id > sinceId) sinceId = msg.id;
-            const sender = peersCache.find((p) => p.id === msg.from_id);
+      await new Promise<void>((resolve) => {
+        const ws = new WebSocket(wsUrl);
+        ws.onopen = () => { backoff = 1000; };
+        ws.onmessage = (ev) => {
+          try {
+            const frame = JSON.parse(String(ev.data)) as {
+              type: string; from_id?: string; from_summary?: string; sent_at?: string; text?: string;
+            };
+            if (frame.type !== "peer_message") return; // "watching" handshake etc.
             const payload = {
-              from: msg.from_id,
-              summary: sender?.summary ?? "",
-              sent_at: msg.sent_at,
-              text: msg.text,
+              from: frame.from_id,
+              summary: frame.from_summary ?? "",
+              sent_at: frame.sent_at,
+              text: frame.text,
             };
             // One line of JSON per message — Monitor feeds this to Claude as a notification
             console.log(`[claude-peers] ${JSON.stringify(payload)}`);
+          } catch {
+            // ignore malformed frame
           }
-        }
-      } catch (e) {
-        console.error(`[claude-peers] Poll error: ${e instanceof Error ? e.message : String(e)}`);
-      }
-
-      await new Promise((r) => setTimeout(r, 1000));
+        };
+        ws.onerror = () => { /* onclose follows */ };
+        ws.onclose = () => resolve();
+      });
+      console.error(`[claude-peers] Feed closed; reconnecting in ${backoff / 1000}s`);
+      await new Promise((r) => setTimeout(r, backoff));
+      backoff = Math.min(backoff * 2, 15_000);
     }
-    break;
   }
 
   case "kill-broker": {

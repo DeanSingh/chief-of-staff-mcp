@@ -111,3 +111,14 @@ describe("cli schema never demands a session parameter", () => {
     });
   }
 });
+
+describe("watch instructions", () => {
+  test("watchInstructions gives the Monitor ws call for the peer's feed", async () => {
+    const { watchInstructions, watchUrl } = await import("./server.ts");
+    const text = watchInstructions("abc123");
+    expect(watchUrl("abc123")).toMatch(/^ws:\/\/127\.0\.0\.1:\d+\/watch\/abc123$/);
+    expect(text).toContain(`Monitor({ ws: { url: "${watchUrl("abc123")}" }`);
+    expect(text).toContain("persistent: true");
+    expect(text).toContain("cli.ts watch abc123");
+  });
+});

@@ -282,15 +282,46 @@ function handleListPeers(body: ListPeersRequest): Peer[] {
   });
 }
 
-function handleSendMessage(body: SendMessageRequest): { ok: boolean; error?: string } {
+// --- WebSocket watchers ---
+// A peer (or a harness Monitor on its behalf) opens ws://host/watch/<peer-id>
+// and receives one JSON frame per inbound message. Frames are a wake signal
+// only: nothing is acked here, so the message stays in the DB until the peer
+// reads it via check_messages / poll.
+type WatchData = { peer: string };
+type WatchSocket = import("bun").ServerWebSocket<WatchData>;
+const watchers = new Map<string, Set<WatchSocket>>();
+
+function notifyWatchers(to_id: string, frame: unknown): number {
+  const set = watchers.get(to_id);
+  if (!set || set.size === 0) return 0;
+  const payload = JSON.stringify(frame);
+  let n = 0;
+  for (const ws of set) {
+    try { ws.send(payload); n++; } catch { /* dead socket; close handler cleans up */ }
+  }
+  return n;
+}
+
+function handleSendMessage(body: SendMessageRequest): { ok: boolean; error?: string; woke?: number } {
   // Verify target exists
   const target = db.query("SELECT id FROM peers WHERE id = ?").get(body.to_id) as { id: string } | null;
   if (!target) {
     return { ok: false, error: `Peer ${body.to_id} not found` };
   }
 
-  insertMessage.run(body.from_id, body.to_id, body.text, new Date().toISOString());
-  return { ok: true };
+  const sent_at = new Date().toISOString();
+  const res = insertMessage.run(body.from_id, body.to_id, body.text, sent_at);
+  const sender = db.query("SELECT summary, cwd FROM peers WHERE id = ?").get(body.from_id) as { summary: string; cwd: string } | null;
+  const woke = notifyWatchers(body.to_id, {
+    type: "peer_message",
+    id: Number(res.lastInsertRowid),
+    from_id: body.from_id,
+    from_summary: sender?.summary ?? "",
+    from_cwd: sender?.cwd ?? "",
+    sent_at,
+    text: body.text,
+  });
+  return { ok: true, woke };
 }
 
 function handlePollMessages(body: PollMessagesRequest): PollMessagesResponse {
@@ -321,14 +352,26 @@ function handleUnregister(body: { id: string }): void {
 
 // --- HTTP Server ---
 
-Bun.serve({
+Bun.serve<WatchData>({
   port: PORT,
   hostname: "127.0.0.1",
-  async fetch(req) {
+  async fetch(req, server) {
     const url = new URL(req.url);
     const path = url.pathname;
 
     if (req.method !== "POST") {
+      if (path.startsWith("/watch/")) {
+        // Watchers are local harness processes (Monitor, cli.ts watch), which
+        // never send an Origin header. Browsers always do — refuse them so a
+        // web page can't hijack a peer's message feed cross-site.
+        if (req.headers.get("origin") !== null) {
+          return new Response("forbidden origin", { status: 403 });
+        }
+        const peer = decodeURIComponent(path.slice("/watch/".length));
+        if (!peer) return new Response("missing peer id", { status: 400 });
+        if (server.upgrade(req, { data: { peer } })) return;
+        return new Response("websocket upgrade required", { status: 426 });
+      }
       if (path === "/health") {
         return Response.json({ status: "ok", peers: (selectAllPeers.all() as Peer[]).length });
       }
@@ -372,6 +415,20 @@ Bun.serve({
       const msg = e instanceof Error ? e.message : String(e);
       return Response.json({ error: msg }, { status: 500 });
     }
+  },
+  websocket: {
+    open(ws) {
+      let set = watchers.get(ws.data.peer);
+      if (!set) watchers.set(ws.data.peer, (set = new Set()));
+      set.add(ws);
+      ws.send(JSON.stringify({ type: "watching", peer: ws.data.peer }));
+    },
+    close(ws) {
+      const set = watchers.get(ws.data.peer);
+      set?.delete(ws);
+      if (set && set.size === 0) watchers.delete(ws.data.peer);
+    },
+    message() { /* watchers are receive-only */ },
   },
 });
 

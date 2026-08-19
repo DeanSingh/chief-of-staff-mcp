@@ -37,6 +37,26 @@ import {
 
 const BROKER_PORT = parseInt(process.env.CLAUDE_PEERS_PORT ?? "7899", 10);
 const BROKER_URL = `http://127.0.0.1:${BROKER_PORT}`;
+const BROKER_WS_URL = `ws://127.0.0.1:${BROKER_PORT}`;
+
+/** WebSocket feed URL for a peer's inbound messages (see broker /watch). */
+export function watchUrl(peerId: PeerId): string {
+  return `${BROKER_WS_URL}/watch/${encodeURIComponent(peerId)}`;
+}
+
+/**
+ * The exact Monitor invocation a session should run to get woken on inbound
+ * peer messages. Returned from claim_session/list_peers because Desktop's
+ * localMcpBridge drops server-level instructions — tool responses are the
+ * only channel guaranteed to reach a Desktop/Cowork agent.
+ */
+export function watchInstructions(peerId: PeerId): string {
+  return `To be woken instantly when a peer messages you, arm a Monitor now (Claude Code v2.1.98+ / Cowork):
+
+    Monitor({ ws: { url: "${watchUrl(peerId)}" }, description: "claude-peers inbox ${peerId}", persistent: true, timeout_ms: 3600000 })
+
+Each frame is JSON: {"type":"peer_message","from_id":"...","from_summary":"...","text":"..."}. When one arrives, PAUSE your current work, reply with send_message(to_id=from_id), then call check_messages to ack. If your Monitor lacks the ws option, use command: "bun ${import.meta.dir}/cli.ts watch ${peerId}" instead.`;
+}
 const POLL_INTERVAL_MS = 1000;
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const BROKER_SCRIPT = new URL("./broker.ts", import.meta.url).pathname;
@@ -287,11 +307,12 @@ CRITICAL FIRST STEPS — do these immediately when you start:
 1. (Desktop only) Call \`claim_session\` with a short label to get your peer_session token.
 2. Call set_summary with your role/name and what you're working on (e.g. "Design agent. Reviewing clinician UX mockups."), passing peer_session if you are on Desktop.
 3. Call list_peers with scope "machine" to see who else is online and learn your own peer ID.
-4. If you have access to the Monitor tool (Claude Code v2.1.98+), start watching for incoming peer messages IMMEDIATELY:
-     Monitor(command: "bun /Users/deansingh/git/claude-peers-mcp/cli.ts watch <your-peer-id>")
-   Each stdout line is a JSON-encoded peer message: \`[claude-peers] {"from":"<id>","summary":"<summary>","text":"<message>"}\`
-   When Monitor reports a line, PAUSE your current work and reply using send_message with to_id="<from>".
-   This is the reliable real-time channel for Desktop sessions (which lack native channel push).
+4. If you have access to the Monitor tool (Claude Code v2.1.98+ / Cowork), start watching for incoming peer messages IMMEDIATELY:
+     Monitor({ ws: { url: "ws://127.0.0.1:${BROKER_PORT}/watch/<your-peer-id>" }, description: "claude-peers inbox", persistent: true, timeout_ms: 3600000 })
+   (fallback if ws is unsupported: Monitor(command: "bun ${import.meta.dir}/cli.ts watch <your-peer-id>"))
+   Each event is one JSON peer message with from_id, from_summary and text.
+   When an event arrives, PAUSE your current work, reply using send_message with to_id="<from_id>", then check_messages to ack.
+   This is the reliable real-time channel for Desktop sessions (which lack native channel push). claim_session and list_peers print the exact call for your peer ID.
 
 Use summaries to identify peers — peer IDs change on restart, but summaries tell you who's who.
 
@@ -604,7 +625,9 @@ Your ${SESSION_PARAM} token is:
 
 Pass \`"${SESSION_PARAM}": "${token}"\` on EVERY subsequent claude-peers call (send_message, set_summary, check_messages). Remember it for the whole conversation — do not call claim_session again unless you have lost it, because each claim creates a new peer identity.
 
-Next: call set_summary (with your token) to tell other peers what you are working on.`,
+Next: call set_summary (with your token) to tell other peers what you are working on.
+
+${watchInstructions(reg.id)}`,
             },
           ],
         };
@@ -632,7 +655,7 @@ Next: call set_summary (with your token) to tell other peers what you are workin
         });
 
         const header = effectivePeerId
-          ? `Your peer ID: ${effectivePeerId}\n\n`
+          ? `Your peer ID: ${effectivePeerId}\n\n${watchInstructions(effectivePeerId)}\n\n`
           : `⚠️ You have no peer identity yet. Desktop/Cowork sessions must call \`claim_session\` (with a short label) to get a \`${SESSION_PARAM}\` token, then pass that token on every claude-peers tool call except list_peers. Do NOT use \`pwd\` — every cloud session shares /home/claude and would collide onto one identity. Note the parameter is \`${SESSION_PARAM}\`, NOT \`session_id\` — Claude Desktop reserves that name and strips it in transit. Until you claim one, other peers cannot message you and set_summary/send_message will error.\n\n`;
 
         if (peers.length === 0) {
