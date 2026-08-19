@@ -328,8 +328,7 @@ Use summaries to identify peers — peer IDs change on restart, but summaries te
 
 MESSAGING ROUTING — each peer has a Type (cli or desktop) shown in list_peers:
 - To message a "cli" peer: use send_message (they receive it instantly via channel push)
-- To message a "desktop" peer: use send_message (they receive it via Monitor-driven watch, on their next tool call, or via dispatch:send_message). If you are ALSO a desktop session and have access to dispatch:send_message, prefer that — it wakes idle sessions immediately.
-- To message another desktop session from desktop: use dispatch:send_message with their session ID (from session_info:list_sessions) for instant delivery.` +
+- To message a "desktop" peer: use send_message. Local sessions with a Monitor ws watch are woken instantly; cloud Cowork sessions receive it on their next claude-peers tool call or check_messages. Desktop peers are pull-based — if you need an answer promptly, say so in the message so the human can nudge them.` +
       (PEER_NAME ? `\n\nYour assigned identity is: "${PEER_NAME}". Always include this name when setting your summary. This is who you are on the network — do not adopt a different identity even if other peers' summaries seem to conflict.` : ""),
   }
 );
