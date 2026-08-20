@@ -80,7 +80,7 @@ describe("broker /watch WebSocket feed", () => {
     const send = await post<{ ok: boolean; woke: number }>("/send-message", {
       from_id: cos, to_id: finance, text: "pull Q3 burn",
     });
-    expect(send).toEqual({ ok: true, woke: 1 });
+    expect(send).toMatchObject({ ok: true, woke: 1, target_type: "desktop" });
 
     const frame = (await w.next()) as Record<string, unknown>;
     expect(frame).toMatchObject({
@@ -126,6 +126,32 @@ describe("broker /watch WebSocket feed", () => {
     const peers = await post<Array<{ id: string; summary: string }>>("/list-peers", { scope: "machine", cwd: "/", git_root: null });
     expect(peers.filter((p) => p.id === first.id)).toHaveLength(1);
     expect(peers.find((p) => p.id === first.id)!.summary).toBe("Finance agent — closing Q3");
+  });
+
+  test("a reaped desktop peer resurrects under its original id with mail intact", async () => {
+    const reg = () => post<{ id: string }>("/register", {
+      pid: LIVE_PIDS[0]!, cwd: "cs_resur", git_root: null, tty: null, summary: "PM agent", peer_type: "desktop", session_token: "cs_resur",
+    });
+    const first = await reg();
+    const sender = await register("Sender", "cli");
+    await post("/send-message", { from_id: sender, to_id: first.id, text: "while you were out" });
+    // Simulate heartbeat expiry: the peers row is deleted (as cleanStalePeers
+    // does), but messages and the token mapping remain.
+    await post("/unregister", { id: first.id });
+    // Session comes back, same token -> SAME id, queued mail still addressed to it.
+    const back = await reg();
+    expect(back.id).toBe(first.id);
+    const peek = await post<{ messages: Array<{ text: string }> }>("/peek-messages", { id: back.id });
+    expect(peek.messages.map((m) => m.text)).toContain("while you were out");
+  });
+
+  test("cli re-register with the same pid keeps the same id", async () => {
+    const reg = (summary: string) => post<{ id: string }>("/register", {
+      pid: LIVE_PIDS[1]!, cwd: "/tmp/cli-stable", git_root: null, tty: "ttys099", summary, peer_type: "cli",
+    });
+    const a = await reg("QA agent");
+    const b = await reg(""); // MCP server respawned by /mcp reconnect
+    expect(b.id).toBe(a.id);
   });
 
   test("rejects browser upgrades (Origin header present)", async () => {

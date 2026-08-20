@@ -68,6 +68,18 @@ if (!peerCols.includes("session_token")) {
 }
 db.run("CREATE INDEX IF NOT EXISTS idx_peers_session_token ON peers(session_token)");
 
+// Durable session_token -> peer id mapping. The peers row is ephemeral (a
+// desktop peer expires after 30 min without heartbeats), but the session and
+// the addresses other agents hold for it are not — so a returning session
+// must get the SAME id back even when its row was reaped.
+db.run(`
+  CREATE TABLE IF NOT EXISTS desktop_tokens (
+    token TEXT PRIMARY KEY,
+    peer_id TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )
+`);
+
 // Cache summaries by workspace so they survive across sessions
 db.run(`
   CREATE TABLE IF NOT EXISTS summary_cache (
@@ -101,11 +113,14 @@ function cleanStalePeers() {
   // working in another session). The MCP server process may be suspended by Claude Desktop
   // when idle, stopping heartbeats — so a short timeout causes false positives.
   const staleTimeout = new Date(Date.now() - 30 * 60 * 1000).toISOString();
-  db.run("DELETE FROM messages WHERE delivered = 0 AND to_id IN (SELECT id FROM peers WHERE peer_type = 'desktop' AND last_seen < ?)", [staleTimeout]);
+  // Keep undelivered desktop mail: the id survives expiry via desktop_tokens,
+  // so a returning session picks its queue up. Bounded by the TTL below.
   db.run("DELETE FROM peers WHERE peer_type = 'desktop' AND last_seen < ?", [staleTimeout]);
 
-  // TTL: delivered messages > 24h, summary cache > 7d
+  // TTL: delivered messages > 24h, undelivered > 72h (recipient never came back), summary cache > 7d
   db.run("DELETE FROM messages WHERE delivered = 1 AND sent_at < ?", [new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()]);
+  db.run("DELETE FROM messages WHERE delivered = 0 AND sent_at < ?", [new Date(Date.now() - 72 * 60 * 60 * 1000).toISOString()]);
+  db.run("DELETE FROM desktop_tokens WHERE updated_at < ?", [new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()]);
   db.run("DELETE FROM summary_cache WHERE updated_at < ?", [new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()]);
 }
 
@@ -227,18 +242,40 @@ function handleRegister(body: RegisterRequest): RegisterResponse {
     const existing = selectPeerBySessionToken.get(token) as Peer | null;
     if (existing) {
       touchPeerBySessionToken.run(body.pid, now, body.summary ?? "", body.summary ?? "", token);
+      db.run("UPDATE desktop_tokens SET updated_at = ? WHERE token = ?", [now, token]);
       return { id: existing.id, restored_summary: body.summary ? undefined : existing.summary };
+    }
+    // Row was reaped (session idled past the heartbeat window) but the token
+    // is known: resurrect the peer under its ORIGINAL id so addresses other
+    // agents hold stay valid and queued mail is still addressed correctly.
+    const mapped = db.query("SELECT peer_id FROM desktop_tokens WHERE token = ?").get(token) as { peer_id: string } | null;
+    if (mapped) {
+      insertPeer.run(mapped.peer_id, body.pid, body.cwd, body.git_root, body.tty, body.summary ?? "", peerType, now, now, token);
+      db.run("UPDATE desktop_tokens SET updated_at = ? WHERE token = ?", [now, token]);
+      return { id: mapped.peer_id };
     }
   }
 
   const id = generateId();
+  if (token) {
+    db.run("INSERT OR REPLACE INTO desktop_tokens (token, peer_id, updated_at) VALUES (?, ?, ?)", [token, id, now]);
+  }
 
-  // Remove any existing registration for this PID (re-registration).
-  // Desktop sessions share one VM PID, so PID-based dedup would delete other active sessions.
+  // CLI re-registration for a pid we already know (the Claude Code session
+  // pid — its MCP server process may have been respawned by /mcp reconnect):
+  // keep the SAME peer id so addresses other agents hold stay valid, and keep
+  // the summary unless a new one is given.
+  // Desktop sessions share one VM PID, so PID-based matching would conflate
+  // other active sessions; they are keyed by session_token above instead.
   if (isCli) {
-    const existing = db.query("SELECT id FROM peers WHERE pid = ?").get(body.pid) as { id: string } | null;
+    const existing = db.query("SELECT id, summary FROM peers WHERE pid = ? AND peer_type != 'desktop'").get(body.pid) as { id: string; summary: string } | null;
     if (existing) {
-      deletePeer.run(existing.id);
+      db.run(
+        "UPDATE peers SET cwd = ?, git_root = ?, tty = ?, last_seen = ?, summary = CASE WHEN ? = '' THEN summary ELSE ? END WHERE id = ?",
+        [body.cwd, body.git_root, body.tty, now, body.summary ?? "", body.summary ?? "", existing.id],
+      );
+      if (body.summary) cacheSummary(body.cwd, body.git_root, body.summary);
+      return { id: existing.id, restored_summary: body.summary ? undefined : existing.summary || undefined };
     }
   }
 
@@ -336,11 +373,11 @@ function notifyWatchers(to_id: string, frame: unknown): number {
   return n;
 }
 
-function handleSendMessage(body: SendMessageRequest): { ok: boolean; error?: string; woke?: number } {
+function handleSendMessage(body: SendMessageRequest): { ok: boolean; error?: string; woke?: number; target_last_seen?: string; target_type?: string } {
   // Verify target exists
-  const target = db.query("SELECT id FROM peers WHERE id = ?").get(body.to_id) as { id: string } | null;
+  const target = db.query("SELECT id, last_seen, peer_type FROM peers WHERE id = ?").get(body.to_id) as { id: string; last_seen: string; peer_type: string } | null;
   if (!target) {
-    return { ok: false, error: `Peer ${body.to_id} not found` };
+    return { ok: false, error: `Peer ${body.to_id} not found (stale or expired ID — call list_peers and re-send)` };
   }
 
   const sent_at = new Date().toISOString();
@@ -355,7 +392,7 @@ function handleSendMessage(body: SendMessageRequest): { ok: boolean; error?: str
     sent_at,
     text: body.text,
   });
-  return { ok: true, woke };
+  return { ok: true, woke, target_last_seen: target.last_seen, target_type: target.peer_type };
 }
 
 function handlePollMessages(body: PollMessagesRequest): PollMessagesResponse {

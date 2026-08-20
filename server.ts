@@ -39,6 +39,16 @@ const BROKER_PORT = parseInt(process.env.CLAUDE_PEERS_PORT ?? "7899", 10);
 const BROKER_URL = `http://127.0.0.1:${BROKER_PORT}`;
 const BROKER_WS_URL = `ws://127.0.0.1:${BROKER_PORT}`;
 
+/**
+ * The pid a CLI peer registers under. This MCP server is a child of the
+ * Claude Code process; a `/mcp` reconnect spawns a NEW server process for the
+ * SAME session, so keying on our own pid rotated the peer id on every
+ * reconnect (and orphaned mail addressed to the old id). The parent pid is
+ * the session itself and survives reconnects. Falls back to our own pid when
+ * run standalone.
+ */
+const HOST_PID = process.ppid && process.ppid > 1 ? process.ppid : process.pid;
+
 /** WebSocket feed URL for a peer's inbound messages (see broker /watch). */
 export function watchUrl(peerId: PeerId): string {
   return `${BROKER_WS_URL}/watch/${encodeURIComponent(peerId)}`;
@@ -170,7 +180,7 @@ async function ensureRegistered(): Promise<void> {
     if (!peers.some((p) => p.id === myId)) {
       const tty = getTty();
       const reg = await brokerFetch<RegisterResponse>("/register", {
-        pid: process.pid,
+        pid: HOST_PID,
         cwd: myCwd,
         git_root: myGitRoot,
         tty,
@@ -729,7 +739,7 @@ ${watchInstructions(reg.id)}`,
         };
       }
       try {
-        const result = await brokerFetch<{ ok: boolean; error?: string }>("/send-message", {
+        const result = await brokerFetch<{ ok: boolean; error?: string; woke?: number; target_last_seen?: string; target_type?: string }>("/send-message", {
           from_id: effectivePeerId,
           to_id,
           text: message,
@@ -740,8 +750,19 @@ ${watchInstructions(reg.id)}`,
             isError: true,
           };
         }
+        // Say what actually happened, so silence from the target is never
+        // mistaken for delivery. "Sent" only ever means "queued on the broker".
+        const ageSec = result.target_last_seen
+          ? Math.max(0, Math.round((Date.now() - Date.parse(result.target_last_seen)) / 1000))
+          : null;
+        const ageText = ageSec === null ? "" : ageSec < 60 ? `${ageSec}s ago` : `${Math.round(ageSec / 60)}m ago`;
+        const status = result.woke && result.woke > 0
+          ? `delivered — the peer has a live wake watch and was woken instantly`
+          : result.target_type === "cli"
+            ? `queued — CLI peer, pushed via channel if their session is running (last seen ${ageText})`
+            : `queued — desktop/cloud peer, they will see it on their next claude-peers tool call or check_messages (last seen ${ageText})`;
         return {
-          content: [{ type: "text" as const, text: `Message sent to peer ${to_id}` }],
+          content: [{ type: "text" as const, text: `Message sent to peer ${to_id}: ${status}.` }],
         };
       } catch (e) {
         return {
@@ -801,7 +822,7 @@ ${watchInstructions(reg.id)}`,
             } else {
               const tty = getTty();
               const reg = await brokerFetch<RegisterResponse>("/register", {
-                pid: process.pid,
+                pid: HOST_PID,
                 cwd: myCwd,
                 git_root: myGitRoot,
                 tty,
@@ -1095,7 +1116,7 @@ async function main() {
     // and auto-summary fallback. The broker will return `restored_summary`
     // if a previous session in this workspace cached one.
     const reg = await brokerFetch<RegisterResponse>("/register", {
-      pid: process.pid,
+      pid: HOST_PID,
       cwd: myCwd,
       git_root: myGitRoot,
       tty,
@@ -1103,7 +1124,7 @@ async function main() {
       peer_type: PEER_TYPE,
     });
     myId = reg.id;
-    log(`Registered as peer ${myId}`);
+    log(`Registered as peer ${myId} (host pid ${HOST_PID})`);
 
     if (reg.restored_summary) {
       myLastSummary = reg.restored_summary;
@@ -1178,28 +1199,18 @@ async function main() {
     await Promise.all(beats);
   }, HEARTBEAT_INTERVAL_MS);
 
-  // 8. Clean up on exit
-  const cleanup = async () => {
+  // 8. Clean up on exit.
+  // Deliberately do NOT unregister any peers here. This process is only the
+  // transport: Desktop respawns MCP server processes on every bridge
+  // reconnect, and the CLI respawns us on /mcp reconnect, while the SESSIONS
+  // those peers represent live on. Unregistering on shutdown was the root
+  // cause of peer-ID rotation (verified 2026-08-20: "Unregistered desktop
+  // session cs_45e87c2c5edd" at 23:05 → same token re-registered minutes
+  // later under a new id, stranding queued mail). The broker already reaps
+  // truly-dead peers: CLI by host-pid liveness, desktop by heartbeat timeout.
+  const cleanup = () => {
     clearInterval(pollTimer);
     clearInterval(heartbeatTimer);
-    if (myId) {
-      try {
-        await brokerFetch("/unregister", { id: myId });
-        log("Unregistered from broker");
-      } catch {
-        // Best effort
-      }
-    }
-    // Unregister all desktop session peers
-    for (const [sessionId, entry] of desktopPeers) {
-      try {
-        await brokerFetch("/unregister", { id: entry.peerId });
-        log(`Unregistered desktop session ${sessionId}`);
-      } catch {
-        // Best effort
-      }
-    }
-    desktopPeers.clear();
     process.exit(0);
   };
 
