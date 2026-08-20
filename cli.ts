@@ -188,8 +188,10 @@ switch (cmd) {
     try {
       const health = await brokerFetch<{ status: string; peers: number }>("/health");
       console.log(`Broker has ${health.peers} peer(s). Shutting down...`);
-      // Find and kill the broker process on the port
-      const proc = Bun.spawnSync(["lsof", "-ti", `:${BROKER_PORT}`]);
+      // Kill ONLY the listening process. A bare `lsof -ti :port` also lists
+      // every CLIENT with a connection to the broker — i.e. the MCP server of
+      // every live session — and SIGTERMing those disconnects the whole fleet.
+      const proc = Bun.spawnSync(["lsof", "-ti", `TCP:${BROKER_PORT}`, "-sTCP:LISTEN"]);
       const pids = new TextDecoder()
         .decode(proc.stdout)
         .trim()
