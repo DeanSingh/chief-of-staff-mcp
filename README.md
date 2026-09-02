@@ -1,4 +1,10 @@
-# claude-peers
+# chief-of-staff-mcp
+
+A chief-of-staff layer for Claude Code agents: one coordinator triages incoming work, delegates it to the right session, and reports back up — built on a local peer mesh.
+
+> Forked from [louislva/claude-peers-mcp](https://github.com/louislva/claude-peers-mcp) by [Louis Arge](https://github.com/louislva), which provides the peer discovery and messaging substrate this builds on. See [Attribution](#attribution).
+
+## The mesh underneath
 
 Let your Claude Code instances find each other and talk. When you're running 5 sessions across different projects, any Claude can discover the others and send messages that arrive instantly.
 
@@ -18,8 +24,8 @@ Let your Claude Code instances find each other and talk. When you're running 5 s
 ### 1. Install
 
 ```bash
-git clone https://github.com/louislva/claude-peers-mcp.git ~/claude-peers-mcp   # or wherever you like
-cd ~/claude-peers-mcp
+git clone https://github.com/DeanSingh/chief-of-staff-mcp.git ~/chief-of-staff-mcp   # or wherever you like
+cd ~/chief-of-staff-mcp
 bun install
 ```
 
@@ -119,7 +125,7 @@ Without the API key, Claude sets its own summary via the `set_summary` tool.
 You can also inspect and interact from the command line:
 
 ```bash
-cd ~/claude-peers-mcp
+cd ~/chief-of-staff-mcp
 
 bun cli.ts status            # broker status + all peers
 bun cli.ts peers             # list peers
@@ -141,3 +147,26 @@ bun cli.ts kill-broker       # stop the broker
 - [Bun](https://bun.sh)
 - Claude Code v2.1.80+
 - claude.ai login (channels require it — API key auth won't work)
+
+## Attribution
+
+This project is a fork of **[claude-peers-mcp](https://github.com/louislva/claude-peers-mcp)** by
+**[Louis Arge](https://github.com/louislva)**, forked at commit
+[`fc26491`](https://github.com/louislva/claude-peers-mcp/commit/fc2649154d6c5aa94ae4fc766989d7f247be0617).
+The original is MIT licensed; his copyright notice is preserved in [LICENSE](LICENSE) alongside ours,
+and his authorship is preserved in this repository's git history.
+
+The peer broker, MCP server scaffolding, and channel-push design are his. Changes in this fork:
+
+- Multi-tenant Desktop/Cowork session support (token-keyed peer identity via `claim_session`)
+- Peer identity that survives server-process churn, with mail retained for expired peers
+- A broker WebSocket wake feed (`/watch/<peer>`) for sessions that don't receive channel pushes
+- `kill-broker` scoped to the port's listener rather than every client on it
+- Diagnostics, a `watch` CLI command, and an expanded test suite
+
+Upstream has been inactive since April 2026 with a large open PR queue. This fork is maintained
+independently; it is not endorsed by the original author.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

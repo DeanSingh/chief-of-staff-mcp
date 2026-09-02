@@ -4,9 +4,25 @@ globs: "*.ts, *.tsx, *.html, *.css, *.js, *.jsx, package.json"
 alwaysApply: false
 ---
 
-# claude-peers
+# chief-of-staff-mcp
 
-Peer discovery and messaging MCP channel for Claude Code instances.
+A chief-of-staff layer for Claude Code agents, built on a peer discovery and messaging MCP channel.
+
+Forked from [louislva/claude-peers-mcp](https://github.com/louislva/claude-peers-mcp) (MIT) at `fc26491`.
+
+## Naming: project vs. wire identity
+
+The *project* is `chief-of-staff-mcp`. The *wire identity* is still `claude-peers`, deliberately:
+
+| Thing | Value | Why |
+| --- | --- | --- |
+| MCP server key | `claude-peers` | It is the tool-name prefix (`mcp__claude-peers__*`); renaming breaks every config and running session |
+| Broker port | `7899` | Shared with upstream installs, which preserves interop |
+| SQLite path | `~/.claude-peers.db` | Renaming orphans existing peer state |
+| Env vars | `CLAUDE_PEERS_*` | Consistent with the above |
+
+Do not rename these casually. If they ever change, it must be one deliberate commit that also
+updates `.mcp.json`, every `CLAUDE.md` reference, and provides a migration path for the DB.
 
 ## Architecture
 
