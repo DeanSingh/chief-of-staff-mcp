@@ -211,6 +211,22 @@ nobody was looking at.
 *row* promptly, but must never be read as identity death, and must never delete
 mail. Reaping a row while the key survives is already exactly what Desktop does.
 
+> **Amended 2026-09-09, after implementation.** This section originally read as
+> though the pid lookup were *removed*. It is not: it survives as an explicit
+> fallback for when `CLAUDE_CODE_SESSION_ID` is absent (a standalone run, or an
+> older Claude Code), per the plan's backwards-compatibility constraint. Two
+> consequences the original wording obscured, both found only by the final
+> whole-branch review:
+>
+> 1. A session registering with a key that has **no mapping yet** must *adopt*
+>    the pid-matched peer rather than mint a new id. Otherwise every CLI session
+>    alive at upgrade time — which by definition has a pid-keyed row and no
+>    `peer_sessions` row — gets a duplicate peer on its next reconnect, and the
+>    old id's queued mail is orphaned for the full 72h TTL.
+> 2. `handleSendMessage` still treats row-absence as identity death, which is
+>    why the delivery guarantee is the narrow one stated in §11 — mail sent
+>    *before* a session died, not while it was down. Phase 1b owns widening it.
+
 `session_key` holds two kinds of value, by peer type:
 
 | Peer type | `session_key` | Source |
