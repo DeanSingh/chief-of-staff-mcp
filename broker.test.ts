@@ -215,53 +215,70 @@ describe("broker /watch WebSocket feed", () => {
     `, ["mig_test_token", "mig_peer_xyz", seedTime]);
     seedDb.close();
 
-    // Step 2: Spawn a broker against this seeded DB
-    let migProc = Bun.spawn(["bun", `${import.meta.dir}/broker.ts`], {
-      env: { ...process.env, CLAUDE_PEERS_PORT: String(MIGRATION_TEST_PORT), CLAUDE_PEERS_DB: MIGRATION_TEST_DB },
-      stdout: "ignore", stderr: "ignore",
-    });
+    let migProc: ReturnType<typeof Bun.spawn> | null = null;
 
-    // Step 3: Wait for startup
-    for (let i = 0; i < 50; i++) {
-      try { if ((await fetch(`${MIGRATION_TEST_HTTP}/health`)).ok) break; } catch {}
-      await Bun.sleep(100);
-    }
+    try {
+      // Step 2: Spawn a broker against this seeded DB
+      migProc = Bun.spawn(["bun", `${import.meta.dir}/broker.ts`], {
+        env: { ...process.env, CLAUDE_PEERS_PORT: String(MIGRATION_TEST_PORT), CLAUDE_PEERS_DB: MIGRATION_TEST_DB },
+        stdout: "ignore", stderr: "ignore",
+      });
 
-    // Step 4: Verify migration copied the row with peer_type 'desktop'
-    const rows = await migrationPost<{ rows: Array<{ session_key: string; peer_id: string; peer_type: string }> }>(
-      "/debug-peer-sessions", {},
-    );
-    const migrated = rows.rows.filter((r) => r.session_key === "mig_test_token");
-    expect(migrated).toHaveLength(1);
-    expect(migrated[0]!.peer_id).toBe("mig_peer_xyz");
-    expect(migrated[0]!.peer_type).toBe("desktop");
+      // Step 3: Wait for startup
+      let started = false;
+      for (let i = 0; i < 50; i++) {
+        try { if ((await fetch(`${MIGRATION_TEST_HTTP}/health`)).ok) { started = true; break; } } catch {}
+        await Bun.sleep(100);
+      }
+      if (!started) throw new Error("Migration broker did not start");
 
-    // Step 5: Test idempotency - kill and restart broker
-    migProc.kill();
-    await Bun.sleep(200);
+      // Step 4: Verify migration copied the row with peer_type 'desktop'
+      const rows = await migrationPost<{ rows: Array<{ session_key: string; peer_id: string; peer_type: string }> }>(
+        "/debug-peer-sessions", {},
+      );
+      const migrated = rows.rows.filter((r) => r.session_key === "mig_test_token");
+      expect(migrated).toHaveLength(1);
+      expect(migrated[0]!.peer_id).toBe("mig_peer_xyz");
+      expect(migrated[0]!.peer_type).toBe("desktop");
 
-    migProc = Bun.spawn(["bun", `${import.meta.dir}/broker.ts`], {
-      env: { ...process.env, CLAUDE_PEERS_PORT: String(MIGRATION_TEST_PORT), CLAUDE_PEERS_DB: MIGRATION_TEST_DB },
-      stdout: "ignore", stderr: "ignore",
-    });
+      // Step 5: Test idempotency - kill and restart broker
+      migProc.kill();
+      migProc = null;
+      await Bun.sleep(200);
 
-    for (let i = 0; i < 50; i++) {
-      try { if ((await fetch(`${MIGRATION_TEST_HTTP}/health`)).ok) break; } catch {}
-      await Bun.sleep(100);
-    }
+      migProc = Bun.spawn(["bun", `${import.meta.dir}/broker.ts`], {
+        env: { ...process.env, CLAUDE_PEERS_PORT: String(MIGRATION_TEST_PORT), CLAUDE_PEERS_DB: MIGRATION_TEST_DB },
+        stdout: "ignore", stderr: "ignore",
+      });
 
-    const rows2 = await migrationPost<{ rows: Array<{ session_key: string; peer_id: string; peer_type: string }> }>(
-      "/debug-peer-sessions", {},
-    );
-    const migrated2 = rows2.rows.filter((r) => r.session_key === "mig_test_token");
-    expect(migrated2).toHaveLength(1); // Still exactly one, no error on re-run
-    expect(migrated2[0]!.peer_id).toBe("mig_peer_xyz");
+      // Step 6: Wait for restart
+      let restarted = false;
+      for (let i = 0; i < 50; i++) {
+        try { if ((await fetch(`${MIGRATION_TEST_HTTP}/health`)).ok) { restarted = true; break; } } catch {}
+        await Bun.sleep(100);
+      }
+      if (!restarted) throw new Error("Migration broker (restart) did not start");
 
-    // Cleanup
-    migProc.kill();
-    await Bun.sleep(100);
-    for (const suffix of ["", "-wal", "-shm"]) {
-      try { await Bun.file(MIGRATION_TEST_DB + suffix).delete(); } catch {}
+      const rows2 = await migrationPost<{ rows: Array<{ session_key: string; peer_id: string; peer_type: string }> }>(
+        "/debug-peer-sessions", {},
+      );
+      const migrated2 = rows2.rows.filter((r) => r.session_key === "mig_test_token");
+      expect(migrated2).toHaveLength(1); // Still exactly one, no error on re-run
+      expect(migrated2[0]!.peer_id).toBe("mig_peer_xyz");
+
+    } finally {
+      // Cleanup - guaranteed to run even if assertions fail
+      if (migProc?.pid) {
+        try { process.kill(migProc.pid); } catch {} // SIGTERM (default)
+      }
+      // Fallback: try subprocess kill as well
+      if (migProc) {
+        try { migProc.kill(); } catch {}
+      }
+      await Bun.sleep(500); // Wait for process to fully exit
+      for (const suffix of ["", "-wal", "-shm"]) {
+        try { await Bun.file(MIGRATION_TEST_DB + suffix).delete(); } catch {}
+      }
     }
   });
 });
