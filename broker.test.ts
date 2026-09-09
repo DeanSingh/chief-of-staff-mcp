@@ -237,6 +237,39 @@ describe("broker /watch WebSocket feed", () => {
     expect(peek.messages.map((m) => m.text)).toContain("answer you missed");
   });
 
+  test("a restarted CLI session reads mail queued while it was down", async () => {
+    const KEY = "sess-restart-4242";
+    const doomed = Bun.spawn(["sleep", "30"]);
+    const deadPid = doomed.pid;
+
+    // Session registers and is alive.
+    const before = await post<{ id: string }>("/register", {
+      pid: deadPid, cwd: "/tmp/restart", git_root: null, tty: "ttys200",
+      summary: "CA1", peer_type: "cli", session_key: KEY,
+    });
+
+    // Someone answers it.
+    const sender = await register("COS", "cli");
+    await post("/send-message", { from_id: sender, to_id: before.id, text: "yes, ship it" });
+
+    // The session dies and the stale-peer sweep runs (see Task 4: a restart is
+    // what actually triggers cleanStalePeers).
+    doomed.kill();
+    await doomed.exited;
+    await restartBroker();
+
+    // It comes back: same session_key, brand new pid.
+    const after = await post<{ id: string }>("/register", {
+      pid: LIVE_PIDS[0]!, cwd: "/tmp/restart", git_root: null, tty: "ttys201",
+      summary: "", peer_type: "cli", session_key: KEY,
+    });
+
+    expect(after.id).toBe(before.id);
+
+    const peek = await post<{ messages: Array<{ text: string }> }>("/peek-messages", { id: after.id });
+    expect(peek.messages.map((m) => m.text)).toContain("yes, ship it");
+  });
+
   test("list-peers hides a dead-pid peer without destroying its identity", async () => {
     const doomed = Bun.spawn(["sleep", "30"]);
     const deadPid = doomed.pid;
@@ -272,20 +305,14 @@ describe("broker /watch WebSocket feed", () => {
   });
 
   test("peer_sessions carries desktop tokens forward and re-running is a no-op", async () => {
-    // Register a desktop peer: this writes a desktop_tokens row.
-    const first = await post<{ id: string }>("/register", {
+    const reg = () => post<{ id: string }>("/register", {
       pid: LIVE_PIDS[0]!, cwd: "cs_mig", git_root: null, tty: null,
       summary: "Migration agent", peer_type: "desktop", session_token: "cs_mig",
     });
-
-    // The broker mirrors it into peer_sessions on startup and on write.
-    const rows = await post<{ rows: Array<{ session_key: string; peer_id: string; peer_type: string }> }>(
-      "/debug-peer-sessions", {},
-    );
-    const mine = rows.rows.filter((r) => r.session_key === "cs_mig");
-    expect(mine).toHaveLength(1);
-    expect(mine[0]!.peer_id).toBe(first.id);
-    expect(mine[0]!.peer_type).toBe("desktop");
+    const first = await reg();
+    await post("/unregister", { id: first.id });
+    const back = await reg();
+    expect(back.id).toBe(first.id);
   });
 
   test("migration: INSERT OR IGNORE copies desktop_tokens to peer_sessions at startup", async () => {
@@ -338,14 +365,17 @@ describe("broker /watch WebSocket feed", () => {
       }
       if (!started) throw new Error("Migration broker did not start");
 
-      // Step 4: Verify migration copied the row with peer_type 'desktop'
-      const rows = await migrationPost<{ rows: Array<{ session_key: string; peer_id: string; peer_type: string }> }>(
-        "/debug-peer-sessions", {},
-      );
-      const migrated = rows.rows.filter((r) => r.session_key === "mig_test_token");
-      expect(migrated).toHaveLength(1);
-      expect(migrated[0]!.peer_id).toBe("mig_peer_xyz");
-      expect(migrated[0]!.peer_type).toBe("desktop");
+      // Step 4: Verify migration copied the row, through the public surface.
+      // No peers row exists yet for mig_peer_xyz (only desktop_tokens/peer_sessions
+      // were seeded), so a CLI registration keyed to the migrated session_key can
+      // only get mig_peer_xyz back by reading it out of peer_sessions — the same
+      // table the startup migration writes into. This also exercises the CLI
+      // resurrection branch of handleRegister (mapped session_key, no live peer row).
+      const reg1 = await migrationPost<{ id: string }>("/register", {
+        pid: process.pid, cwd: "/tmp/mig", git_root: null, tty: null,
+        summary: "", peer_type: "cli", session_key: "mig_test_token",
+      });
+      expect(reg1.id).toBe("mig_peer_xyz");
 
       // Step 5: Test idempotency - kill first broker and wait for it to exit
       migProc.kill();
@@ -366,12 +396,13 @@ describe("broker /watch WebSocket feed", () => {
       }
       if (!restarted) throw new Error("Migration broker (restart) did not start");
 
-      const rows2 = await migrationPost<{ rows: Array<{ session_key: string; peer_id: string; peer_type: string }> }>(
-        "/debug-peer-sessions", {},
-      );
-      const migrated2 = rows2.rows.filter((r) => r.session_key === "mig_test_token");
-      expect(migrated2).toHaveLength(1); // Still exactly one, no error on re-run
-      expect(migrated2[0]!.peer_id).toBe("mig_peer_xyz");
+      // Re-running the migration on restart must not disturb the mapping:
+      // the same session_key still resolves to the same peer_id, no error.
+      const reg2 = await migrationPost<{ id: string }>("/register", {
+        pid: process.pid, cwd: "/tmp/mig", git_root: null, tty: null,
+        summary: "", peer_type: "cli", session_key: "mig_test_token",
+      });
+      expect(reg2.id).toBe("mig_peer_xyz");
 
     } finally {
       // Cleanup - guaranteed to run even if assertions fail

@@ -544,8 +544,6 @@ Bun.serve<WatchData>({
         case "/unregister":
           handleUnregister(body as { id: string });
           return Response.json({ ok: true });
-        case "/debug-peer-sessions":
-          return Response.json({ rows: db.query("SELECT * FROM peer_sessions").all() });
         default:
           return Response.json({ error: "not found" }, { status: 404 });
       }
