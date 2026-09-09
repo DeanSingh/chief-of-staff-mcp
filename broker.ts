@@ -292,7 +292,7 @@ function handleRegister(body: RegisterRequest): RegisterResponse {
     // peer_sessions too) and eventually drop desktop_tokens, without a
     // backfill step. Deliberately uncovered by a desktop-specific test: the
     // only way to assert peer_sessions is actually read today is a
-    // cross-type test that would break the moment the CLI-only lookup at
+    // cross-type test that would break the moment the CLI-only lookup
     // (see the cliKey branch below) gets hardened to also check peer_type.
     db.run("INSERT OR REPLACE INTO peer_sessions (session_key, peer_id, peer_type, updated_at) VALUES (?, ?, ?, ?)", [token, id, "desktop", now]);
   }
