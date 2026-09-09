@@ -27,10 +27,12 @@ updates `.mcp.json`, every `CLAUDE.md` reference, and provides a migration path 
 ## Architecture
 
 - `broker.ts` — Singleton HTTP daemon on localhost:7899 + SQLite. Auto-launched by the MCP server.
-  Peer identity is durable: `peer_sessions` maps a session key to a peer id —
-  `CLAUDE_CODE_SESSION_ID` for CLI peers, a claimed token for Desktop — so a
-  restarted session reclaims its id and mail sent to it *before* it died is
-  still delivered. That guarantee doesn't cover mail sent *while* it's down:
+  Peer identity is durable for CLI peers: `peer_sessions` maps
+  `CLAUDE_CODE_SESSION_ID` to a peer id, so a restarted CLI session reclaims
+  its id and mail sent to it *before* it died is still delivered. Desktop
+  still reclaims via `desktop_tokens`, unchanged by this; Desktop does get a
+  `peer_sessions` row too, but it's a mirror nothing reads yet. That
+  guarantee doesn't cover mail sent *while* it's down:
   `handleSendMessage` refuses any send whose `to_id` has no `peers` row, and
   `cleanStalePeers` deletes that row ~30s after the process dies, so a dead
   peer can't be sent to at all until it re-registers. Undelivered mail is

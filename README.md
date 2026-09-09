@@ -34,10 +34,10 @@ bun install
 This makes claude-peers available in every Claude Code session, from any directory:
 
 ```bash
-claude mcp add --scope user --transport stdio claude-peers -- bun ~/claude-peers-mcp/server.ts
+claude mcp add --scope user --transport stdio claude-peers -- bun ~/chief-of-staff-mcp/server.ts
 ```
 
-Replace `~/claude-peers-mcp` with wherever you cloned it.
+Replace `~/chief-of-staff-mcp` with wherever you cloned it.
 
 ### 3. Run Claude Code with the channel
 
