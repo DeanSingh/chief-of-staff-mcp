@@ -190,14 +190,37 @@ describe("broker /watch WebSocket feed", () => {
     expect(second.restored_summary).toBe("CA1");
   });
 
-  test("cli registration without a session_key still dedupes by pid", async () => {
-    const reg = (summary: string) => post<{ id: string }>("/register", {
-      pid: LIVE_PIDS[1]!, cwd: "/tmp/cli-nokey", git_root: null, tty: "ttys101",
-      summary, peer_type: "cli",
-    });
-    const a = await reg("Legacy agent");
-    const b = await reg("");
-    expect(b.id).toBe(a.id);
+  test("a pre-upgrade CLI peer (no session_key) is ADOPTED, not duplicated, once it starts sending one", async () => {
+    // Fresh, never-before-used pid: a spawned "sleep" gives an alive pid this
+    // test owns exclusively, so this doesn't collide with pid state any other
+    // test in this file left behind on LIVE_PIDS.
+    const doomed = Bun.spawn(["sleep", "30"]);
+    const pid = doomed.pid;
+    try {
+      // Simulates every existing session at the moment this fix lands: a
+      // peers row keyed on pid alone, no peer_sessions mapping at all.
+      const before = await post<{ id: string }>("/register", {
+        pid, cwd: "/tmp/upgrade-cli", git_root: null, tty: null,
+        summary: "Pre-upgrade agent", peer_type: "cli",
+      });
+      const sender = await register("Sender", "cli");
+      await post("/send-message", { from_id: sender, to_id: before.id, text: "queued before upgrade" });
+
+      // The upgraded server reconnects: SAME pid, but now sends a session_key
+      // for the first time. It must adopt the existing peer, not mint a new one.
+      const after = await post<{ id: string }>("/register", {
+        pid, cwd: "/tmp/upgrade-cli", git_root: null, tty: null,
+        summary: "", peer_type: "cli", session_key: "sess-upgrade-adopt-1",
+      });
+
+      expect(after.id).toBe(before.id);
+
+      const peek = await post<{ messages: Array<{ text: string }> }>("/peek-messages", { id: after.id });
+      expect(peek.messages.map((m) => m.text)).toContain("queued before upgrade");
+    } finally {
+      doomed.kill();
+      await doomed.exited;
+    }
   });
 
   test("a reaped cli peer resurrects under its original id with its cached summary restored", async () => {
@@ -297,6 +320,38 @@ describe("broker /watch WebSocket feed", () => {
       summary: "", peer_type: "cli", session_key: KEY,
     });
     expect(after.id).toBe(before.id);
+  });
+
+  test("heartbeat refreshes the peer_sessions mapping, keeping it alive past what would be its expiry", async () => {
+    // cleanStalePeers sweeps peer_sessions rows older than 30 days. A session
+    // that registers once and then just heartbeats for longer than that must
+    // not have its mapping swept out from under it. We don't fake 30 days;
+    // instead we assert the mechanism the sweep depends on directly:
+    // handleHeartbeat must advance peer_sessions.updated_at, keyed on peer_id
+    // (not the primary key session_key). If that write is missing, this
+    // assertion fails regardless of how the 30-day sweep itself behaves.
+    const KEY = "sess-heartbeat-refresh-1";
+    const reg = await post<{ id: string }>("/register", {
+      pid: LIVE_PIDS[0]!, cwd: "/tmp/heartbeat-refresh", git_root: null, tty: null,
+      summary: "Heartbeating agent", peer_type: "cli", session_key: KEY,
+    });
+
+    const { Database } = await import("bun:sqlite");
+    const readDb = new Database(DB, { readonly: true });
+    try {
+      const before = readDb.query("SELECT updated_at FROM peer_sessions WHERE session_key = ?").get(KEY) as { updated_at: string };
+      expect(before.updated_at).toBeTruthy();
+
+      // Ensure the next timestamp is measurably later (ISO strings are
+      // millisecond-resolution) before heartbeating.
+      await Bun.sleep(20);
+      await post("/heartbeat", { id: reg.id });
+
+      const after = readDb.query("SELECT updated_at FROM peer_sessions WHERE session_key = ?").get(KEY) as { updated_at: string };
+      expect(new Date(after.updated_at).getTime()).toBeGreaterThan(new Date(before.updated_at).getTime());
+    } finally {
+      readDb.close();
+    }
   });
 
   test("rejects browser upgrades (Origin header present)", async () => {

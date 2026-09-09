@@ -146,7 +146,16 @@ export function cliRegisterBody(summary: string | undefined) {
     git_root: myGitRoot,
     tty: getTty(),
     summary,
-    peer_type: PEER_TYPE,
+    // Hardcoded, NOT PEER_TYPE: this is the CLI-only builder. One call site
+    // (the set_summary re-register path) reaches it from the `else` of an
+    // `if (sessionId && PEER_TYPE === "desktop")` check, so on a desktop
+    // server with a falsy sessionId it would otherwise post
+    // peer_type: "desktop" with no session_token — minting a token-less
+    // desktop ghost that pid-reaping never collects and list_peers never
+    // hides. That path is unreachable today only because of a guard
+    // elsewhere; this builder must not be able to emit a desktop
+    // registration regardless.
+    peer_type: "cli",
     session_key: SESSION_KEY,
   };
 }

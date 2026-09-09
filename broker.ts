@@ -55,6 +55,14 @@ db.run(`
     text TEXT NOT NULL,
     sent_at TEXT NOT NULL,
     delivered INTEGER NOT NULL DEFAULT 0,
+    -- These FOREIGN KEY declarations are UNENFORCED: PRAGMA foreign_keys is
+    -- never set anywhere in this file. That is deliberate, not an oversight -
+    -- peers are reaped (their row in the peers table deleted) while their
+    -- messages persist under the TTL in cleanStalePeers, so from_id/to_id
+    -- dangling with no matching peers row is an expected, ongoing state, not
+    -- corruption. Turning the pragma on would start rejecting exactly that
+    -- and break reaping; it would also require a table rebuild (SQLite
+    -- doesn't retrofit FK enforcement onto an existing table in place).
     FOREIGN KEY (from_id) REFERENCES peers(id),
     FOREIGN KEY (to_id) REFERENCES peers(id)
   )
@@ -101,6 +109,10 @@ db.run(`
     updated_at  TEXT NOT NULL
   )
 `);
+// handleHeartbeat refreshes this table keyed on peer_id (not the primary
+// key), and heartbeat is a hot path — index it so that lookup stays O(log n)
+// instead of a full table scan.
+db.run("CREATE INDEX IF NOT EXISTS idx_peer_sessions_peer_id ON peer_sessions(peer_id)");
 
 // Idempotent: INSERT OR IGNORE means re-running on an already-migrated
 // database is a no-op, never a duplicate or a constraint error.
@@ -143,6 +155,11 @@ function cleanStalePeers() {
   db.run("DELETE FROM messages WHERE delivered = 1 AND sent_at < ?", [new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()]);
   db.run("DELETE FROM messages WHERE delivered = 0 AND sent_at < ?", [new Date(Date.now() - 72 * 60 * 60 * 1000).toISOString()]);
   db.run("DELETE FROM desktop_tokens WHERE updated_at < ?", [new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()]);
+  // Same 30-day TTL as desktop_tokens above. Safe only because handleHeartbeat
+  // refreshes peer_sessions.updated_at on every heartbeat (see touchPeerSessionByPeerId)
+  // — otherwise a session alive longer than the TTL would have its mapping
+  // swept out from under it and mint a new id on its next reconnect.
+  db.run("DELETE FROM peer_sessions WHERE updated_at < ?", [new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()]);
   db.run("DELETE FROM summary_cache WHERE updated_at < ?", [new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()]);
 }
 
@@ -167,6 +184,10 @@ const selectPeerBySessionToken = db.prepare(`
 
 const touchPeerBySessionToken = db.prepare(`
   UPDATE peers SET pid = ?, last_seen = ?, summary = CASE WHEN ? = '' THEN summary ELSE ? END WHERE session_token = ?
+`);
+
+const touchPeerSessionByPeerId = db.prepare(`
+  UPDATE peer_sessions SET updated_at = ? WHERE peer_id = ?
 `);
 
 const updateLastSeen = db.prepare(`
@@ -250,6 +271,26 @@ function getCachedSummary(cwd: string, git_root: string | null): string | null {
 
 // --- Request handlers ---
 
+// Shared by both CLI identity paths: the session_key fallback (key present
+// but unmapped) and the no-key path (pre-session-key callers). Looks up an
+// existing CLI peer row by pid, refreshes it in place, and — when a cliKey is
+// given — records the key -> id mapping so future registrations resolve by
+// key without needing this fallback again. Returns null when no pid match
+// exists, so the caller falls through to minting a fresh peer.
+function claimPeerByPid(pid: number, body: RegisterRequest, now: string, cliKey: string | null): { id: string; restored_summary?: string } | null {
+  const existing = db.query("SELECT id, summary FROM peers WHERE pid = ? AND peer_type != 'desktop'").get(pid) as { id: string; summary: string } | null;
+  if (!existing) return null;
+  db.run(
+    "UPDATE peers SET cwd = ?, git_root = ?, tty = ?, last_seen = ?, summary = CASE WHEN ? = '' THEN summary ELSE ? END WHERE id = ?",
+    [body.cwd, body.git_root, body.tty, now, body.summary ?? "", body.summary ?? "", existing.id],
+  );
+  if (cliKey) {
+    db.run("INSERT OR REPLACE INTO peer_sessions (session_key, peer_id, peer_type, updated_at) VALUES (?, ?, 'cli', ?)", [cliKey, existing.id, now]);
+  }
+  if (body.summary) cacheSummary(body.cwd, body.git_root, body.summary);
+  return { id: existing.id, restored_summary: body.summary ? undefined : (existing.summary || undefined) };
+}
+
 function handleRegister(body: RegisterRequest): RegisterResponse {
   const now = new Date().toISOString();
 
@@ -331,20 +372,24 @@ function handleRegister(body: RegisterRequest): RegisterResponse {
       const restored = live ? (!body.summary ? (live.summary || undefined) : undefined) : resurrectedSummary;
       return { id: mapped.peer_id, restored_summary: restored };
     }
+
+    // No peer_sessions mapping yet for this key. This is the state of EVERY
+    // CLI session at the moment session_key support first lands (or any
+    // session that has never sent one before): do NOT fall through to
+    // minting — that would orphan the pid-keyed row this session already
+    // has, splitting it into two live `peers` rows for one process. Fall
+    // back to the pid lookup and, on a hit, ADOPT that peer's id and record
+    // the key -> id mapping so the next registration resolves by key
+    // directly instead of taking this fallback again.
+    const adopted = claimPeerByPid(body.pid, body, now, cliKey);
+    if (adopted) return adopted;
   } else if (isCli) {
     // CLI re-registration for a pid we already know (the Claude Code session
     // pid — its MCP server process may have been respawned by /mcp reconnect):
     // keep the SAME peer id so addresses other agents hold stay valid, and keep
     // the summary unless a new one is given.
-    const existing = db.query("SELECT id, summary FROM peers WHERE pid = ? AND peer_type != 'desktop'").get(body.pid) as { id: string; summary: string } | null;
-    if (existing) {
-      db.run(
-        "UPDATE peers SET cwd = ?, git_root = ?, tty = ?, last_seen = ?, summary = CASE WHEN ? = '' THEN summary ELSE ? END WHERE id = ?",
-        [body.cwd, body.git_root, body.tty, now, body.summary ?? "", body.summary ?? "", existing.id],
-      );
-      if (body.summary) cacheSummary(body.cwd, body.git_root, body.summary);
-      return { id: existing.id, restored_summary: body.summary ? undefined : existing.summary || undefined };
-    }
+    const existing = claimPeerByPid(body.pid, body, now, null);
+    if (existing) return existing;
   }
 
   // Carry forward cached summary for CLI sessions in the same workspace.
@@ -369,7 +414,14 @@ function handleRegister(body: RegisterRequest): RegisterResponse {
 }
 
 function handleHeartbeat(body: HeartbeatRequest): void {
-  updateLastSeen.run(new Date().toISOString(), body.id);
+  const now = new Date().toISOString();
+  updateLastSeen.run(now, body.id);
+  // Keeps this peer's peer_sessions mapping alive past cleanStalePeers' 30-day
+  // TTL as long as it keeps heartbeating. Without this, a session that
+  // registered once and ran longer than the TTL would have its mapping swept
+  // out from under it while still alive, and its next reconnect would mint a
+  // new id. Single UPDATE, keyed on peer_id: heartbeat is a hot path.
+  touchPeerSessionByPeerId.run(now, body.id);
 }
 
 function handleSetSummary(body: SetSummaryRequest): { ok: boolean; error?: string } {
