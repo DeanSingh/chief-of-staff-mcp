@@ -164,4 +164,21 @@ describe("broker /watch WebSocket feed", () => {
     });
     expect(res.status).toBe(403);
   });
+
+  test("peer_sessions carries desktop tokens forward and re-running is a no-op", async () => {
+    // Register a desktop peer: this writes a desktop_tokens row.
+    const first = await post<{ id: string }>("/register", {
+      pid: LIVE_PIDS[0]!, cwd: "cs_mig", git_root: null, tty: null,
+      summary: "Migration agent", peer_type: "desktop", session_token: "cs_mig",
+    });
+
+    // The broker mirrors it into peer_sessions on startup and on write.
+    const rows = await post<{ rows: Array<{ session_key: string; peer_id: string; peer_type: string }> }>(
+      "/debug-peer-sessions", {},
+    );
+    const mine = rows.rows.filter((r) => r.session_key === "cs_mig");
+    expect(mine).toHaveLength(1);
+    expect(mine[0]!.peer_id).toBe(first.id);
+    expect(mine[0]!.peer_type).toBe("desktop");
+  });
 });

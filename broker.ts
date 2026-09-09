@@ -89,6 +89,26 @@ db.run(`
   )
 `);
 
+// Durable session_key -> peer id, for ALL peer types. Generalizes
+// desktop_tokens: CLI peers key on Claude Code's CLAUDE_CODE_SESSION_ID,
+// desktop peers on their claimed token. The peers row is ephemeral; the
+// address other agents hold is not.
+db.run(`
+  CREATE TABLE IF NOT EXISTS peer_sessions (
+    session_key TEXT PRIMARY KEY,
+    peer_id     TEXT NOT NULL,
+    peer_type   TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+  )
+`);
+
+// Idempotent: INSERT OR IGNORE means re-running on an already-migrated
+// database is a no-op, never a duplicate or a constraint error.
+db.run(`
+  INSERT OR IGNORE INTO peer_sessions (session_key, peer_id, peer_type, updated_at)
+  SELECT token, peer_id, 'desktop', updated_at FROM desktop_tokens
+`);
+
 // Clean up stale peers (PIDs that no longer exist) on startup
 function cleanStalePeers() {
   // PID liveness applies to CLI peers only. A desktop peer's pid is whichever
@@ -243,6 +263,7 @@ function handleRegister(body: RegisterRequest): RegisterResponse {
     if (existing) {
       touchPeerBySessionToken.run(body.pid, now, body.summary ?? "", body.summary ?? "", token);
       db.run("UPDATE desktop_tokens SET updated_at = ? WHERE token = ?", [now, token]);
+      db.run("UPDATE peer_sessions SET updated_at = ? WHERE session_key = ?", [now, token]);
       return { id: existing.id, restored_summary: body.summary ? undefined : existing.summary };
     }
     // Row was reaped (session idled past the heartbeat window) but the token
@@ -252,6 +273,7 @@ function handleRegister(body: RegisterRequest): RegisterResponse {
     if (mapped) {
       insertPeer.run(mapped.peer_id, body.pid, body.cwd, body.git_root, body.tty, body.summary ?? "", peerType, now, now, token);
       db.run("UPDATE desktop_tokens SET updated_at = ? WHERE token = ?", [now, token]);
+      db.run("UPDATE peer_sessions SET updated_at = ? WHERE session_key = ?", [now, token]);
       return { id: mapped.peer_id };
     }
   }
@@ -259,6 +281,7 @@ function handleRegister(body: RegisterRequest): RegisterResponse {
   const id = generateId();
   if (token) {
     db.run("INSERT OR REPLACE INTO desktop_tokens (token, peer_id, updated_at) VALUES (?, ?, ?)", [token, id, now]);
+    db.run("INSERT OR REPLACE INTO peer_sessions (session_key, peer_id, peer_type, updated_at) VALUES (?, ?, ?, ?)", [token, id, "desktop", now]);
   }
 
   // CLI re-registration for a pid we already know (the Claude Code session
@@ -479,6 +502,8 @@ Bun.serve<WatchData>({
         case "/unregister":
           handleUnregister(body as { id: string });
           return Response.json({ ok: true });
+        case "/debug-peer-sessions":
+          return Response.json({ rows: db.query("SELECT * FROM peer_sessions").all() });
         default:
           return Response.json({ error: "not found" }, { status: 404 });
       }
