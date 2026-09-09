@@ -4,6 +4,7 @@ import {
   SESSION_ID_REQUIRED_TOOLS,
   SESSION_PARAM,
   isAmbiguousSession,
+  cliRegisterBody,
 } from "./server.ts";
 
 // Two independent transport constraints are pinned here, both learned the
@@ -120,5 +121,13 @@ describe("watch instructions", () => {
     expect(text).toContain(`Monitor({ ws: { url: "${watchUrl("abc123")}" }`);
     expect(text).toContain("persistent: true");
     expect(text).toContain("cli.ts watch abc123");
+  });
+});
+
+describe("CLI registration builder", () => {
+  test("cliRegisterBody always includes session_key with correct value", () => {
+    const body = cliRegisterBody("test summary");
+    expect(body).toHaveProperty("session_key");
+    expect(body.session_key).toBe(process.env.CLAUDE_CODE_SESSION_ID || undefined);
   });
 });
