@@ -25,11 +25,18 @@ async function post<T>(path: string, body: unknown): Promise<T> {
 async function restartBroker() {
   proc.kill();
   await proc.exited;
+  await Bun.sleep(200); // Give port time to be released by OS
   proc = Bun.spawn(["bun", `${import.meta.dir}/broker.ts`], {
     env: { ...process.env, CLAUDE_PEERS_PORT: String(PORT), CLAUDE_PEERS_DB: DB },
     stdout: "ignore", stderr: "ignore",
   });
   for (let i = 0; i < 50; i++) {
+    // If the new process already died (e.g. EADDRINUSE because the OS hadn't
+    // released the port yet), no amount of /health polling will ever succeed.
+    // Fail fast with the real cause instead of burning the full timeout.
+    if (proc.exitCode !== null) {
+      throw new Error("broker failed to bind on restart (port not released?)");
+    }
     try { if ((await fetch(`${HTTP}/health`)).ok) return; } catch {}
     await Bun.sleep(100);
   }
