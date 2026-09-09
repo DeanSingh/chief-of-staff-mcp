@@ -176,6 +176,24 @@ describe("broker /watch WebSocket feed", () => {
     expect(b.id).toBe(a.id);
   });
 
+  test("a reaped cli peer resurrects under its original id with its cached summary restored", async () => {
+    const reg = (summary: string) => post<{ id: string; restored_summary?: string }>("/register", {
+      pid: LIVE_PIDS[0]!, cwd: "/tmp/cli-resur", git_root: null, tty: "ttys102", summary,
+      peer_type: "cli", session_key: "sess-resur-1",
+    });
+    const first = await reg("Ops agent");
+    // Simulate heartbeat expiry: the peers row is deleted (as cleanStalePeers
+    // does), but peer_sessions and the workspace summary cache remain.
+    await post("/unregister", { id: first.id });
+    // Session comes back, same session_key, no summary supplied -> SAME id,
+    // and the cached summary comes back rather than a blank one.
+    const back = await reg("");
+    expect(back.id).toBe(first.id);
+    expect(back.restored_summary).toBe("Ops agent");
+    const peers = await post<Array<{ id: string; summary: string }>>("/list-peers", { scope: "machine", cwd: "/", git_root: null });
+    expect(peers.find((p) => p.id === first.id)!.summary).toBe("Ops agent");
+  });
+
   test("rejects browser upgrades (Origin header present)", async () => {
     const res = await fetch(`${HTTP}/watch/anyone`, {
       headers: {

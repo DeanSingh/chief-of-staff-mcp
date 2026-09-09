@@ -296,6 +296,7 @@ function handleRegister(body: RegisterRequest): RegisterResponse {
     if (mapped) {
       const live = db.query("SELECT id, summary FROM peers WHERE id = ?")
         .get(mapped.peer_id) as { id: string; summary: string } | null;
+      let resurrectedSummary: string | undefined;
       if (live) {
         db.run(
           "UPDATE peers SET pid = ?, cwd = ?, git_root = ?, tty = ?, last_seen = ?, summary = CASE WHEN ? = '' THEN summary ELSE ? END WHERE id = ?",
@@ -303,12 +304,19 @@ function handleRegister(body: RegisterRequest): RegisterResponse {
         );
       } else {
         // Row was reaped but the session is back: resurrect under the SAME id
-        // so mail queued for it is still addressed correctly.
-        insertPeer.run(mapped.peer_id, body.pid, body.cwd, body.git_root, body.tty, body.summary ?? "", peerType, now, now, null);
+        // so mail queued for it is still addressed correctly. Fall back to the
+        // cached workspace summary when none was supplied, same as a fresh peer
+        // (below), so a reaped-and-restarted session doesn't rejoin blank.
+        let summaryToInsert = body.summary;
+        if (!summaryToInsert) {
+          summaryToInsert = getCachedSummary(body.cwd, body.git_root) ?? "";
+          if (summaryToInsert) resurrectedSummary = summaryToInsert;
+        }
+        insertPeer.run(mapped.peer_id, body.pid, body.cwd, body.git_root, body.tty, summaryToInsert, peerType, now, now, null);
       }
       db.run("UPDATE peer_sessions SET updated_at = ? WHERE session_key = ?", [now, cliKey]);
       if (body.summary) cacheSummary(body.cwd, body.git_root, body.summary);
-      const restored = live && !body.summary ? live.summary || undefined : undefined;
+      const restored = live ? (!body.summary ? (live.summary || undefined) : undefined) : resurrectedSummary;
       return { id: mapped.peer_id, restored_summary: restored };
     }
   } else if (isCli) {
