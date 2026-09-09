@@ -1,7 +1,7 @@
 # Chief-of-Staff Coordination Layer — Design v2
 
 **Date:** 2026-09-09
-**Status:** Draft for review
+**Status:** Approved for planning — Phase 1a plan next
 **Supersedes:** `2026-09-08-chief-of-staff-coordination-design.md`
 **Repo:** `chief-of-staff-mcp` (wire identity `claude-peers`)
 
@@ -160,10 +160,40 @@ forever. Desktop already solved this with `desktop_tokens`; CLI must get the sam
 treatment, keyed on Claude Code's `sessionId`, which is stable across `--resume`
 and across crash+restart [docs].
 
-**A `SessionStart` hook is mandatory, not optional.** Verified by direct search
-including the MCP SDK types: nothing hands a Claude Code session id to an MCP
-stdio server — `_meta` carries only `progressToken`. Hooks receive `session_id`
-on stdin; the server process cannot obtain it any other way.
+**No hook is required. The MCP server already has the session id.**
+
+An earlier draft of this section stated that a `SessionStart` hook was mandatory,
+because nothing hands a session id to an MCP stdio server (`_meta` carries only
+`progressToken`, verified against the SDK types) and the docs state the id is
+*"NOT directly exported to child processes or MCP servers as an environment
+variable."* **Measured 2026-09-09: that is false.**
+
+```
+env CLAUDE_CODE_SESSION_ID          = f1b5583d-c187-4b38-8e49-e9162b85ffdb
+claude agents --json  → sessionId   = f1b5583d-c187-4b38-8e49-e9162b85ffdb
+MCP server process (pid 3083, `bun server.ts`) → present in its environment
+```
+
+Checked by variable *name* only, never by reading a value. The running server
+process was inspected directly, so this is not an inference from "children
+inherit their parent's environment." The same UUID also names the session's
+scratchpad directory, confirming it is the real identifier.
+
+**Consequence:** `server.ts` reads `process.env.CLAUDE_CODE_SESSION_ID`. There is
+no `/bind-session` route, no hook↔server join over the Claude Code pid, and no
+arrival-ordering problem between a hook and a registration.
+
+**This does not generalize to Desktop.** One bridge MCP server process serves
+many Desktop/Cowork sessions, so a process-level environment variable cannot
+discriminate between them. `claim_session` / `peer_session` remain necessary and
+unchanged for desktop peers. Note also that the server process does *not* carry
+`CLAUDE_CODE_MESSAGING_SOCKET` / `_TOKEN`, which a Bash tool child does — spawn
+environments differ, and nothing beyond the session id should be assumed.
+
+> **Third docs failure in this area.** The docs were also wrong that
+> `claude agents --json` lists only background sessions (§2.1), and wrong here.
+> Every unobserved docs claim about these primitives has now failed under test.
+> Treat `[docs]` in this domain as a hypothesis; `[observed]` governs.
 
 Three code sites treat pid-death as identity-death and must change together:
 
@@ -181,13 +211,27 @@ nobody was looking at.
 *row* promptly, but must never be read as identity death, and must never delete
 mail. Reaping a row while the key survives is already exactly what Desktop does.
 
+`session_key` holds two kinds of value, by peer type:
+
+| Peer type | `session_key` | Source |
+| --- | --- | --- |
+| `cli` | Claude Code session id | `process.env.CLAUDE_CODE_SESSION_ID` |
+| `desktop` | claimed token | `claim_session`, unchanged |
+
+For CLI peers `session_key` **is** the native `sessionId`, so COS joins the
+broker's peers to `claude agents --json` on `session_key == sessionId` — an exact
+key join, not a name match. `peers.name` is dropped: nothing populates it, and
+this fleet has already proven names collide (two sessions answering to "CA1").
+
 ## 5. Schema
 
 Three new tables plus one generalization. Follows the existing
 `CREATE TABLE IF NOT EXISTS` + `PRAGMA table_info` migration conventions.
 
 ```sql
--- Generalizes desktop_tokens to all peer types. Migrate existing rows in.
+-- Generalizes desktop_tokens to all peer types. The migration copies existing
+-- desktop_tokens rows in and MUST be idempotent: re-running on an already
+-- migrated database is a no-op, never a duplicate or a constraint error.
 CREATE TABLE IF NOT EXISTS peer_sessions (
   session_key TEXT PRIMARY KEY,   -- Claude Code sessionId (CLI) | claimed token (desktop)
   peer_id     TEXT NOT NULL,
@@ -248,12 +292,29 @@ New POST routes on the existing `switch (path)` dispatch, following the
 
 | Route | Request | Response |
 | --- | --- | --- |
-| `/report-event` | `{ peer_id, level, message, source?, logger?, data? }` | `{ ok, event_id }` |
-| `/request-input` | `{ peer_id, question, waiting_for?, urgency? }` | `{ ok, request_id }` |
+| `/report-event` | `{ peer_id \| session_key, level, message, source?, logger?, data? }` | `{ ok, event_id }` |
+| `/request-input` | `{ peer_id \| session_key, question, waiting_for?, urgency? }` | `{ ok, request_id }` |
+| `/close-requests` | `{ session_key, reason }` | `{ ok, closed }` |
 | `/answer-request` | `{ request_id, answerer_id, answer, answered_via }` | `{ ok, woke }` |
 | `/escalate-request` | `{ request_id, note? }` | `{ ok }` |
 | `/get-digest` | `{ peer_id, since_id?, limit? }` | `Digest` (§7) |
 | `/ack-digest` | `{ peer_id, position }` | `{ ok }` |
+
+**Hook-called routes accept `session_key` in place of `peer_id`.** A hook knows
+its `session_id` and nothing else — it has never registered and holds no peer id.
+`/report-event`, `/request-input`, and `/close-requests` therefore resolve either
+key, looking `session_key` up through `peer_sessions` (§5). Exactly one of the
+two must be supplied.
+
+`/close-requests` serves the `UserPromptSubmit` hook (§8): the human answered in
+the agent's own terminal, so that session's open requests are stale and move to
+`canceled` with `answered_via: 'terminal'`.
+
+**Store `status` / `waitingFor` verbatim.** Values from `claude agents --json` are
+recorded as received — never normalized, never mapped to an "other" bucket, never
+rejected as invalid. The docs enum (§2.1) is reference prose for the COS profile,
+not a validation list. If the vocabulary shifts on a Claude Code upgrade, the
+digest keeps working and only the profile needs editing.
 
 `/answer-request` **must not call `handleSendMessage`** (`broker.ts:376`): it
 404s when the target `peers` row is absent (`:378-381`), which is precisely the
@@ -271,11 +332,12 @@ both answer.
 
 ```jsonc
 {
-  "peers":   [{ "id", "name", "summary", "cwd", "peer_type", "last_seen" }],
-  "native":  [{ "sessionId", "name", "status", "waitingFor", "cwd" }],  // claude agents --json
-  "pending": [{ "id", "peer_id", "question", "waiting_for", "urgency", "created_at" }],
-  "events":  [{ "id", "peer_id", "level", "source", "message", "created_at" }],
-  "cursor":  { "from": 1234, "to": 1291, "truncated": false }
+  "peers":     [{ "id", "session_key", "summary", "cwd", "peer_type", "last_seen" }],
+  "native":    [{ "sessionId", "name", "status", "waitingFor", "cwd" }],  // claude agents --json
+  "pending":   [{ "id", "peer_id", "question", "waiting_for", "urgency", "created_at" }],
+  "escalated": [{ "id", "peer_id", "question", "urgency", "created_at", "escalated_at" }],
+  "events":    [{ "id", "peer_id", "level", "source", "message", "created_at" }],
+  "cursor":    { "from": 1234, "to": 1291, "truncated": false }
 }
 ```
 
@@ -285,9 +347,16 @@ with no session context, and coupling it to a CLI whose output shape is
 explicitly version-unstable would be a mistake. Merging two populations into one
 report is precisely the chief-of-staff role.
 
-`pending` returns `state='pending'` **only**. An escalated request is already in
-front of the human; excluding it is enforced by the query, not by prompt
-discipline.
+`pending` returns `state='pending'` only; `escalated` returns `state='escalated'`
+separately. An earlier draft dropped escalated requests from the digest entirely
+so COS would not re-nag — but that means **an escalation the human misses once
+becomes invisible forever**, which is the original failure mode wearing a
+different hat. Visibility belongs in the data; *how loudly to raise it* belongs
+in the COS profile's prose. The two arrays are separate so the profile can treat
+them differently without the query deciding for it.
+
+`peers.session_key` is what makes the join to `native` exact (§4). `peers.name`
+is deliberately absent — nothing populates it.
 
 Cursor semantics: reads never advance; `ack_digest` does, after the tick's work
 succeeds. Two COS readers are safe — `digest_cursors` is per-peer and event reads
@@ -300,13 +369,34 @@ A small bundle in `~/.claude/settings.json`. This is the deterministic signal;
 
 | Hook | Purpose | Key payload fields |
 | --- | --- | --- |
-| `SessionStart` | **Identity.** POST `session_id` → broker, establishing the CLI peer's durable key. | `session_id`, `cwd`, `session_start_reason` (`startup`/`resume`/`clear`/`compact`/`fork`) |
 | `Notification` | **Blocked detection**, no agent cooperation required. | `notification_type` — act on `agent_needs_input`; record `permission_prompt` but **never** answer it (§2.2) |
+| `UserPromptSubmit` | **Out-of-band close.** The human answered in the agent's own terminal, so its open request is stale. | `session_id` → cancel that session's `pending`/`escalated` requests as `canceled`, `answered_via: 'terminal'` |
 | `Stop` | Turn ended — an `info` event marking idleness. | `session_id`, `last_assistant_message` |
+
+`SessionStart` is **not** in this bundle. Identity comes from the environment
+(§4); a hook for it would be redundant.
+
+Without the `UserPromptSubmit` rule, `pending` fills with questions the human
+already answered by typing directly into the blocked agent — noise within a day,
+and COS re-reporting resolved items is worse than COS staying quiet.
 
 `Notification` also emits `idle_prompt`, `agent_completed`, `auth_success`, the
 `elicitation_*` family, and `quota_auto_resume_*`. Only `agent_needs_input` and
 `permission_prompt` are consumed in v1; the rest are recorded at `debug`.
+
+**Installation.** `bun cli.ts install-hooks` writes the settings, and nobody
+hand-types a path: it resolves its own location from `import.meta.dir` (the same
+pattern the README's `claude mcp add` line uses) and registers **one** entrypoint,
+`hook.ts`, which reads `hook_event_name` from stdin and dispatches internally. So
+`settings.json` gets one generated command per event, all pointing at the same
+file. The merge is idempotent — re-running must not duplicate entries — and the
+README says to re-run it after moving the repo.
+
+**Hooks must fail silently and fast.** Timeout ≤ 1s; exit 0 when the broker is
+unreachable; **never auto-launch the broker.** The MCP server deliberately
+auto-launches it, but a hook that did the same would spawn brokers from every
+`SessionStart` in every terminal, and a hook that blocks adds latency to the
+start of every session. Telemetry must never be able to break or slow a session.
 
 **Permission boundary.** A `permission_prompt` notification tells COS an agent is
 blocked *on a permission*. COS reports it to the human and stops there. It may
@@ -348,9 +438,12 @@ Extends `broker.test.ts` (51 passing today, verified by two `bun test` runs).
 
 **The test that matters** — v1's proved the wrong property:
 
-> `request_input` → kill the assignee's process → re-register under the **same
-> `session_key`** → `answer_request` → **assert the restarted peer can read the
-> answer.** Preserving a row addressed to a dead id is not delivery.
+> Send a message to a CLI peer → kill its process → re-register under the **same
+> `session_key`** (a new pid) → **assert the restarted peer reads the message.**
+> Preserving a row addressed to a dead id is not delivery.
+>
+> This is a 1a test and needs no `input_requests`; in 1b the same shape is
+> repeated with `request_input` / `answer_request`.
 
 Also: cursor read-does-not-advance, then `ack_digest` does; concurrent
 `answer_request` (exactly one wins); escalated requests leave `pending`;
@@ -379,23 +472,33 @@ that list for coverage.
 
 | Phase | Contents |
 | --- | --- |
-| **1** | `peer_sessions` identity + `SessionStart` hook; remove both mail-deleting paths (`broker.ts:107` and the `handleListPeers` inline delete); `events` + `input_requests` + digest/cursor; `Notification`/`Stop` hooks; `bun cli.ts digest`; the `buildTools()` type fix |
+| **1a** | `peer_sessions` keyed on `process.env.CLAUDE_CODE_SESSION_ID`; `/register` consults it; remove **both** mail-deleting paths (`broker.ts:107` and the `handleListPeers` inline delete); idempotent `desktop_tokens` migration; the restarted-peer delivery test. **No hooks, no new tools.** |
+| **1b** | `events` + `input_requests` + `digest_cursors`; the new routes and tools; `hook.ts` + `install-hooks` (`Notification`, `UserPromptSubmit`, `Stop`); `bun cli.ts digest`; the `buildTools()` type fix |
 | **2** | COS profile and `/loop` operating model on top of Phase 1, validated against a Desktop peer |
 | **3** | `tasks` — **only if** delegation through the mesh is ever observed |
 | **4** | Optional non-loopback rendezvous so pull-tier sessions wake automatically; web UI over the same schema |
 
-Identity and mail-retention **must land together**. Removing the deletion alone
-leaves the message addressed to an id no future registration can match; making
-identity durable alone leaves the message already deleted.
+**1a ships alone and is independently valuable**: it fixes a live bug — a
+restarted CLI agent currently loses its mail — with no new surface area. Because
+identity comes from the environment rather than a hook (§4), 1a has no hook
+dependency; an earlier split that put identity in 1a and hooks in 1b would have
+shipped plumbing that could not work.
+
+Within 1a, identity and mail-retention **must land together**. Removing the
+deletion alone leaves the message addressed to an id no future registration can
+match; making identity durable alone leaves the message already deleted.
 
 ## 13. Open questions
 
-1. **Are `CLAUDE_CODE_MESSAGING_SOCKET` / `_TOKEN` inherited by an MCP server
-   child?** Unmeasured — a presence check was blocked by the permission
-   classifier and not worked around. If they are inherited, there may be a path
-   to session identity that does not require a hook. Worth one presence-only
-   check (set/unset, length) before building the hook, since it would simplify
-   Phase 1 materially.
+1. ~~**Are the messaging env vars inherited by an MCP server child?**~~
+   **RESOLVED 2026-09-09, and the answer was better than the question.** A
+   presence-only check (variable *names* only, no values read) found that the
+   running MCP server process carries `CLAUDE_CODE_SESSION_ID`, matching the
+   `sessionId` in `claude agents --json` exactly. Identity needs no hook — see
+   §4. For the record, the server's environment does **not** include
+   `CLAUDE_CODE_MESSAGING_SOCKET` / `_TOKEN`, though a Bash tool child does have
+   them; the two spawn environments differ and neither should be assumed from
+   the other. The messaging socket is not used by this design.
 2. **Does an agent reliably call `request_input`?** Now a *secondary* question:
    the `Notification` hook detects blockage without cooperation, so this only
    determines how much *context* a request carries, not whether it is noticed.
@@ -411,3 +514,106 @@ identity durable alone leaves the message already deleted.
 - Compelling execution in another session, or answering a permission prompt.
 - Third-party agent-memory infrastructure — the broker's SQLite is the store.
 - Automatic wake for pull-tier sessions; COS reports who needs a nudge (§9).
+
+---
+
+## 15. Staff engineer review of v2 — 2026-09-09
+
+**Verdict: approved for planning once the four gaps in 15.1 are written in.**
+The three v1 blockers are resolved, and resolved by verification rather than
+assertion — the third code site (`handleListPeers` inline delete, `broker.ts:350`)
+is exactly the kind of thing that survives a fix nobody traced. Every line
+reference in v2 was checked against the branch and holds.
+
+### 15.1 Gaps that must be specified before the implementation plan
+
+**(a) The join between hook and MCP server is unspecified.** §4 says the
+`SessionStart` hook establishes identity and §8 says it POSTs `session_id`. But
+the hook and the MCP server are two processes that reach the broker
+independently, and neither knows the other's key: the hook has `session_id`, the
+server has `HOST_PID`. The only value both hold is the Claude Code process pid —
+the hook's `$PPID`, the server's `process.ppid`. Specify: the hook POSTs
+`/bind-session { pid, session_key, cwd, reason }`; `/register` looks the pid up
+in a pid→session_key binding; and **both arrival orders must work** — hook
+before register (register finds the binding) and register before hook (bind
+re-keys the existing peer row and migrates its peer id into `peer_sessions`).
+Add a test for each order. On `reason: resume`, the new pid binds to the old
+session_key and the peer id comes back from `peer_sessions` — that is the §11
+"test that matters," and it only passes if this join is defined.
+
+**(b) Hook-originated routes cannot supply `peer_id`.** §6 keys `/report-event`
+and `/request-input` on `peer_id`; the `Notification` and `Stop` hooks only know
+`session_id`. Every route a hook calls must accept `session_key` as an
+alternative to `peer_id`, resolved through `peer_sessions`. A hook that fires
+before the session's peer exists (hook-before-register, above) must not fail:
+bind first, then report, in the same handler or the same shell script.
+
+**(c) Out-of-band answers strand requests as `pending` forever.** The human
+will keep typing into agent terminals — that is the workflow. When Dean answers
+the Auditor Agent in its own terminal, its `input_requests` row stays `pending`
+and the digest reports a blockage that no longer exists. Specify: a
+`UserPromptSubmit` hook (the human typed in that session) and a
+`status: working` observation both close that peer's open requests with
+`state: 'canceled', answered_via: 'terminal'`. Without this, `pending` decays
+into noise within a day and COS learns to ignore it.
+
+**(d) `escalated` is invisible by construction, which recreates the four-day
+Auditor Agent.** §7 excludes escalated requests so COS does not re-report them
+each tick. Correct for *details*, wrong for *existence*: an escalation the human
+has forgotten is the exact failure this project exists to fix. Add an
+`escalated` array to the digest — `{ id, peer_id, question, urgency,
+created_at }` — and put the presentation rule in the COS profile ("one line with
+count and oldest age; full detail only when older than N hours"), not in the
+query. The broker returns facts; the profile decides how loud to be.
+
+### 15.2 Should-fix
+
+- **`peers.name` has no source.** The broker's peer row has `summary`; Claude
+  Code's `name` lives in `claude agents --json`. Either drop `name` from the
+  digest's `peers` rows or define where it comes from. What the row *does* need
+  is `session_key`, so COS can join `peers` to `native` on
+  `session_key == sessionId` instead of matching names. That join is the whole
+  merge; make it a key, not a heuristic.
+- **Hook bundle must be installed, not pasted — and no hand-typed paths.**
+  `~/.claude/settings.json` already has hooks on this machine. Ship
+  `bun cli.ts install-hooks` that (1) resolves its own install location from
+  `import.meta.dir` and writes that absolute path — the user never types one,
+  same as the README's `claude mcp add` line; (2) registers **one** entrypoint,
+  `hook.ts`, which reads `hook_event_name` from stdin and dispatches, so the
+  settings file gains one generated command per event, all identical; (3)
+  merges into the existing `hooks` object and is idempotent on re-run;
+  (4) documents "re-run after moving the repo." Every hook must time out fast
+  (≤1s) and exit 0 when the broker is down — the bundle is global and fires in
+  sessions that never loaded this MCP server. Hooks must never auto-launch the
+  broker.
+- **`desktop_tokens` → `peer_sessions` migration must be idempotent.**
+  `CREATE TABLE IF NOT EXISTS` + `INSERT OR IGNORE ... SELECT FROM
+  desktop_tokens` on every startup; keep `desktop_tokens` until one release
+  after. State it, and test the second run.
+- **Split Phase 1.** Identity + mail retention + their tests are a
+  self-contained correctness fix with no new tool surface; ship them as Phase 1a
+  before events/requests/digest/hooks (1b). 1a is reviewable in one sitting and
+  is the bug you already have today.
+- **`Stop` events carry `last_assistant_message`.** Fine under the 8 KB
+  truncation, but say so — it is the one field that will routinely hit the cap.
+
+### 15.3 Decision on open question 13.1
+
+**Run the check; do not wait on it.** (Revised after Dean's read.) It is a
+one-line presence-only test — set/unset and length, never the value — so do it
+and record the result in §13.1. It does not change 1a's shape either way: the
+socket path is not a session id, and the hook bundle ships regardless for
+`Notification`/`Stop`, so `SessionStart` identity on the same bundle is free and
+is the documented, version-stable path. If the variables *are* inherited, note
+it as a possible later shortcut for the MCP server to self-identify; if not, the
+question is closed.
+
+### 15.4 Keep, and worth calling out
+
+§2.1's docs-vs-observed conflict, resolved by observation and flagged for
+re-verification on upgrade. §2.4 naming agent teams and the condition under
+which this project should be *reconsidered rather than extended* — that is the
+right posture for a fork. §7 keeping `claude agents --json` out of the daemon.
+§9's `woke`-driven "who needs a nudge" as the job description. §11 identifying
+the tests that are pinned to the behavior being removed, and the root cause of
+the `tsc` debt rather than a suppression.
