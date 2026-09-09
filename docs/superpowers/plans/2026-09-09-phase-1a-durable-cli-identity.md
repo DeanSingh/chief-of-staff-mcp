@@ -4,7 +4,7 @@
 
 **Goal:** A CLI Claude Code session keeps the same peer id across process restarts, and messages queued for it are never deleted — so an answer sent while it was down is still delivered when it comes back.
 
-**Architecture:** CLI peers are currently keyed on `HOST_PID` (`server.ts:50`), so a restart mints a new peer id and orphans queued mail. Desktop peers already solve this with a `desktop_tokens` table mapping a durable token to a peer id. This generalizes that table into `peer_sessions`, keys CLI peers on `process.env.CLAUDE_CODE_SESSION_ID` (measured present in the MCP server's environment and identical to `claude agents --json`'s `sessionId`), and removes the two code paths that delete undelivered mail.
+**Architecture:** CLI peers are currently keyed on `HOST_PID` (`server.ts:50`), so a restart mints a new peer id and orphans queued mail. Desktop peers already solve this with a `desktop_tokens` table mapping a durable token to a peer id. This generalizes that table into `peer_sessions`, keys CLI peers on `process.env.CLAUDE_CODE_SESSION_ID` (measured present in the MCP server's environment and identical to `claude agents --json`'s `sessionId`), and removes the one path that deletes undelivered mail (plus a surprising row delete in a read handler).
 
 **Tech Stack:** Bun, TypeScript, `bun:sqlite`, `Bun.serve`, `bun test`.
 
@@ -344,7 +344,16 @@ git commit -m "Send the Claude Code session id when registering a CLI peer"
 
 ### Task 4: Stop deleting undelivered mail
 
-Two sites delete a peer's queued messages when its pid looks dead. Both must go; the existing 72h undelivered TTL is the only bound the design wants.
+**Correction to the spec's wording, verified in code.** The spec (§4, §12) says
+"both mail-deleting paths", but there is exactly ONE: `broker.ts:107`
+(`DELETE FROM messages ... delivered = 0`, inside `cleanStalePeers`).
+`handleListPeers:350` calls `deletePeer`, which is `DELETE FROM peers WHERE id = ?`
+— a row delete, not a mail delete.
+
+Both edits are still in scope. The mail delete must go so the 72h undelivered TTL
+is the only bound. The read-path row delete must go because a listing handler
+silently mutating state is a surprising side effect, and with `peer_sessions` in
+place the row delete no longer costs the session its identity.
 
 **Files:**
 - Modify: `broker.ts` (`cleanStalePeers` `:107`; `handleListPeers` inline delete ~`:349`)
@@ -352,17 +361,40 @@ Two sites delete a peer's queued messages when its pid looks dead. Both must go;
 
 **Interfaces:**
 - Consumes: Task 2's durable identity (without it a preserved message is addressed to an id nothing can claim)
-- Produces: no API change
+- Produces: `restartBroker()` in `broker.test.ts`, used again by Task 5
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Add a restart helper and write the failing tests**
+
+`cleanStalePeers` runs at broker startup (`broker.ts:127`) and on a 30s interval
+(`:133`). `/list-peers` never reaches it. So the only deterministic way to
+exercise the mail-deletion path in a test is to restart the broker against the
+same DB. Add this helper to `broker.test.ts`, next to the existing `post` helper:
 
 ```ts
-test("mail for a peer with a dead pid survives the list-peers reaper", async () => {
-  // A genuinely dead pid: spawn a process, kill it, wait for it to exit.
+// cleanStalePeers runs on broker startup, so a restart against the same DB is
+// the deterministic way to trigger the stale-peer sweep. The other trigger is a
+// 30s interval, which is too slow for a test.
+async function restartBroker() {
+  proc.kill();
+  await proc.exited;
+  proc = Bun.spawn(["bun", `${import.meta.dir}/broker.ts`], {
+    env: { ...process.env, CLAUDE_PEERS_PORT: String(PORT), CLAUDE_PEERS_DB: DB },
+    stdout: "ignore", stderr: "ignore",
+  });
+  for (let i = 0; i < 50; i++) {
+    try { if ((await fetch(`${HTTP}/health`)).ok) return; } catch {}
+    await Bun.sleep(100);
+  }
+  throw new Error("broker did not restart");
+}
+```
+
+Then add both tests:
+
+```ts
+test("mail for a dead-pid peer survives the stale-peer sweep", async () => {
   const doomed = Bun.spawn(["sleep", "30"]);
   const deadPid = doomed.pid;
-  doomed.kill();
-  await doomed.exited;
 
   const victim = await post<{ id: string }>("/register", {
     pid: deadPid, cwd: "/tmp/dead-cli", git_root: null, tty: null,
@@ -371,19 +403,47 @@ test("mail for a peer with a dead pid survives the list-peers reaper", async () 
   const sender = await register("Sender", "cli");
   await post("/send-message", { from_id: sender, to_id: victim.id, text: "answer you missed" });
 
-  // list-peers runs its own pid-liveness check and prunes dead rows.
-  await post("/list-peers", { scope: "machine", cwd: "/", git_root: null });
+  doomed.kill();
+  await doomed.exited;
+  await restartBroker();
 
-  // The row may be gone, but the mail must not be.
   const peek = await post<{ messages: Array<{ text: string }> }>("/peek-messages", { id: victim.id });
   expect(peek.messages.map((m) => m.text)).toContain("answer you missed");
 });
+
+test("list-peers hides a dead-pid peer without destroying its identity", async () => {
+  const doomed = Bun.spawn(["sleep", "30"]);
+  const deadPid = doomed.pid;
+  const KEY = "sess-listreap-7777";
+
+  const before = await post<{ id: string }>("/register", {
+    pid: deadPid, cwd: "/tmp/listreap", git_root: null, tty: null,
+    summary: "Reaped by listing", peer_type: "cli", session_key: KEY,
+  });
+  doomed.kill();
+  await doomed.exited;
+
+  const listed = await post<Array<{ id: string }>>("/list-peers", { scope: "machine", cwd: "/", git_root: null });
+  expect(listed.some((p) => p.id === before.id)).toBe(false);
+
+  // The listing must not have cost the session its identity.
+  const after = await post<{ id: string }>("/register", {
+    pid: LIVE_PIDS[0]!, cwd: "/tmp/listreap", git_root: null, tty: null,
+    summary: "", peer_type: "cli", session_key: KEY,
+  });
+  expect(after.id).toBe(before.id);
+});
 ```
 
-- [ ] **Step 2: Run it and confirm it fails**
+- [ ] **Step 2: Run them and confirm the first fails**
 
-Run: `bun test broker.test.ts -t "survives the list-peers reaper"`
-Expected: FAIL — `peek.messages` is empty, because `handleListPeers` deleted the peer and the sweep deleted its mail.
+Run: `bun test broker.test.ts -t "survives the stale-peer sweep"`
+Expected: FAIL — `peek.messages` is empty, because the startup sweep saw a dead
+pid and deleted the peer's undelivered mail at `broker.ts:107`.
+
+The second test may already pass — `peer_sessions` resurrection from Task 2
+covers it. That is fine; it is a regression guard for the `handleListPeers`
+change, not a red-first test.
 
 - [ ] **Step 3: Remove the deletion in `cleanStalePeers`**
 
@@ -421,13 +481,14 @@ In the filter at the end of `handleListPeers` (~`:344-353`), the `catch` current
 
 - [ ] **Step 5: Run the test**
 
-Run: `bun test broker.test.ts -t "survives the list-peers reaper"`
-Expected: PASS
+Run: `bun test broker.test.ts -t "survives the stale-peer sweep"` and
+`bun test broker.test.ts -t "without destroying its identity"`
+Expected: both PASS
 
 - [ ] **Step 6: Run the whole suite**
 
 Run: `bun test`
-Expected: 55 pass, 0 fail
+Expected: 56 pass, 0 fail
 
 - [ ] **Step 7: Commit**
 
@@ -467,10 +528,11 @@ test("a restarted CLI session reads mail queued while it was down", async () => 
   const sender = await register("COS", "cli");
   await post("/send-message", { from_id: sender, to_id: before.id, text: "yes, ship it" });
 
-  // The session dies. The reaper runs.
+  // The session dies and the stale-peer sweep runs (see Task 4: a restart is
+  // what actually triggers cleanStalePeers).
   doomed.kill();
   await doomed.exited;
-  await post("/list-peers", { scope: "machine", cwd: "/", git_root: null });
+  await restartBroker();
 
   // It comes back: same session_key, brand new pid.
   const after = await post<{ id: string }>("/register", {
@@ -493,7 +555,7 @@ Expected: PASS. If it fails on `after.id`, Task 2 is incomplete; if it fails on 
 - [ ] **Step 3: Run the whole suite**
 
 Run: `bun test`
-Expected: 56 pass, 0 fail
+Expected: 57 pass, 0 fail
 
 - [ ] **Step 4: Typecheck**
 
@@ -520,7 +582,7 @@ test("peer_sessions carries desktop tokens forward and re-running is a no-op", a
 - [ ] **Step 6: Run the suite once more**
 
 Run: `bun test`
-Expected: 56 pass, 0 fail
+Expected: 57 pass, 0 fail
 
 - [ ] **Step 7: Commit**
 
@@ -581,7 +643,7 @@ git commit -m "Document durable CLI session identity and mail retention"
 
 ## Done when
 
-- `bun test` → 56 pass, 0 fail
+- `bun test` → 57 pass, 0 fail
 - `bunx tsc --noEmit` → only the two pre-existing `server.test.ts` errors
 - A restarted CLI session keeps its peer id and receives mail queued while it was down
 - Desktop registration, `claim_session`, and `peer_session` behave exactly as before
