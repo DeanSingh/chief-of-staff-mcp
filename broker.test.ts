@@ -19,6 +19,23 @@ async function post<T>(path: string, body: unknown): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+// cleanStalePeers runs on broker startup, so a restart against the same DB is
+// the deterministic way to trigger the stale-peer sweep. The other trigger is a
+// 30s interval, which is too slow for a test.
+async function restartBroker() {
+  proc.kill();
+  await proc.exited;
+  proc = Bun.spawn(["bun", `${import.meta.dir}/broker.ts`], {
+    env: { ...process.env, CLAUDE_PEERS_PORT: String(PORT), CLAUDE_PEERS_DB: DB },
+    stdout: "ignore", stderr: "ignore",
+  });
+  for (let i = 0; i < 50; i++) {
+    try { if ((await fetch(`${HTTP}/health`)).ok) return; } catch {}
+    await Bun.sleep(100);
+  }
+  throw new Error("broker did not restart");
+}
+
 // CLI registrations dedupe by PID, and the broker reaps PIDs that aren't
 // alive, so each fake peer needs its own live-looking PID. Use ours for the
 // first and its parent for the second: both are alive for the test's lifetime.
@@ -192,6 +209,48 @@ describe("broker /watch WebSocket feed", () => {
     expect(back.restored_summary).toBe("Ops agent");
     const peers = await post<Array<{ id: string; summary: string }>>("/list-peers", { scope: "machine", cwd: "/", git_root: null });
     expect(peers.find((p) => p.id === first.id)!.summary).toBe("Ops agent");
+  });
+
+  test("mail for a dead-pid peer survives the stale-peer sweep", async () => {
+    const doomed = Bun.spawn(["sleep", "30"]);
+    const deadPid = doomed.pid;
+
+    const victim = await post<{ id: string }>("/register", {
+      pid: deadPid, cwd: "/tmp/dead-cli", git_root: null, tty: null,
+      summary: "About to die", peer_type: "cli", session_key: "sess-dead-9999",
+    });
+    const sender = await register("Sender", "cli");
+    await post("/send-message", { from_id: sender, to_id: victim.id, text: "answer you missed" });
+
+    doomed.kill();
+    await doomed.exited;
+    await restartBroker();
+
+    const peek = await post<{ messages: Array<{ text: string }> }>("/peek-messages", { id: victim.id });
+    expect(peek.messages.map((m) => m.text)).toContain("answer you missed");
+  });
+
+  test("list-peers hides a dead-pid peer without destroying its identity", async () => {
+    const doomed = Bun.spawn(["sleep", "30"]);
+    const deadPid = doomed.pid;
+    const KEY = "sess-listreap-7777";
+
+    const before = await post<{ id: string }>("/register", {
+      pid: deadPid, cwd: "/tmp/listreap", git_root: null, tty: null,
+      summary: "Reaped by listing", peer_type: "cli", session_key: KEY,
+    });
+    doomed.kill();
+    await doomed.exited;
+
+    const listed = await post<Array<{ id: string }>>("/list-peers", { scope: "machine", cwd: "/", git_root: null });
+    expect(listed.some((p) => p.id === before.id)).toBe(false);
+
+    // The listing must not have cost the session its identity.
+    const after = await post<{ id: string }>("/register", {
+      pid: LIVE_PIDS[0]!, cwd: "/tmp/listreap", git_root: null, tty: null,
+      summary: "", peer_type: "cli", session_key: KEY,
+    });
+    expect(after.id).toBe(before.id);
   });
 
   test("rejects browser upgrades (Origin header present)", async () => {

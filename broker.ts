@@ -122,9 +122,11 @@ function cleanStalePeers() {
       // Check if process is still alive (signal 0 doesn't kill, just checks)
       process.kill(peer.pid, 0);
     } catch {
-      // Process doesn't exist, remove it
+      // Process is gone: drop the row so it stops showing up as live.
+      // Do NOT delete its undelivered mail. The peer id is durable via
+      // peer_sessions, so a restarted session reclaims this id and must still
+      // receive what was queued. The 72h undelivered TTL below is the bound.
       db.run("DELETE FROM peers WHERE id = ?", [peer.id]);
-      db.run("DELETE FROM messages WHERE to_id = ? AND delivered = 0", [peer.id]);
     }
   }
 
@@ -409,7 +411,8 @@ function handleListPeers(body: ListPeersRequest): Peer[] {
       process.kill(p.pid, 0);
       return true;
     } catch {
-      deletePeer.run(p.id);
+      // Hide it from this listing, but do not delete here. Row cleanup is
+      // cleanStalePeers' job, and mail is never deleted (see Task 4 rationale).
       return false;
     }
   });
