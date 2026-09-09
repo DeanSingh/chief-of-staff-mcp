@@ -17,7 +17,7 @@
 - **Desktop behavior must not change.** One bridge MCP server process serves many Desktop/Cowork sessions, so `claim_session` / `peer_session` / `session_token` stay exactly as they are. This plan touches CLI identity only.
 - **Backwards compatible.** When `CLAUDE_CODE_SESSION_ID` is absent (standalone runs, older Claude Code), CLI registration must fall back to the existing pid behavior. No session may fail to register because the env var is missing.
 - **Phase 1a adds no MCP tools, no hooks, and no new tables beyond `peer_sessions`.** Events, input-requests, and the digest are Phase 1b.
-- All 51 existing tests must still pass at every commit.
+- All existing tests must still pass at every commit. Counts named per task are the expected TOTAL at that point; fix rounds in earlier tasks have added tests, so treat a HIGHER total as fine and a LOWER one as a problem.
 
 ---
 
@@ -331,7 +331,7 @@ If it prints `ABSENT`, stop and report: the fallback still works, but Phase 1a's
 
 - [ ] **Step 5: Typecheck and test**
 
-Run: `bunx tsc --noEmit` — expect only the two pre-existing `server.test.ts` errors (TS2352 at `:52`, TS2532 at `:56`), no new ones. Then `bun test` — expect 54 pass.
+Run: `bunx tsc --noEmit` — expect only the two pre-existing `server.test.ts` errors (TS2352 at `:52`, TS2532 at `:56`), no new ones. Then `bun test` — expect 56 pass (the plan originally said 54; fix rounds in Tasks 1-2 added two tests).
 
 - [ ] **Step 6: Commit**
 
@@ -488,7 +488,7 @@ Expected: both PASS
 - [ ] **Step 6: Run the whole suite**
 
 Run: `bun test`
-Expected: 56 pass, 0 fail
+Expected: 58 pass, 0 fail
 
 - [ ] **Step 7: Commit**
 
@@ -555,7 +555,7 @@ Expected: PASS. If it fails on `after.id`, Task 2 is incomplete; if it fails on 
 - [ ] **Step 3: Run the whole suite**
 
 Run: `bun test`
-Expected: 57 pass, 0 fail
+Expected: 59 pass, 0 fail
 
 - [ ] **Step 4: Typecheck**
 
@@ -582,7 +582,7 @@ test("peer_sessions carries desktop tokens forward and re-running is a no-op", a
 - [ ] **Step 6: Run the suite once more**
 
 Run: `bun test`
-Expected: 57 pass, 0 fail
+Expected: 59 pass, 0 fail
 
 - [ ] **Step 7: Commit**
 
@@ -643,7 +643,7 @@ git commit -m "Document durable CLI session identity and mail retention"
 
 ## Done when
 
-- `bun test` → 57 pass, 0 fail
+- `bun test` → 59 pass, 0 fail
 - `bunx tsc --noEmit` → only the two pre-existing `server.test.ts` errors
 - A restarted CLI session keeps its peer id and receives mail queued while it was down
 - Desktop registration, `claim_session`, and `peer_session` behave exactly as before
