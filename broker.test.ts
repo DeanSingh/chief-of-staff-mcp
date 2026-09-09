@@ -181,4 +181,87 @@ describe("broker /watch WebSocket feed", () => {
     expect(mine[0]!.peer_id).toBe(first.id);
     expect(mine[0]!.peer_type).toBe("desktop");
   });
+
+  test("migration: INSERT OR IGNORE copies desktop_tokens to peer_sessions at startup", async () => {
+    // This test ONLY exercises the startup migration (INSERT OR IGNORE ... FROM desktop_tokens),
+    // not the handleRegister write path. It spawns a separate broker against a pre-seeded DB.
+    const MIGRATION_TEST_PORT = PORT + 100;
+    const MIGRATION_TEST_DB = `${import.meta.dir}/.test-broker-migration-${MIGRATION_TEST_PORT}.db`;
+    const MIGRATION_TEST_HTTP = `http://127.0.0.1:${MIGRATION_TEST_PORT}`;
+
+    async function migrationPost<T>(path: string, body: unknown): Promise<T> {
+      const res = await fetch(`${MIGRATION_TEST_HTTP}${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      return res.json() as Promise<T>;
+    }
+
+    // Step 1: Seed a temp DB with a desktop_tokens row (no peer_sessions table yet)
+    const { Database } = await import("bun:sqlite");
+    const seedDb = new Database(MIGRATION_TEST_DB);
+    seedDb.run(`
+      CREATE TABLE desktop_tokens (
+        token TEXT PRIMARY KEY,
+        peer_id TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    `);
+    const seedTime = new Date().toISOString();
+    seedDb.run(`
+      INSERT INTO desktop_tokens (token, peer_id, updated_at)
+      VALUES (?, ?, ?)
+    `, ["mig_test_token", "mig_peer_xyz", seedTime]);
+    seedDb.close();
+
+    // Step 2: Spawn a broker against this seeded DB
+    let migProc = Bun.spawn(["bun", `${import.meta.dir}/broker.ts`], {
+      env: { ...process.env, CLAUDE_PEERS_PORT: String(MIGRATION_TEST_PORT), CLAUDE_PEERS_DB: MIGRATION_TEST_DB },
+      stdout: "ignore", stderr: "ignore",
+    });
+
+    // Step 3: Wait for startup
+    for (let i = 0; i < 50; i++) {
+      try { if ((await fetch(`${MIGRATION_TEST_HTTP}/health`)).ok) break; } catch {}
+      await Bun.sleep(100);
+    }
+
+    // Step 4: Verify migration copied the row with peer_type 'desktop'
+    const rows = await migrationPost<{ rows: Array<{ session_key: string; peer_id: string; peer_type: string }> }>(
+      "/debug-peer-sessions", {},
+    );
+    const migrated = rows.rows.filter((r) => r.session_key === "mig_test_token");
+    expect(migrated).toHaveLength(1);
+    expect(migrated[0]!.peer_id).toBe("mig_peer_xyz");
+    expect(migrated[0]!.peer_type).toBe("desktop");
+
+    // Step 5: Test idempotency - kill and restart broker
+    migProc.kill();
+    await Bun.sleep(200);
+
+    migProc = Bun.spawn(["bun", `${import.meta.dir}/broker.ts`], {
+      env: { ...process.env, CLAUDE_PEERS_PORT: String(MIGRATION_TEST_PORT), CLAUDE_PEERS_DB: MIGRATION_TEST_DB },
+      stdout: "ignore", stderr: "ignore",
+    });
+
+    for (let i = 0; i < 50; i++) {
+      try { if ((await fetch(`${MIGRATION_TEST_HTTP}/health`)).ok) break; } catch {}
+      await Bun.sleep(100);
+    }
+
+    const rows2 = await migrationPost<{ rows: Array<{ session_key: string; peer_id: string; peer_type: string }> }>(
+      "/debug-peer-sessions", {},
+    );
+    const migrated2 = rows2.rows.filter((r) => r.session_key === "mig_test_token");
+    expect(migrated2).toHaveLength(1); // Still exactly one, no error on re-run
+    expect(migrated2[0]!.peer_id).toBe("mig_peer_xyz");
+
+    // Cleanup
+    migProc.kill();
+    await Bun.sleep(100);
+    for (const suffix of ["", "-wal", "-shm"]) {
+      try { await Bun.file(MIGRATION_TEST_DB + suffix).delete(); } catch {}
+    }
+  });
 });
