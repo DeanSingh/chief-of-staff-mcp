@@ -284,6 +284,16 @@ function handleRegister(body: RegisterRequest): RegisterResponse {
   const id = generateId();
   if (token) {
     db.run("INSERT OR REPLACE INTO desktop_tokens (token, peer_id, updated_at) VALUES (?, ?, ?)", [token, id, now]);
+    // Desktop identity is still resolved through desktop_tokens above (the
+    // lookups at the top of this function and the resurrection branch both
+    // read desktop_tokens, never peer_sessions). This write only mirrors the
+    // mapping into peer_sessions so it exists — it is not read yet. It lets a
+    // later phase finish the migration (switch desktop lookups to read
+    // peer_sessions too) and eventually drop desktop_tokens, without a
+    // backfill step. Deliberately uncovered by a desktop-specific test: the
+    // only way to assert peer_sessions is actually read today is a
+    // cross-type test that would break the moment the CLI-only lookup at
+    // (see the cliKey branch below) gets hardened to also check peer_type.
     db.run("INSERT OR REPLACE INTO peer_sessions (session_key, peer_id, peer_type, updated_at) VALUES (?, ?, ?, ?)", [token, id, "desktop", now]);
   }
 

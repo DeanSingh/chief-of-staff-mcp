@@ -237,7 +237,7 @@ describe("broker /watch WebSocket feed", () => {
     expect(peek.messages.map((m) => m.text)).toContain("answer you missed");
   });
 
-  test("a restarted CLI session reads mail queued while it was down", async () => {
+  test("a restarted CLI session still reads mail sent before it died", async () => {
     const KEY = "sess-restart-4242";
     const doomed = Bun.spawn(["sleep", "30"]);
     const deadPid = doomed.pid;
@@ -248,7 +248,13 @@ describe("broker /watch WebSocket feed", () => {
       summary: "CA1", peer_type: "cli", session_key: KEY,
     });
 
-    // Someone answers it.
+    // Someone answers it WHILE IT IS STILL ALIVE. This is the only case there
+    // is to test: handleSendMessage refuses any send whose to_id has no peers
+    // row ("stale or expired ID"), and cleanStalePeers deletes that row within
+    // ~30s of the pid dying, so nothing can be queued for this peer again
+    // until it re-registers. The guarantee this test proves is narrower than
+    // its old name claimed — mail sent before death survives death, not that
+    // mail can be queued for a peer that is already gone.
     const sender = await register("COS", "cli");
     await post("/send-message", { from_id: sender, to_id: before.id, text: "yes, ship it" });
 
@@ -304,17 +310,6 @@ describe("broker /watch WebSocket feed", () => {
     expect(res.status).toBe(403);
   });
 
-  test("peer_sessions carries desktop tokens forward and re-running is a no-op", async () => {
-    const reg = () => post<{ id: string }>("/register", {
-      pid: LIVE_PIDS[0]!, cwd: "cs_mig", git_root: null, tty: null,
-      summary: "Migration agent", peer_type: "desktop", session_token: "cs_mig",
-    });
-    const first = await reg();
-    await post("/unregister", { id: first.id });
-    const back = await reg();
-    expect(back.id).toBe(first.id);
-  });
-
   test("migration: INSERT OR IGNORE copies desktop_tokens to peer_sessions at startup", async () => {
     // This test ONLY exercises the startup migration (INSERT OR IGNORE ... FROM desktop_tokens),
     // not the handleRegister write path. It spawns a separate broker against a pre-seeded DB.
@@ -366,11 +361,16 @@ describe("broker /watch WebSocket feed", () => {
       if (!started) throw new Error("Migration broker did not start");
 
       // Step 4: Verify migration copied the row, through the public surface.
-      // No peers row exists yet for mig_peer_xyz (only desktop_tokens/peer_sessions
-      // were seeded), so a CLI registration keyed to the migrated session_key can
-      // only get mig_peer_xyz back by reading it out of peer_sessions — the same
-      // table the startup migration writes into. This also exercises the CLI
-      // resurrection branch of handleRegister (mapped session_key, no live peer row).
+      // The seed above only creates desktop_tokens. peer_sessions is
+      // deliberately ABSENT from the seed — it does not exist until the
+      // startup migration creates it and copies this row into it. (Do not
+      // "helpfully" pre-seed peer_sessions here: that would make this test
+      // pass without the migration ever running.) So a CLI registration keyed
+      // to the migrated session_key can only get mig_peer_xyz back by reading
+      // it out of peer_sessions — the same table the startup migration writes
+      // into. No peers row exists yet for mig_peer_xyz either, so this first
+      // call also exercises the CLI resurrection branch of handleRegister
+      // (mapped session_key, no live peer row).
       const reg1 = await migrationPost<{ id: string }>("/register", {
         pid: process.pid, cwd: "/tmp/mig", git_root: null, tty: null,
         summary: "", peer_type: "cli", session_key: "mig_test_token",
@@ -398,6 +398,12 @@ describe("broker /watch WebSocket feed", () => {
 
       // Re-running the migration on restart must not disturb the mapping:
       // the same session_key still resolves to the same peer_id, no error.
+      // Note this second call takes the LIVE branch, NOT resurrection: reg1
+      // above inserted a peers row under pid=process.pid, which is this test
+      // process itself and stays alive across the restart, so cleanStalePeers
+      // never reaps it. What this half proves is that peer_sessions still
+      // holds the right mapping after a second migration run, not a second
+      // pass through the resurrection branch.
       const reg2 = await migrationPost<{ id: string }>("/register", {
         pid: process.pid, cwd: "/tmp/mig", git_root: null, tty: null,
         summary: "", peer_type: "cli", session_key: "mig_test_token",
