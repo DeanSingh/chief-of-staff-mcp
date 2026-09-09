@@ -49,6 +49,20 @@ const BROKER_WS_URL = `ws://127.0.0.1:${BROKER_PORT}`;
  */
 const HOST_PID = process.ppid && process.ppid > 1 ? process.ppid : process.pid;
 
+/**
+ * Claude Code's own session id, which this MCP server inherits in its
+ * environment. Measured 2026-09-09: present in the server process and equal to
+ * the `sessionId` from `claude agents --json`. Stable across --resume and
+ * across crash+restart, so the broker keys CLI peer identity on it and a
+ * restarted session keeps its id and its queued mail. Undefined when run
+ * standalone; the broker falls back to pid matching.
+ *
+ * Desktop is unaffected: one bridge process serves many sessions, so a
+ * process-level variable cannot discriminate between them and those sessions
+ * continue to use claim_session / peer_session.
+ */
+const SESSION_KEY = process.env.CLAUDE_CODE_SESSION_ID || undefined;
+
 /** WebSocket feed URL for a peer's inbound messages (see broker /watch). */
 export function watchUrl(peerId: PeerId): string {
   return `${BROKER_WS_URL}/watch/${encodeURIComponent(peerId)}`;
@@ -186,6 +200,7 @@ async function ensureRegistered(): Promise<void> {
         tty,
         summary: myLastSummary || PEER_NAME,
         peer_type: PEER_TYPE,
+        session_key: SESSION_KEY,
       });
       log(`Re-registered as peer ${reg.id} (was ${myId})`);
       myId = reg.id;
@@ -1122,9 +1137,10 @@ async function main() {
       tty,
       summary: PEER_NAME,
       peer_type: PEER_TYPE,
+      session_key: SESSION_KEY,
     });
     myId = reg.id;
-    log(`Registered as peer ${myId} (host pid ${HOST_PID})`);
+    log(`Registered as peer ${myId} (host pid ${HOST_PID}, session_key ${SESSION_KEY ?? "none — falling back to pid"})`);
 
     if (reg.restored_summary) {
       myLastSummary = reg.restored_summary;
