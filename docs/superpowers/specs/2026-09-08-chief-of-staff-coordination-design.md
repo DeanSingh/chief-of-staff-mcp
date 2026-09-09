@@ -29,15 +29,41 @@ The primary flow is **upward**. Delegation is secondary and human-confirmed.
 
 **In scope (v1):**
 
-- Local Claude Code terminals and local Claude Desktop sessions.
+- Claude Code terminals **and Desktop / cloud Cowork sessions**. All three are
+  full participants in every tool this design adds.
 - Terminal as the human-facing surface: COS runs in its own terminal and reports
   there.
 - Durable task, event, and input-request state in the existing broker SQLite.
 
+### 2.1 What "reachable" actually means — three delivery tiers
+
+An earlier draft excluded cloud Cowork on the grounds that it cannot reach
+`127.0.0.1:7899`. **That was wrong**, and it conflated two different things.
+
+A Cowork sandbox cannot open a socket to the broker *itself*. But its MCP **tool
+calls** are proxied through Claude Desktop's `remote-devices` bridge to an MCP
+server process running **locally on the human's machine**, and that process talks
+to the loopback broker normally. Observed 2026-09-08: eight desktop peers, all
+sharing the bridge's PID 26126 — including sessions with `cwd` of `/home/claude`
+and `/sessions/rcw-…` — all registered and heartbeating within the same second.
+
+So the axis that matters is **not** reachability. It is **wake**:
+
+| Tier | Sessions | Reaches broker | Woken automatically |
+| --- | --- | --- | --- |
+| **Push** | CLI terminals with the channels flag | ✅ direct | ✅ channel push resumes an idle session (§14) |
+| **Watch** | Local Desktop with a `Monitor` armed | ✅ direct | ✅ WS wake feed |
+| **Pull** | Cloud Cowork; any session without push or watch | ✅ **via the bridge** | ❌ next tool call, or the human types "check messages" |
+
+Every tier can `report_event`, `request_input`, `answer_request`, and read a
+digest. Only the wake behavior differs. The design must therefore never assume an
+answer *arrives*; it must only assume an answer is *durable and retrievable*.
+
 **Explicitly out of scope (v1):**
 
-- **Cloud Cowork sessions.** They cannot reach `127.0.0.1:7899`. Participation
-  requires a non-loopback rendezvous point; deferred with the tunnel decision.
+- **Automatic wake for pull-tier sessions.** Solving it means a non-loopback
+  rendezvous (the deferred tunnel). Not solving it costs a human nudge, which is
+  the status quo and is acceptable.
 - **Web UI / dashboard.** Deferred. The schema below is the data source it will
   eventually read, so nothing here blocks it.
 - **Directive execution.** COS cannot *cause* work to start in another session.
@@ -374,9 +400,18 @@ agent    wakes on channel push, reads the answer, resumes
   peer that has an open (`pending`/`escalated`) `input_requests` row or a
   non-terminal assigned task. The existing 72h undelivered-message TTL still
   bounds growth.
-- *`woke: 0`.* The agent was not listening. The answer is durable; it arrives on
-  the agent's next `check_messages` or tool call. COS should report a `woke: 0`
-  answer to the human as "sent but not yet picked up."
+- *Pull-tier assignee (cloud Cowork, or any peer with no push/watch).* The answer
+  is recorded and queued exactly as for any other peer. It is delivered on that
+  session's next claude-peers tool call, or when the human types "check
+  messages." **This is a normal outcome, not a failure** — see §2.1.
+
+  It does, however, create a real COS responsibility: `answer_request` returns
+  the same `woke` count `send_message` does, so COS knows whether an answer
+  landed live or is sitting in a queue. **COS must surface pull-tier answers to
+  the human as needing a nudge** — *"answered `x5wqlfrt`'s COGS question; it's a
+  desktop peer, so it won't see it until you prompt it."* Tracking which agents
+  need poking is precisely the chief-of-staff job, and the data for it is already
+  in the response.
 - *Duplicate answers.* Rejected — the second `answer_request` returns
   `{ ok: false }` rather than overwriting.
 - *Agent asks without a task.* `task_id` is nullable; the request stands alone.
@@ -456,7 +491,7 @@ rather than worked around.
 | **1** | `events`, `tasks`, digest + cursor, `report_event`, `assign_task`, `update_task`, CLI `digest` | COS can observe and report up. Solves the primary pain. |
 | **2** | `input_requests`, `request_input`, `answer_request`, `escalate_request`, **the `cleanStalePeers` mail guard (§9)** | Blocked agents become visible and unblockable. |
 | **3** | `Stop` / `Notification` hooks POSTing to the broker as a passive backstop for agents that stall without reporting | Coverage for silent stalls — *only if they prove to be a real problem.* |
-| **4** | Non-loopback rendezvous for cloud Cowork; web UI over the same schema | Cross-environment and away-from-keyboard. |
+| **4** | Optional non-loopback rendezvous (the deferred tunnel) so pull-tier sessions wake automatically; web UI over the same schema | Removes the human nudge; away-from-keyboard. |
 
 Phase 1 is independently useful and should ship before Phase 2 begins.
 
@@ -498,10 +533,11 @@ is only that an idle agent receives the answer without needing a human to type
 into its terminal. Both peers explicitly flagged their inference as inference,
 and it is recorded here as such.
 
-**Not verified:** the same behavior for local Claude Desktop peers, which
-`server.ts` states lack native channel push. Desktop remains dependent on
-`Monitor` or the next tool call. Phase 2 should be validated against a Desktop
-peer before its scope claim in §2 is trusted.
+**Scope of the result.** This verifies the *push* tier only (§2.1). Desktop and
+cloud Cowork peers lack channel push by design and are pull-tier: their answers
+queue durably and arrive on the next tool call or a human nudge. That is a
+known, accepted behavior — not an unverified assumption — so nothing in Phase 2
+is blocked on testing it. What Phase 2 must do is *report* it, per §9.
 
 ## 15. Open questions
 
@@ -520,4 +556,6 @@ peer before its scope claim in §2 is trusted.
 - Compelling execution in another session.
 - Any dependency on third-party agent-memory infrastructure. The broker's SQLite
   is the store; adding another would create a second source of truth.
+- Automatic wake for pull-tier sessions. COS reports which agents need a nudge
+  (§9); it does not try to eliminate the nudge.
 - A2A or MCP-logging *protocol* compliance. We borrow vocabulary only.
