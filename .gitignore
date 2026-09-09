@@ -35,3 +35,8 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# Ephemeral test broker databases (created and deleted during test runs)
+.test-broker-*
+.test-broker-*.db-wal
+.test-broker-*.db-shm

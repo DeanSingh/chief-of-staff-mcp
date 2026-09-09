@@ -241,11 +241,12 @@ describe("broker /watch WebSocket feed", () => {
       expect(migrated[0]!.peer_id).toBe("mig_peer_xyz");
       expect(migrated[0]!.peer_type).toBe("desktop");
 
-      // Step 5: Test idempotency - kill and restart broker
+      // Step 5: Test idempotency - kill first broker and wait for it to exit
       migProc.kill();
-      migProc = null;
-      await Bun.sleep(200);
+      await migProc.exited; // Deterministically wait for process to actually exit
+      await Bun.sleep(200); // Give port time to be released by OS
 
+      // Step 5b: Spawn second broker on same port
       migProc = Bun.spawn(["bun", `${import.meta.dir}/broker.ts`], {
         env: { ...process.env, CLAUDE_PEERS_PORT: String(MIGRATION_TEST_PORT), CLAUDE_PEERS_DB: MIGRATION_TEST_DB },
         stdout: "ignore", stderr: "ignore",
@@ -268,16 +269,14 @@ describe("broker /watch WebSocket feed", () => {
 
     } finally {
       // Cleanup - guaranteed to run even if assertions fail
-      if (migProc?.pid) {
-        try { process.kill(migProc.pid); } catch {} // SIGTERM (default)
-      }
-      // Fallback: try subprocess kill as well
       if (migProc) {
         try { migProc.kill(); } catch {}
+        try { await migProc.exited; } catch {} // Wait for process to actually exit
       }
-      await Bun.sleep(500); // Wait for process to fully exit
+      // Delete temp files - only after process is truly gone
       for (const suffix of ["", "-wal", "-shm"]) {
-        try { await Bun.file(MIGRATION_TEST_DB + suffix).delete(); } catch {}
+        const filePath = MIGRATION_TEST_DB + suffix;
+        try { await Bun.file(filePath).delete(); } catch {} // Missing file is OK
       }
     }
   });
