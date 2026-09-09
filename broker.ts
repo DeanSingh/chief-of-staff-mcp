@@ -258,6 +258,7 @@ function handleRegister(body: RegisterRequest): RegisterResponse {
   // what keeps a Cowork session's peer id stable across the several MCP
   // server processes Desktop runs (and respawns) for the same session.
   const token = !isCli && body.session_token ? body.session_token : null;
+  const cliKey = isCli && body.session_key ? body.session_key : null;
   if (token) {
     const existing = selectPeerBySessionToken.get(token) as Peer | null;
     if (existing) {
@@ -284,13 +285,37 @@ function handleRegister(body: RegisterRequest): RegisterResponse {
     db.run("INSERT OR REPLACE INTO peer_sessions (session_key, peer_id, peer_type, updated_at) VALUES (?, ?, ?, ?)", [token, id, "desktop", now]);
   }
 
-  // CLI re-registration for a pid we already know (the Claude Code session
-  // pid — its MCP server process may have been respawned by /mcp reconnect):
-  // keep the SAME peer id so addresses other agents hold stay valid, and keep
-  // the summary unless a new one is given.
+  // CLI identity. Prefer Claude Code's session id: it survives process death,
+  // so a restarted session gets its id (and its queued mail) back. Fall back
+  // to pid matching when no key was supplied.
   // Desktop sessions share one VM PID, so PID-based matching would conflate
   // other active sessions; they are keyed by session_token above instead.
-  if (isCli) {
+  if (cliKey) {
+    const mapped = db.query("SELECT peer_id FROM peer_sessions WHERE session_key = ?")
+      .get(cliKey) as { peer_id: string } | null;
+    if (mapped) {
+      const live = db.query("SELECT id, summary FROM peers WHERE id = ?")
+        .get(mapped.peer_id) as { id: string; summary: string } | null;
+      if (live) {
+        db.run(
+          "UPDATE peers SET pid = ?, cwd = ?, git_root = ?, tty = ?, last_seen = ?, summary = CASE WHEN ? = '' THEN summary ELSE ? END WHERE id = ?",
+          [body.pid, body.cwd, body.git_root, body.tty, now, body.summary ?? "", body.summary ?? "", live.id],
+        );
+      } else {
+        // Row was reaped but the session is back: resurrect under the SAME id
+        // so mail queued for it is still addressed correctly.
+        insertPeer.run(mapped.peer_id, body.pid, body.cwd, body.git_root, body.tty, body.summary ?? "", peerType, now, now, null);
+      }
+      db.run("UPDATE peer_sessions SET updated_at = ? WHERE session_key = ?", [now, cliKey]);
+      if (body.summary) cacheSummary(body.cwd, body.git_root, body.summary);
+      const restored = live && !body.summary ? live.summary || undefined : undefined;
+      return { id: mapped.peer_id, restored_summary: restored };
+    }
+  } else if (isCli) {
+    // CLI re-registration for a pid we already know (the Claude Code session
+    // pid — its MCP server process may have been respawned by /mcp reconnect):
+    // keep the SAME peer id so addresses other agents hold stay valid, and keep
+    // the summary unless a new one is given.
     const existing = db.query("SELECT id, summary FROM peers WHERE pid = ? AND peer_type != 'desktop'").get(body.pid) as { id: string; summary: string } | null;
     if (existing) {
       db.run(
@@ -311,6 +336,12 @@ function handleRegister(body: RegisterRequest): RegisterResponse {
 
   if (summary && isCli) {
     cacheSummary(body.cwd, body.git_root, summary);
+  }
+
+  // Only reached when a genuinely new peer is being minted. Record its durable
+  // key so the next registration under the same session reclaims this id.
+  if (cliKey) {
+    db.run("INSERT OR REPLACE INTO peer_sessions (session_key, peer_id, peer_type, updated_at) VALUES (?, ?, 'cli', ?)", [cliKey, id, now]);
   }
 
   insertPeer.run(id, body.pid, body.cwd, body.git_root, body.tty, summary, peerType, now, now, token);

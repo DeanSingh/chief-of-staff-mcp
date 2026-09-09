@@ -154,6 +154,28 @@ describe("broker /watch WebSocket feed", () => {
     expect(b.id).toBe(a.id);
   });
 
+  test("cli peers keyed by session_key keep their id across pid changes", async () => {
+    const reg = (pid: number, summary: string) => post<{ id: string; restored_summary?: string }>("/register", {
+      pid, cwd: "/tmp/cli-sess", git_root: null, tty: "ttys100", summary,
+      peer_type: "cli", session_key: "sess-aaaa-1111",
+    });
+    const first = await reg(LIVE_PIDS[0]!, "CA1");
+    // Same session, restarted: a DIFFERENT pid, same session_key.
+    const second = await reg(LIVE_PIDS[1]!, "");
+    expect(second.id).toBe(first.id);
+    expect(second.restored_summary).toBe("CA1");
+  });
+
+  test("cli registration without a session_key still dedupes by pid", async () => {
+    const reg = (summary: string) => post<{ id: string }>("/register", {
+      pid: LIVE_PIDS[1]!, cwd: "/tmp/cli-nokey", git_root: null, tty: "ttys101",
+      summary, peer_type: "cli",
+    });
+    const a = await reg("Legacy agent");
+    const b = await reg("");
+    expect(b.id).toBe(a.id);
+  });
+
   test("rejects browser upgrades (Origin header present)", async () => {
     const res = await fetch(`${HTTP}/watch/anyone`, {
       headers: {
