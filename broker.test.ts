@@ -196,6 +196,7 @@ describe("broker /watch WebSocket feed", () => {
     // test in this file left behind on LIVE_PIDS.
     const doomed = Bun.spawn(["sleep", "30"]);
     const pid = doomed.pid;
+    const restarted = Bun.spawn(["sleep", "30"]);
     try {
       // Simulates every existing session at the moment this fix lands: a
       // peers row keyed on pid alone, no peer_sessions mapping at all.
@@ -217,9 +218,21 @@ describe("broker /watch WebSocket feed", () => {
 
       const peek = await post<{ messages: Array<{ text: string }> }>("/peek-messages", { id: after.id });
       expect(peek.messages.map((m) => m.text)).toContain("queued before upgrade");
+
+      // The assertions above also hold on a broker that ignores session_key
+      // entirely (same pid -> same id). What proves the adoption RECORDED the
+      // key -> id mapping is a later registration that can only resolve by
+      // key: same session_key, a different pid.
+      const later = await post<{ id: string }>("/register", {
+        pid: restarted.pid, cwd: "/tmp/upgrade-cli", git_root: null, tty: null,
+        summary: "", peer_type: "cli", session_key: "sess-upgrade-adopt-1",
+      });
+      expect(later.id).toBe(before.id);
     } finally {
       doomed.kill();
+      restarted.kill();
       await doomed.exited;
+      await restarted.exited;
     }
   });
 
@@ -330,27 +343,47 @@ describe("broker /watch WebSocket feed", () => {
     // handleHeartbeat must advance peer_sessions.updated_at, keyed on peer_id
     // (not the primary key session_key). If that write is missing, this
     // assertion fails regardless of how the 30-day sweep itself behaves.
+    //
+    // A second, idle peer guards the other direction: an UPDATE missing its
+    // WHERE clause would refresh every mapping, pass the first assertion, and
+    // silently defeat the TTL. Fresh pids keep both registrations off the
+    // pid-adoption path, so they are guaranteed to be two distinct peers.
     const KEY = "sess-heartbeat-refresh-1";
-    const reg = await post<{ id: string }>("/register", {
-      pid: LIVE_PIDS[0]!, cwd: "/tmp/heartbeat-refresh", git_root: null, tty: null,
-      summary: "Heartbeating agent", peer_type: "cli", session_key: KEY,
-    });
+    const IDLE_KEY = "sess-heartbeat-idle-1";
+    const busyProc = Bun.spawn(["sleep", "30"]);
+    const idleProc = Bun.spawn(["sleep", "30"]);
 
     const { Database } = await import("bun:sqlite");
     const readDb = new Database(DB, { readonly: true });
+    const updatedAt = (key: string) =>
+      new Date((readDb.query("SELECT updated_at FROM peer_sessions WHERE session_key = ?").get(key) as { updated_at: string }).updated_at).getTime();
     try {
-      const before = readDb.query("SELECT updated_at FROM peer_sessions WHERE session_key = ?").get(KEY) as { updated_at: string };
-      expect(before.updated_at).toBeTruthy();
+      const reg = await post<{ id: string }>("/register", {
+        pid: busyProc.pid, cwd: "/tmp/heartbeat-refresh", git_root: null, tty: null,
+        summary: "Heartbeating agent", peer_type: "cli", session_key: KEY,
+      });
+      const idle = await post<{ id: string }>("/register", {
+        pid: idleProc.pid, cwd: "/tmp/heartbeat-idle", git_root: null, tty: null,
+        summary: "Idle agent", peer_type: "cli", session_key: IDLE_KEY,
+      });
+      expect(idle.id).not.toBe(reg.id);
+
+      const before = updatedAt(KEY);
+      const idleBefore = updatedAt(IDLE_KEY);
 
       // Ensure the next timestamp is measurably later (ISO strings are
       // millisecond-resolution) before heartbeating.
       await Bun.sleep(20);
       await post("/heartbeat", { id: reg.id });
 
-      const after = readDb.query("SELECT updated_at FROM peer_sessions WHERE session_key = ?").get(KEY) as { updated_at: string };
-      expect(new Date(after.updated_at).getTime()).toBeGreaterThan(new Date(before.updated_at).getTime());
+      expect(updatedAt(KEY)).toBeGreaterThan(before);
+      expect(updatedAt(IDLE_KEY)).toBe(idleBefore);
     } finally {
       readDb.close();
+      busyProc.kill();
+      idleProc.kill();
+      await busyProc.exited;
+      await idleProc.exited;
     }
   });
 

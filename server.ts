@@ -1142,7 +1142,7 @@ async function main() {
     // if a previous session in this workspace cached one.
     const reg = await brokerFetch<RegisterResponse>("/register", cliRegisterBody(PEER_NAME));
     myId = reg.id;
-    log(`Registered as peer ${myId} (host pid ${HOST_PID}, session_key ${SESSION_KEY ?? "none — falling back to pid"})`);
+    log(`Registered as peer ${myId} (host pid ${HOST_PID}, session_key ${SESSION_KEY ? "present" : "absent — falling back to pid"})`);
 
     if (reg.restored_summary) {
       myLastSummary = reg.restored_summary;
