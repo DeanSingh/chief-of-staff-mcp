@@ -4,6 +4,7 @@ import {
   SESSION_ID_REQUIRED_TOOLS,
   SESSION_PARAM,
   isAmbiguousSession,
+  cliRegisterBody,
 } from "./server.ts";
 
 // Two independent transport constraints are pinned here, both learned the
@@ -121,4 +122,36 @@ describe("watch instructions", () => {
     expect(text).toContain("persistent: true");
     expect(text).toContain("cli.ts watch abc123");
   });
+});
+
+describe("CLI registration builder", () => {
+  // Structural, independent of CLAUDE_CODE_SESSION_ID's value: dropping the
+  // `session_key: SESSION_KEY` line from cliRegisterBody must fail this test
+  // in every environment, whether or not the env var happens to be set. The
+  // old version of this test compared `body.session_key` against a
+  // re-derivation of the same env var, so it passed even when both sides
+  // were undefined — exactly the silent-regression case this test exists to
+  // catch (see the comment on cliRegisterBody itself).
+  test("cliRegisterBody always includes a session_key property", () => {
+    const body = cliRegisterBody("test summary");
+    expect(body).toHaveProperty("session_key");
+  });
+
+  const hasSessionEnv = !!process.env.CLAUDE_CODE_SESSION_ID;
+  if (!hasSessionEnv) {
+    console.warn(
+      "[server.test.ts] CLAUDE_CODE_SESSION_ID is not set in this environment " +
+      "— skipping the session_key VALUE assertion below (structural presence " +
+      "is still checked above, in every environment)."
+    );
+  }
+
+  test.skipIf(!hasSessionEnv)(
+    "cliRegisterBody's session_key matches CLAUDE_CODE_SESSION_ID when the env var is set",
+    () => {
+      const body = cliRegisterBody("test summary");
+      expect(body.session_key).not.toBeUndefined();
+      expect(body.session_key).toBe(process.env.CLAUDE_CODE_SESSION_ID);
+    }
+  );
 });

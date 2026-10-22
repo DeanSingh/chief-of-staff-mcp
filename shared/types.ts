@@ -40,6 +40,14 @@ export interface RegisterRequest {
    * reconnects) is serving the call.
    */
   session_token?: string;
+  /**
+   * CLI only: Claude Code's own session id (process.env.CLAUDE_CODE_SESSION_ID).
+   * Stable across --resume and across crash+restart, so the broker keys the
+   * peer on it and the same id comes back after the process dies. Absent when
+   * the server runs standalone or on a Claude Code without the variable, in
+   * which case registration falls back to pid matching.
+   */
+  session_key?: string;
 }
 
 export interface RegisterResponse {
