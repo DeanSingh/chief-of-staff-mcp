@@ -224,3 +224,45 @@ describe("CLI registration builder", () => {
     }
   );
 });
+
+describe("hardening: what the server leaks and how it delivers", () => {
+  test("a desktop registration never uses the session token as its cwd", async () => {
+    const { desktopRegisterBody } = await import("./server.ts");
+    const body = desktopRegisterBody("cs_0123456789ab", "PM agent");
+    expect(body.session_token).toBe("cs_0123456789ab");
+    expect(body.peer_type).toBe("desktop");
+    expect(body.summary).toBe("PM agent");
+    expect(JSON.stringify({ ...body, session_token: undefined })).not.toContain("cs_0123456789ab");
+  });
+
+  test("the tool-call log line carries no argument values", async () => {
+    const { toolCallLogLine } = await import("./server.ts");
+    const line = toolCallLogLine("send_message", { to_id: "abc", message: "patient record 42", peer_session: "cs_0123456789ab" });
+    expect(line).toContain("send_message");
+    expect(line).not.toContain("cs_0123456789ab");
+    expect(line).not.toContain("patient record 42");
+  });
+
+  test("peer text is never handed to a sampling request as a user turn", async () => {
+    const src = await Bun.file(`${import.meta.dir}/server.ts`).text();
+    expect(src.includes("createMessage")).toBe(false);
+  });
+
+  test("the debug log is owner-only", async () => {
+    const { tightenLogFile } = await import("./server.ts");
+    const { mkdtempSync, writeFileSync, chmodSync, statSync, rmSync } = await import("node:fs");
+    const dir = mkdtempSync(`${require("node:os").tmpdir()}/cp-log-`);
+    try {
+      const fresh = `${dir}/new.log`;
+      tightenLogFile(fresh);
+      expect(statSync(fresh).mode & 0o777).toBe(0o600);
+      const old = `${dir}/old.log`;
+      writeFileSync(old, "x");
+      chmodSync(old, 0o644);
+      tightenLogFile(old);
+      expect(statSync(old).mode & 0o777).toBe(0o600);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

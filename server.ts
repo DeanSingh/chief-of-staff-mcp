@@ -13,7 +13,8 @@
  *   { "claude-peers": { "command": "bun", "args": ["./server.ts"] } }
  */
 
-import { appendFileSync } from "node:fs";
+import { appendFileSync, chmodSync } from "node:fs";
+import { authHeaders } from "./shared/auth.ts";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -137,10 +138,22 @@ const PEER_TYPE = detectPeerType();
 
 // --- Broker communication ---
 
-async function brokerFetch<T>(path: string, body: unknown): Promise<T> {
+/**
+ * Each peer's broker credential, from its /register response. Routes that act
+ * as a peer (send, poll, ack, heartbeat, set-summary) must carry it.
+ */
+const credentials = new Map<PeerId, string>();
+
+function remember(reg: RegisterResponse): RegisterResponse {
+  if (reg.peer_secret) credentials.set(reg.id, reg.peer_secret);
+  return reg;
+}
+
+/** POST to the broker; `as` names the peer the call acts for. */
+async function brokerFetch<T>(path: string, body: unknown, as?: PeerId | null): Promise<T> {
   const res = await fetch(`${BROKER_URL}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders(as ? credentials.get(as) : undefined),
     body: JSON.stringify(body),
   });
   if (!res.ok) {
@@ -219,6 +232,21 @@ async function ensureBroker(): Promise<void> {
 // file — the bridge instance's stderr goes to /dev/null, which makes the
 // sessions that actually hit bugs invisible. Mirror every log line to a
 // file so both processes are diagnosable.
+/** The debug log records peer ids and tool names: owner-only. */
+export function tightenLogFile(path: string): void {
+  try {
+    appendFileSync(path, "", { mode: 0o600 });
+    chmodSync(path, 0o600);
+  } catch {
+    // Logging must never break the server
+  }
+}
+
+/** One log line per tool call. Names only: values carry session tokens and message text. */
+export function toolCallLogLine(name: string, args: Record<string, unknown> | undefined): string {
+  return `Tool call ${name} args=[${Object.keys(args ?? {}).join(", ")}]`;
+}
+
 function log(msg: string) {
   const line = `[claude-peers] ${msg}`;
   // MCP stdio servers must only use stderr for logging (stdout is the MCP protocol)
@@ -243,7 +271,7 @@ async function ensureRegistered(): Promise<void> {
       git_root: myGitRoot,
     });
     if (!peers.some((p) => p.id === myId)) {
-      const reg = await brokerFetch<RegisterResponse>("/register", cliRegisterBody(myLastSummary || PEER_NAME));
+      const reg = remember(await brokerFetch<RegisterResponse>("/register", cliRegisterBody(myLastSummary || PEER_NAME)));
       log(`Re-registered as peer ${reg.id} (was ${myId})`);
       myId = reg.id;
     }
@@ -293,7 +321,6 @@ let myId: PeerId | null = null;
 let myCwd = process.cwd();
 let myGitRoot: string | null = null;
 let myLastSummary: string = ""; // Track the most recent summary for re-registration
-let hasSamplingSupport = false; // Whether the client supports sampling (createMessage)
 
 // For desktop (Cowork), multiple sessions share this server process.
 // Each session registers as a separate peer, keyed by its peer_session value.
@@ -334,6 +361,23 @@ function mintSessionToken(): string {
   return `cs_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
 }
 
+/**
+ * The registration payload for a desktop session. cwd is this server's own
+ * directory, never the token: cwd is shown to every other peer, and the token
+ * is the session's bearer identity.
+ */
+export function desktopRegisterBody(sessionId: string, summary: string) {
+  return {
+    pid: process.pid,
+    cwd: myCwd,
+    git_root: null,
+    tty: null,
+    summary,
+    peer_type: "desktop" as const,
+    session_token: sessionId,
+  };
+}
+
 async function getDesktopPeerId(sessionId: string): Promise<PeerId> {
   const existing = desktopPeers.get(sessionId);
   if (existing) return existing.peerId;
@@ -343,18 +387,11 @@ async function getDesktopPeerId(sessionId: string): Promise<PeerId> {
   // The broker keys desktop peers on session_token, so if another server
   // process (or a previous incarnation of this one) already registered this
   // session we get the SAME peer id back — no identity rotation.
-  const reg = await brokerFetch<RegisterResponse>("/register", {
-    pid: process.pid,
-    cwd: sessionId, // Use session key as CWD — distinguishes sessions
-    git_root: null,
-    tty: null,
-    summary: "", // keep whatever summary the session already set
-    peer_type: "desktop",
-    session_token: sessionId,
-  });
+  // Empty summary: keep whatever summary the session already set.
+  const reg = remember(await brokerFetch<RegisterResponse>("/register", desktopRegisterBody(sessionId, "")));
   const summary = reg.restored_summary ?? PEER_NAME;
   if (!reg.restored_summary && PEER_NAME) {
-    await brokerFetch("/set-summary", { id: reg.id, summary: PEER_NAME }).catch(() => {});
+    await brokerFetch("/set-summary", { id: reg.id, summary: PEER_NAME }, reg.id).catch(() => {});
   }
   desktopPeers.set(sessionId, { peerId: reg.id, summary, wakeUrl: reg.wake_url });
   return reg.id;
@@ -622,7 +659,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => {
 });
 
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
-  log(`Tool call raw request: ${JSON.stringify(req.params)}`);
+  log(toolCallLogLine(req.params.name, req.params.arguments));
   const { name, arguments: args } = req.params;
   // Prefer SESSION_PARAM. `session_id` is still accepted for direct MCP
   // clients (Claude Code CLI, .mcp.json), where nothing strips it — but it
@@ -687,17 +724,12 @@ async function handleTool(name: string, args: Record<string, unknown> | undefine
       const label = ((args as { label?: string })?.label ?? "").trim();
       const token = mintSessionToken();
       try {
-        const reg = await brokerFetch<RegisterResponse>("/register", {
-          pid: process.pid,
+        const reg = remember(await brokerFetch<RegisterResponse>("/register", {
+          ...desktopRegisterBody(token, label || PEER_NAME),
           cwd: label ? `${myCwd} (${label})` : myCwd,
-          git_root: null,
-          tty: null,
-          summary: label || PEER_NAME,
-          peer_type: "desktop",
-          session_token: token,
-        });
+        }));
         desktopPeers.set(token, { peerId: reg.id, summary: label || PEER_NAME, wakeUrl: reg.wake_url });
-        log(`Claimed session ${token} -> peer ${reg.id} (${label})`);
+        log(`Claimed a session -> peer ${reg.id} (${label})`);
         const wake = wakeCopy(reg.wake_url, "claim");
         return {
           content: [
@@ -807,7 +839,7 @@ Next: call set_summary (with your token) to tell other peers what you are workin
           from_id: effectivePeerId,
           to_id,
           text: message,
-        });
+        }, effectivePeerId);
         if (!result.ok) {
           return {
             content: [{ type: "text" as const, text: `Failed to send: ${result.error}` }],
@@ -850,7 +882,7 @@ Next: call set_summary (with your token) to tell other peers what you are workin
         };
       }
       try {
-        await brokerFetch("/set-summary", { id: effectivePeerId, summary });
+        await brokerFetch("/set-summary", { id: effectivePeerId, summary }, effectivePeerId);
         // Update the right summary store
         if (sessionId && PEER_TYPE === "desktop") {
           const entry = desktopPeers.get(sessionId);
@@ -869,22 +901,14 @@ Next: call set_summary (with your token) to tell other peers what you are workin
             if (sessionId && PEER_TYPE === "desktop") {
               // Re-register with summary in one call (avoids extra /set-summary round-trip)
               desktopPeers.delete(sessionId);
-              const reg = await brokerFetch<RegisterResponse>("/register", {
-                pid: process.pid,
-                cwd: sessionId,
-                git_root: null,
-                tty: null,
-                summary,
-                peer_type: "desktop",
-                session_token: sessionId,
-              });
+              const reg = remember(await brokerFetch<RegisterResponse>("/register", desktopRegisterBody(sessionId, summary)));
               desktopPeers.set(sessionId, { peerId: reg.id, summary, wakeUrl: reg.wake_url });
-              log(`Re-registered desktop session ${sessionId} as peer ${reg.id}`);
+              log(`Re-registered a desktop session as peer ${reg.id}`);
               return {
                 content: [{ type: "text" as const, text: `Re-registered and summary set: "${summary}" (new peer ID: ${reg.id})` }],
               };
             } else {
-              const reg = await brokerFetch<RegisterResponse>("/register", cliRegisterBody(summary));
+              const reg = remember(await brokerFetch<RegisterResponse>("/register", cliRegisterBody(summary)));
               myId = reg.id;
               myLastSummary = summary;
               log(`Re-registered as peer ${myId} after stale cleanup`);
@@ -916,9 +940,9 @@ Next: call set_summary (with your token) to tell other peers what you are workin
         };
       }
       try {
-        const result = await brokerFetch<PollMessagesResponse>("/poll-messages", { id: effectivePeerId });
+        const result = await brokerFetch<PollMessagesResponse>("/poll-messages", { id: effectivePeerId }, effectivePeerId);
         if (result.messages.length > 0) {
-          await ackMessages(result.messages);
+          await ackMessages(effectivePeerId, result.messages);
         }
         if (pendingMessagePreview) {
           pendingMessagePreview = "";
@@ -967,9 +991,9 @@ Next: call set_summary (with your token) to tell other peers what you are workin
 async function appendPendingMessages(result: { content: { type: string; text: string }[] }, toolName: string, effectivePeerId: PeerId | null) {
   if (!effectivePeerId || toolName === "check_messages" || !pendingMessagePreview) return result;
   try {
-    const pending = await brokerFetch<PollMessagesResponse>("/poll-messages", { id: effectivePeerId });
+    const pending = await brokerFetch<PollMessagesResponse>("/poll-messages", { id: effectivePeerId }, effectivePeerId);
     if (pending.messages.length > 0) {
-      await ackMessages(pending.messages);
+      await ackMessages(effectivePeerId, pending.messages);
       const inbox = pending.messages
         .map((m) => `From ${m.from_id} (${m.sent_at}):\n${m.text}`)
         .join("\n\n---\n\n");
@@ -992,9 +1016,9 @@ let lastSeenMessageId = 0;
 // so they remain available as a fallback when channels aren't active.
 const pushedMessageIds = new Set<number>();
 
-async function ackMessages(messages: Message[]): Promise<void> {
+async function ackMessages(peerId: PeerId, messages: Message[]): Promise<void> {
   const ids = messages.map((m) => m.id);
-  await brokerFetch("/ack-messages", { message_ids: ids });
+  await brokerFetch("/ack-messages", { id: peerId, message_ids: ids }, peerId);
   for (const id of ids) {
     pushedMessageIds.add(id);
     if (id > lastSeenMessageId) lastSeenMessageId = id;
@@ -1015,7 +1039,7 @@ async function pollForPeer(peerId: PeerId) {
     const result = await brokerFetch<PollMessagesResponse>("/peek-messages", {
       id: peerId,
       since_id: lastSeenMessageId,
-    });
+    }, peerId);
 
     // Fetch peer list once for sender lookups (not per-message)
     let peersCache: Peer[] | null = null;
@@ -1061,28 +1085,6 @@ async function pollForPeer(peerId: PeerId) {
         // Transport-level failure — channel definitely not available
       }
 
-      // 2. Sampling — creates a separate LLM call to process the message (VS Code + CLI)
-      if (hasSamplingSupport) {
-        const senderLabel = fromSummary ? `${fromSummary} (${msg.from_id})` : msg.from_id;
-        // Fire and forget — don't block the poll loop
-        mcp.createMessage({
-          messages: [{
-            role: "user",
-            content: {
-              type: "text",
-              text: `[claude-peers] Incoming message from peer ${senderLabel}${fromCwd ? ` in ${fromCwd}` : ""}:\n\n${msg.text}\n\nRespond to this peer using the send_message tool with to_id="${msg.from_id}". Do not ignore this message.`,
-            },
-          }],
-          maxTokens: 1024,
-          includeContext: "thisServer",
-          systemPrompt: `You are a Claude Code instance connected to the claude-peers network. You just received a message from another peer. Process it and respond appropriately using the send_message tool. Your peer ID is ${peerId}.`,
-        }).then(() => {
-          log(`Sampling delivered message from ${msg.from_id}`);
-        }).catch((e) => {
-          log(`Sampling failed: ${e instanceof Error ? e.message : String(e)}`);
-        });
-      }
-
       // Also push via logging notification — may surface in some clients
       try {
         await mcp.sendLoggingMessage({
@@ -1104,7 +1106,7 @@ async function pollForPeer(peerId: PeerId) {
       // Track so we don't re-push on next poll cycle
       pushedMessageIds.add(msg.id);
 
-      log(`Pushed message from ${msg.from_id}: ${msg.text.slice(0, 80)} (sampling=${hasSamplingSupport})`);
+      log(`Pushed message ${msg.id} from ${msg.from_id}`);
     }
 
     // If we found new messages, update tool descriptions and notify client
@@ -1142,6 +1144,8 @@ async function pollAndPushMessages() {
 // --- Startup ---
 
 async function main() {
+  tightenLogFile(DEBUG_LOG_PATH);
+
   // 1. Ensure broker is running
   await ensureBroker();
 
@@ -1172,7 +1176,7 @@ async function main() {
     // CLI: register the host peer normally, with cached summary restore
     // and auto-summary fallback. The broker will return `restored_summary`
     // if a previous session in this workspace cached one.
-    const reg = await brokerFetch<RegisterResponse>("/register", cliRegisterBody(PEER_NAME));
+    const reg = remember(await brokerFetch<RegisterResponse>("/register", cliRegisterBody(PEER_NAME)));
     myId = reg.id;
     log(`Registered as peer ${myId} (host pid ${HOST_PID}, session_key ${SESSION_KEY ? "present" : "absent — falling back to pid"})`);
 
@@ -1194,7 +1198,7 @@ async function main() {
             recent_files: recentFiles,
           });
           if (summary && myId && !myLastSummary) {
-            await brokerFetch("/set-summary", { id: myId, summary });
+            await brokerFetch("/set-summary", { id: myId, summary }, myId);
             myLastSummary = summary;
             log(`Auto-summary applied: ${summary}`);
           }
@@ -1216,8 +1220,7 @@ async function main() {
       const caps = mcp.getClientCapabilities() as
         | { sampling?: unknown; elicitation?: unknown; experimental?: unknown }
         | undefined;
-      hasSamplingSupport = !!caps?.sampling;
-      log(`Client capabilities: sampling=${hasSamplingSupport}, elicitation=${!!caps?.elicitation}, experimental=${JSON.stringify(caps?.experimental)}`);
+      log(`Client capabilities: sampling=${!!caps?.sampling}, elicitation=${!!caps?.elicitation}, experimental=${JSON.stringify(caps?.experimental)}`);
     } catch (e) {
       log(`Could not read client capabilities: ${e instanceof Error ? e.message : String(e)}`);
     }
@@ -1234,14 +1237,14 @@ async function main() {
     if (myId) {
       beats.push(
         ensureRegistered()
-          .then(() => brokerFetch("/heartbeat", { id: myId }))
+          .then(() => brokerFetch("/heartbeat", { id: myId }, myId))
           .then(() => {})
           .catch(() => {})
       );
     }
     for (const [_, entry] of desktopPeers) {
       beats.push(
-        brokerFetch("/heartbeat", { id: entry.peerId })
+        brokerFetch("/heartbeat", { id: entry.peerId }, entry.peerId)
           .then(() => {})
           .catch(() => {})
       );
