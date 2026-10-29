@@ -52,10 +52,13 @@ const HOST_PID = process.ppid && process.ppid > 1 ? process.ppid : process.pid;
 /**
  * Claude Code's own session id, which this MCP server inherits in its
  * environment. Measured 2026-09-09: present in the server process and equal to
- * the `sessionId` from `claude agents --json`. Stable across --resume and
- * across crash+restart, so the broker keys CLI peer identity on it and a
- * restarted session keeps its id and its queued mail. Undefined when run
- * standalone; the broker falls back to pid matching.
+ * the `sessionId` from `claude agents --json`. Stable across
+ * `claude --resume <id>` and across crash+restart, so the broker keys CLI peer
+ * identity on it and a restarted session keeps its id and its queued mail.
+ * Read once at spawn, so it goes stale when the conversation is switched
+ * afterwards (in-session /resume, measured 2026-10-29): the SessionStart hook
+ * (hook.ts) reports the live id and the broker re-keys this peer. Undefined
+ * when run standalone; the broker falls back to pid matching.
  *
  * Desktop is unaffected: one bridge process serves many sessions, so a
  * process-level variable cannot discriminate between them and those sessions
