@@ -1,5 +1,5 @@
 import { test, expect, describe, afterAll } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync, lstatSync, symlinkSync, readdirSync, readlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -52,5 +52,30 @@ describe("install-hooks", () => {
       hooks: { SessionStart: [{ hooks: [{ type: "command", command: `bun "/old/place/hook.ts" # claude-peers`, timeout: 1 }] }] },
     })).read();
     expect(commands(s)).toEqual([OURS]);
+  });
+
+  test("install-hooks replaces settings.json by rename, not in place", async () => {
+    const path = join(DIR, `atomic-${n++}.json`);
+    await Bun.write(path, JSON.stringify({ model: "opus" }));
+    const before = statSync(path).ino;
+    const proc = Bun.spawn(["bun", `${import.meta.dir}/cli.ts`, "install-hooks", "--settings", path], { stdout: "pipe", stderr: "pipe" });
+    expect(await proc.exited).toBe(0);
+    // A new inode means the file was swapped in whole: a crash mid-write
+    // leaves the old settings intact instead of a truncated file.
+    expect(statSync(path).ino).not.toBe(before);
+    expect((await Bun.file(path).json()).model).toBe("opus");
+    expect(readdirSync(DIR).filter((f) => f.includes(".tmp"))).toEqual([]);
+  });
+
+  test("install-hooks keeps a symlinked settings.json a symlink", async () => {
+    const real = join(DIR, `real-${n++}.json`);
+    const link = join(DIR, `link-${n++}.json`);
+    await Bun.write(real, JSON.stringify({ model: "opus" }));
+    symlinkSync(real, link);
+    const proc = Bun.spawn(["bun", `${import.meta.dir}/cli.ts`, "install-hooks", "--settings", link], { stdout: "pipe", stderr: "pipe" });
+    expect(await proc.exited).toBe(0);
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(link)).toBe(real);
+    expect(commands(await Bun.file(real).json())).toEqual([OURS]);
   });
 });

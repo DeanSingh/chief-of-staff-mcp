@@ -574,9 +574,14 @@ const sessionStart = db.transaction((body: SessionStartRequest, now: string): Se
   if (owner && owner.pid !== live.pid && isPidAlive(owner.pid) && isSameProcess(owner)) return { ok: false, reason: "conflict" };
 
   // Move the live row onto the resumed session's id. Only the row moves: the
-  // conversation this process was in before keeps its own key mapping and its
-  // undelivered mail, dormant until that conversation is resumed somewhere.
+  // conversation this process was in before keeps its own key mapping, dormant
+  // until that conversation is resumed somewhere. Its undelivered mail stays
+  // with it too, unless that id never stood for more than the launch key (the
+  // moments between launch and /resume): then whoever wrote to it was
+  // addressing the agent in this terminal, so the mail follows the row.
   const target = mapped.peer_id;
+  const keys = (db.query("SELECT COUNT(*) AS n FROM peer_sessions WHERE peer_id = ?").get(live.id) as { n: number }).n;
+  if (keys <= 1) db.run("UPDATE messages SET to_id = ? WHERE to_id = ? AND delivered = 0", [target, live.id]);
   db.run("DELETE FROM peers WHERE id = ?", [target]);
   db.run("UPDATE peers SET id = ?, last_seen = ? WHERE id = ?", [target, now, live.id]);
   db.run("UPDATE peer_sessions SET updated_at = ? WHERE session_key = ?", [now, body.session_key]);

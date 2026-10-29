@@ -592,7 +592,7 @@ describe("/session-start", () => {
     expect(peers.some((p) => p.id === idB)).toBe(false);
   });
 
-  test("rekey leaves mail with the id it was addressed to", async () => {
+  test("rekey moves undelivered mail from an id only its launch key maps to", async () => {
     const idA = await regCli(livePid(), "ss-orig-mail");
     await post("/unregister", { id: idA });
     const pidB = livePid();
@@ -601,11 +601,29 @@ describe("/session-start", () => {
     await post("/send-message", { from_id: sender, to_id: idB, text: "sent to the launch id" });
 
     await ss({ session_key: "ss-orig-mail", pid: pidB, source: "resume" });
-    // idB is the launch conversation's identity; its mail waits for it.
+    // idB only ever stood for the moments between launch and /resume. Whoever
+    // wrote to it was addressing the agent in this terminal, which is now idA.
     const atB = await post<{ messages: Array<{ text: string }> }>("/peek-messages", { id: idB });
     const atA = await post<{ messages: Array<{ text: string }> }>("/peek-messages", { id: idA });
-    expect(atB.messages.map((m) => m.text)).toContain("sent to the launch id");
-    expect(atA.messages.map((m) => m.text)).not.toContain("sent to the launch id");
+    expect(atA.messages.map((m) => m.text)).toContain("sent to the launch id");
+    expect(atB.messages).toEqual([]);
+  });
+
+  test("rekey leaves mail on an id that more than one key maps to", async () => {
+    const idA = await regCli(livePid(), "ss-orig-two");
+    await post("/unregister", { id: idA });
+    const pidB = livePid();
+    const idB = await regCli(pidB, "ss-launch-two");
+    // /clear in that terminal: idB now also carries a second conversation.
+    expect((await ss({ session_key: "ss-clear-two", pid: pidB, source: "clear" })).action).toBe("mapped");
+    const sender = await register("SS sender", "cli");
+    await post("/send-message", { from_id: sender, to_id: idB, text: "for the cleared conversation" });
+
+    await ss({ session_key: "ss-orig-two", pid: pidB, source: "resume" });
+    const atB = await post<{ messages: Array<{ text: string }> }>("/peek-messages", { id: idB });
+    const atA = await post<{ messages: Array<{ text: string }> }>("/peek-messages", { id: idA });
+    expect(atB.messages.map((m) => m.text)).toContain("for the cleared conversation");
+    expect(atA.messages.map((m) => m.text)).not.toContain("for the cleared conversation");
   });
 
   test("launch key resolves to the reclaimed id after rekey", async () => {

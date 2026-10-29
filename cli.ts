@@ -13,6 +13,8 @@
  *   bun cli.ts kill-broker     — Stop the broker daemon
  */
 
+import { realpathSync, renameSync } from "node:fs";
+
 const BROKER_PORT = parseInt(process.env.CLAUDE_PEERS_PORT ?? "7899", 10);
 const BROKER_URL = `http://127.0.0.1:${BROKER_PORT}`;
 
@@ -228,7 +230,14 @@ switch (cmd) {
     groups.push({ hooks: [{ type: "command", command, timeout: 1 }] });
     settings.hooks.SessionStart = groups;
 
-    await Bun.write(path, JSON.stringify(settings, null, 2) + "\n");
+    // Write a sibling temp file and rename it over the original, so a crash
+    // mid-write can't leave Claude Code a truncated settings.json. Resolve
+    // symlinks first (dotfile managers link this file), or the rename would
+    // replace the link with a plain file.
+    const real = (await file.exists()) ? realpathSync(path) : path;
+    const tmp = `${real}.tmp-${process.pid}`;
+    await Bun.write(tmp, JSON.stringify(settings, null, 2) + "\n");
+    renameSync(tmp, real);
     console.log(`Installed SessionStart hook in ${path}:\n  ${command}`);
     break;
   }
