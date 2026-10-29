@@ -34,10 +34,10 @@ bun install
 This makes claude-peers available in every Claude Code session, from any directory:
 
 ```bash
-claude mcp add --scope user --transport stdio claude-peers -- bun ~/claude-peers-mcp/server.ts
+claude mcp add --scope user --transport stdio claude-peers -- bun ~/chief-of-staff-mcp/server.ts
 ```
 
-Replace `~/claude-peers-mcp` with wherever you cloned it.
+Replace `~/chief-of-staff-mcp` with wherever you cloned it.
 
 ### 3. Run Claude Code with the channel
 
@@ -110,6 +110,35 @@ Monitor({ ws: { url: "ws://127.0.0.1:7899/watch/<peer-id>" }, description: "clau
 
 Limits: the feed is on the broker host's loopback, so **cloud Cowork sandboxes (`pwd` = `/home/claude`) cannot reach it** — they stay pull-based (next tool call / `check_messages`). Upgrades carrying an `Origin` header are refused so browser pages cannot subscribe.
 
+### CLI session identity
+
+A CLI peer is keyed on Claude Code's own session id, which the MCP server reads
+from `CLAUDE_CODE_SESSION_ID` in its environment. That id is stable across
+`claude --resume <id>` and across a crash and restart, so a session that goes away and
+comes back gets the **same** peer id, and messages sent to it *before* it died
+are still there waiting when it returns. That's narrower than it sounds: once
+a session's process is gone, `cleanStalePeers` drops its peer row within 30
+seconds, and the broker refuses to queue a message for an id with no row — so
+nothing can be sent *to* a dead session, only to one that's still live or has
+already come back. Undelivered mail is never deleted when a process dies,
+though; the existing 72h TTL is the only bound on how long it waits.
+
+If the variable is absent (a standalone run, or an older Claude Code), the
+broker falls back to matching on the session's pid, which is the previous
+behavior — nothing breaks, but the durable-identity guarantee above doesn't
+apply.
+
+The environment variable is read once, when the MCP server spawns. If you start
+`claude` and then `/resume` a conversation inside it, the server is still keyed
+on the launch session and would get a new id. A `SessionStart` hook fixes that:
+it sees the live session id and reports it to the broker, which hands the
+conversation its original id back (mail included) within one heartbeat. Install
+it once, and again after moving the repo:
+
+```bash
+bun cli.ts install-hooks   # adds the hook to ~/.claude/settings.json; safe to re-run
+```
+
 ### Desktop / Cowork identity
 
 Desktop runs several MCP server processes per session and respawns them when its device bridge reconnects. A Desktop session therefore claims a `peer_session` token (`claim_session`) and the **broker** keys the peer on that token, so the same peer id comes back from any process — no identity rotation. Desktop peers are reaped only by heartbeat timeout (30 min), never by pid liveness, because their pid is just whichever bridge process last served them.
@@ -131,6 +160,7 @@ bun cli.ts status            # broker status + all peers
 bun cli.ts peers             # list peers
 bun cli.ts send <id> <msg>   # send a message into a Claude session
 bun cli.ts watch <id>        # stream a peer's inbound messages (Monitor fallback)
+bun cli.ts install-hooks     # register the SessionStart identity hook
 bun cli.ts kill-broker       # stop the broker
 ```
 

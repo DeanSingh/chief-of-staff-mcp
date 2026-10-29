@@ -9,6 +9,7 @@
  *   bun cli.ts peers           — List all peers
  *   bun cli.ts send <id> <msg> — Send a message to a peer
  *   bun cli.ts watch <id>      — Stream incoming messages for a peer (for Monitor tool)
+ *   bun cli.ts install-hooks   — Register the SessionStart identity hook in ~/.claude/settings.json
  *   bun cli.ts kill-broker     — Stop the broker daemon
  */
 
@@ -207,6 +208,31 @@ switch (cmd) {
     break;
   }
 
+  case "install-hooks": {
+    // Registers hook.ts for SessionStart so a resumed conversation reclaims its
+    // peer id (see hook.ts). The command is generated from this file's own
+    // location, so re-run this after moving the repo. Our entry is recognised
+    // by its trailing "# claude-peers" shell comment: re-running replaces it in
+    // place instead of appending a duplicate, and anything else is untouched.
+    const MARK = "# claude-peers";
+    const flag = process.argv.indexOf("--settings");
+    const path = flag > 0 ? process.argv[flag + 1]! : `${process.env.HOME}/.claude/settings.json`;
+    const file = Bun.file(path);
+    const settings: any = (await file.exists()) ? await file.json() : {};
+    const command = `bun "${import.meta.dir}/hook.ts" ${MARK}`;
+
+    settings.hooks ??= {};
+    const groups: any[] = (settings.hooks.SessionStart ?? [])
+      .map((g: any) => ({ ...g, hooks: (g.hooks ?? []).filter((h: any) => !String(h.command ?? "").endsWith(MARK)) }))
+      .filter((g: any) => g.hooks.length > 0);
+    groups.push({ hooks: [{ type: "command", command, timeout: 1 }] });
+    settings.hooks.SessionStart = groups;
+
+    await Bun.write(path, JSON.stringify(settings, null, 2) + "\n");
+    console.log(`Installed SessionStart hook in ${path}:\n  ${command}`);
+    break;
+  }
+
   default:
     console.log(`claude-peers CLI
 
@@ -215,5 +241,6 @@ Usage:
   bun cli.ts peers           List all peers
   bun cli.ts send <id> <msg> Send a message to a peer
   bun cli.ts watch <id>      Stream incoming messages for a peer (for Monitor tool)
+  bun cli.ts install-hooks   Register the SessionStart identity hook [--settings <path>]
   bun cli.ts kill-broker     Stop the broker daemon`);
 }

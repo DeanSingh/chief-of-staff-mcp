@@ -20,6 +20,8 @@ import type {
   PollMessagesRequest,
   PollMessagesResponse,
   AckMessagesRequest,
+  SessionStartRequest,
+  SessionStartResponse,
   Peer,
   Message,
 } from "./shared/types.ts";
@@ -55,6 +57,14 @@ db.run(`
     text TEXT NOT NULL,
     sent_at TEXT NOT NULL,
     delivered INTEGER NOT NULL DEFAULT 0,
+    -- These FOREIGN KEY declarations are UNENFORCED: PRAGMA foreign_keys is
+    -- never set anywhere in this file. That is deliberate, not an oversight -
+    -- peers are reaped (their row in the peers table deleted) while their
+    -- messages persist under the TTL in cleanStalePeers, so from_id/to_id
+    -- dangling with no matching peers row is an expected, ongoing state, not
+    -- corruption. Turning the pragma on would start rejecting exactly that
+    -- and break reaping; it would also require a table rebuild (SQLite
+    -- doesn't retrofit FK enforcement onto an existing table in place).
     FOREIGN KEY (from_id) REFERENCES peers(id),
     FOREIGN KEY (to_id) REFERENCES peers(id)
   )
@@ -67,6 +77,12 @@ if (!peerCols.includes("session_token")) {
   db.run("ALTER TABLE peers ADD COLUMN session_token TEXT");
 }
 db.run("CREATE INDEX IF NOT EXISTS idx_peers_session_token ON peers(session_token)");
+// CLI rows record their process's start time: pids are reused, so a pid match
+// alone could hand a new process a dead session's identity. NULL on rows
+// written before this column existed, which are matched on pid alone.
+if (!peerCols.includes("pid_started")) {
+  db.run("ALTER TABLE peers ADD COLUMN pid_started TEXT");
+}
 
 // Durable session_token -> peer id mapping. The peers row is ephemeral (a
 // desktop peer expires after 30 min without heartbeats), but the session and
@@ -89,6 +105,69 @@ db.run(`
   )
 `);
 
+// Durable session_key -> peer id, for ALL peer types. Generalizes
+// desktop_tokens: CLI peers key on Claude Code's CLAUDE_CODE_SESSION_ID,
+// desktop peers on their claimed token. The peers row is ephemeral; the
+// address other agents hold is not.
+db.run(`
+  CREATE TABLE IF NOT EXISTS peer_sessions (
+    session_key TEXT PRIMARY KEY,
+    peer_id     TEXT NOT NULL,
+    peer_type   TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+  )
+`);
+// handleHeartbeat refreshes this table keyed on peer_id (not the primary
+// key), and heartbeat is a hot path — index it so that lookup stays O(log n)
+// instead of a full table scan.
+db.run("CREATE INDEX IF NOT EXISTS idx_peer_sessions_peer_id ON peer_sessions(peer_id)");
+
+// The session a running Claude Code process is LIVE in, as last reported by
+// its SessionStart hook. The MCP server's CLAUDE_CODE_SESSION_ID is fixed at
+// spawn and goes stale after /clear or an in-session /resume; registration
+// consults this first so the stale key never decides identity. Keyed on pid +
+// start time so a reused pid never inherits it.
+db.run(`
+  CREATE TABLE IF NOT EXISTS process_sessions (
+    pid INTEGER NOT NULL,
+    pid_started TEXT NOT NULL,
+    session_key TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (pid, pid_started)
+  )
+`);
+
+// Idempotent: INSERT OR IGNORE means re-running on an already-migrated
+// database is a no-op, never a duplicate or a constraint error.
+db.run(`
+  INSERT OR IGNORE INTO peer_sessions (session_key, peer_id, peer_type, updated_at)
+  SELECT token, peer_id, 'desktop', updated_at FROM desktop_tokens
+`);
+
+/** Signal 0 checks existence without killing. */
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The process's start time as `ps` reports it, or null if it isn't running. */
+function pidStartTime(pid: number): string | null {
+  // Fixed locale and zone: the broker inherits its environment from whichever
+  // session auto-launched it, and a restart under another LANG/TZ must not make
+  // every recorded value mismatch.
+  const out = Bun.spawnSync(["ps", "-o", "lstart=", "-p", String(pid)], { env: { ...process.env, LC_ALL: "C", TZ: "UTC" } });
+  return new TextDecoder().decode(out.stdout).trim() || null;
+}
+
+/** True unless the row's recorded start time shows its pid now belongs to another process. */
+function isSameProcess(row: { pid: number; pid_started: string | null }): boolean {
+  return row.pid_started == null || pidStartTime(row.pid) === row.pid_started;
+}
+
 // Clean up stale peers (PIDs that no longer exist) on startup
 function cleanStalePeers() {
   // PID liveness applies to CLI peers only. A desktop peer's pid is whichever
@@ -98,13 +177,12 @@ function cleanStalePeers() {
   // a bridge process exited. Desktop peers are reaped by heartbeat below.
   const peers = db.query("SELECT id, pid, peer_type FROM peers WHERE peer_type != 'desktop'").all() as { id: string; pid: number; peer_type: string }[];
   for (const peer of peers) {
-    try {
-      // Check if process is still alive (signal 0 doesn't kill, just checks)
-      process.kill(peer.pid, 0);
-    } catch {
-      // Process doesn't exist, remove it
+    if (!isPidAlive(peer.pid)) {
+      // Process is gone: drop the row so it stops showing up as live.
+      // Do NOT delete its undelivered mail. The peer id is durable via
+      // peer_sessions, so a restarted session reclaims this id and must still
+      // receive what was queued. The 72h undelivered TTL below is the bound.
       db.run("DELETE FROM peers WHERE id = ?", [peer.id]);
-      db.run("DELETE FROM messages WHERE to_id = ? AND delivered = 0", [peer.id]);
     }
   }
 
@@ -121,6 +199,12 @@ function cleanStalePeers() {
   db.run("DELETE FROM messages WHERE delivered = 1 AND sent_at < ?", [new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()]);
   db.run("DELETE FROM messages WHERE delivered = 0 AND sent_at < ?", [new Date(Date.now() - 72 * 60 * 60 * 1000).toISOString()]);
   db.run("DELETE FROM desktop_tokens WHERE updated_at < ?", [new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()]);
+  db.run("DELETE FROM process_sessions WHERE updated_at < ?", [new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()]);
+  // Same 30-day TTL as desktop_tokens above. Safe only because handleHeartbeat
+  // refreshes peer_sessions.updated_at on every heartbeat (see touchPeerSessionByPeerId)
+  // — otherwise a session alive longer than the TTL would have its mapping
+  // swept out from under it and mint a new id on its next reconnect.
+  db.run("DELETE FROM peer_sessions WHERE updated_at < ?", [new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()]);
   db.run("DELETE FROM summary_cache WHERE updated_at < ?", [new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()]);
 }
 
@@ -145,6 +229,10 @@ const selectPeerBySessionToken = db.prepare(`
 
 const touchPeerBySessionToken = db.prepare(`
   UPDATE peers SET pid = ?, last_seen = ?, summary = CASE WHEN ? = '' THEN summary ELSE ? END WHERE session_token = ?
+`);
+
+const touchPeerSessionByPeerId = db.prepare(`
+  UPDATE peer_sessions SET updated_at = ? WHERE peer_id = ?
 `);
 
 const updateLastSeen = db.prepare(`
@@ -228,7 +316,36 @@ function getCachedSummary(cwd: string, git_root: string | null): string | null {
 
 // --- Request handlers ---
 
+// Shared by both CLI identity paths: the session_key fallback (key present
+// but unmapped) and the no-key path (pre-session-key callers). Looks up an
+// existing CLI peer row by pid, refreshes it in place, and — when a cliKey is
+// given — records the key -> id mapping so future registrations resolve by
+// key without needing this fallback again. Returns null when no pid match
+// exists, so the caller falls through to minting a fresh peer.
+function claimPeerByPid(pid: number, body: RegisterRequest, now: string, cliKey: string | null): { id: string; restored_summary?: string } | null {
+  const existing = (db.query("SELECT id, summary, pid, pid_started FROM peers WHERE pid = ? AND peer_type != 'desktop'")
+    .all(pid) as { id: string; summary: string; pid: number; pid_started: string | null }[]).find(isSameProcess);
+  if (!existing) return null;
+  db.run(
+    "UPDATE peers SET cwd = ?, git_root = ?, tty = ?, last_seen = ?, summary = CASE WHEN ? = '' THEN summary ELSE ? END WHERE id = ?",
+    [body.cwd, body.git_root, body.tty, now, body.summary ?? "", body.summary ?? "", existing.id],
+  );
+  if (cliKey) {
+    db.run("INSERT OR REPLACE INTO peer_sessions (session_key, peer_id, peer_type, updated_at) VALUES (?, ?, 'cli', ?)", [cliKey, existing.id, now]);
+  }
+  if (body.summary) cacheSummary(body.cwd, body.git_root, body.summary);
+  return { id: existing.id, restored_summary: body.summary ? undefined : (existing.summary || undefined) };
+}
+
 function handleRegister(body: RegisterRequest): RegisterResponse {
+  const res = registerPeer(body);
+  if ((body.peer_type ?? "cli") !== "desktop") {
+    db.run("UPDATE peers SET pid_started = ? WHERE id = ?", [pidStartTime(body.pid), res.id]);
+  }
+  return res;
+}
+
+function registerPeer(body: RegisterRequest): RegisterResponse {
   const now = new Date().toISOString();
 
   const peerType = body.peer_type ?? "cli";
@@ -238,11 +355,13 @@ function handleRegister(body: RegisterRequest): RegisterResponse {
   // what keeps a Cowork session's peer id stable across the several MCP
   // server processes Desktop runs (and respawns) for the same session.
   const token = !isCli && body.session_token ? body.session_token : null;
+  const cliKey = isCli ? (liveSessionKey(body.pid) ?? body.session_key ?? null) : null;
   if (token) {
     const existing = selectPeerBySessionToken.get(token) as Peer | null;
     if (existing) {
       touchPeerBySessionToken.run(body.pid, now, body.summary ?? "", body.summary ?? "", token);
       db.run("UPDATE desktop_tokens SET updated_at = ? WHERE token = ?", [now, token]);
+      db.run("UPDATE peer_sessions SET updated_at = ? WHERE session_key = ?", [now, token]);
       return { id: existing.id, restored_summary: body.summary ? undefined : existing.summary };
     }
     // Row was reaped (session idled past the heartbeat window) but the token
@@ -252,6 +371,7 @@ function handleRegister(body: RegisterRequest): RegisterResponse {
     if (mapped) {
       insertPeer.run(mapped.peer_id, body.pid, body.cwd, body.git_root, body.tty, body.summary ?? "", peerType, now, now, token);
       db.run("UPDATE desktop_tokens SET updated_at = ? WHERE token = ?", [now, token]);
+      db.run("UPDATE peer_sessions SET updated_at = ? WHERE session_key = ?", [now, token]);
       return { id: mapped.peer_id };
     }
   }
@@ -259,26 +379,85 @@ function handleRegister(body: RegisterRequest): RegisterResponse {
   const id = generateId();
   if (token) {
     db.run("INSERT OR REPLACE INTO desktop_tokens (token, peer_id, updated_at) VALUES (?, ?, ?)", [token, id, now]);
+    // Desktop identity is still resolved through desktop_tokens above (the
+    // lookups at the top of this function and the resurrection branch both
+    // read desktop_tokens, never peer_sessions). This write only mirrors the
+    // mapping into peer_sessions so it exists — it is not read yet. It lets a
+    // later phase finish the migration (switch desktop lookups to read
+    // peer_sessions too) and eventually drop desktop_tokens, without a
+    // backfill step. Deliberately uncovered by a desktop-specific test: the
+    // only way to assert peer_sessions is actually read today is a
+    // cross-type test that would break the moment the CLI-only lookup
+    // (see the cliKey branch below) gets hardened to also check peer_type.
+    db.run("INSERT OR REPLACE INTO peer_sessions (session_key, peer_id, peer_type, updated_at) VALUES (?, ?, ?, ?)", [token, id, "desktop", now]);
   }
 
-  // CLI re-registration for a pid we already know (the Claude Code session
-  // pid — its MCP server process may have been respawned by /mcp reconnect):
-  // keep the SAME peer id so addresses other agents hold stay valid, and keep
-  // the summary unless a new one is given.
+  // CLI identity. Prefer Claude Code's session id: it survives process death,
+  // so a restarted session gets its id (and its queued mail) back. Fall back
+  // to pid matching when no key was supplied.
   // Desktop sessions share one VM PID, so PID-based matching would conflate
   // other active sessions; they are keyed by session_token above instead.
-  if (isCli) {
-    const existing = db.query("SELECT id, summary FROM peers WHERE pid = ? AND peer_type != 'desktop'").get(body.pid) as { id: string; summary: string } | null;
-    if (existing) {
-      db.run(
-        "UPDATE peers SET cwd = ?, git_root = ?, tty = ?, last_seen = ?, summary = CASE WHEN ? = '' THEN summary ELSE ? END WHERE id = ?",
-        [body.cwd, body.git_root, body.tty, now, body.summary ?? "", body.summary ?? "", existing.id],
-      );
+  if (cliKey) {
+    const mapped = db.query("SELECT peer_id FROM peer_sessions WHERE session_key = ?")
+      .get(cliKey) as { peer_id: string } | null;
+    if (mapped) {
+      const live = db.query("SELECT id, summary, pid, pid_started FROM peers WHERE id = ?")
+        .get(mapped.peer_id) as { id: string; summary: string; pid: number; pid_started: string | null } | null;
+      if (live && live.pid !== body.pid && isPidAlive(live.pid) && isSameProcess(live)) {
+        // The same session is open in another terminal that is still running:
+        // that process owns the id. Keep (or mint) this process's own peer and
+        // leave the key mapped to the owner.
+        const own = claimPeerByPid(body.pid, body, now, null);
+        if (own) return own;
+        return mintPeer(body, now, null, peerType, isCli);
+      }
+      let resurrectedSummary: string | undefined;
+      if (live) {
+        db.run(
+          "UPDATE peers SET pid = ?, cwd = ?, git_root = ?, tty = ?, last_seen = ?, summary = CASE WHEN ? = '' THEN summary ELSE ? END WHERE id = ?",
+          [body.pid, body.cwd, body.git_root, body.tty, now, body.summary ?? "", body.summary ?? "", live.id],
+        );
+      } else {
+        // Row was reaped but the session is back: resurrect under the SAME id
+        // so mail queued for it is still addressed correctly. Fall back to the
+        // cached workspace summary when none was supplied, same as a fresh peer
+        // (below), so a reaped-and-restarted session doesn't rejoin blank.
+        let summaryToInsert = body.summary;
+        if (!summaryToInsert) {
+          summaryToInsert = getCachedSummary(body.cwd, body.git_root) ?? "";
+          if (summaryToInsert) resurrectedSummary = summaryToInsert;
+        }
+        insertPeer.run(mapped.peer_id, body.pid, body.cwd, body.git_root, body.tty, summaryToInsert, peerType, now, now, null);
+      }
+      db.run("UPDATE peer_sessions SET updated_at = ? WHERE session_key = ?", [now, cliKey]);
       if (body.summary) cacheSummary(body.cwd, body.git_root, body.summary);
-      return { id: existing.id, restored_summary: body.summary ? undefined : existing.summary || undefined };
+      const restored = live ? (!body.summary ? (live.summary || undefined) : undefined) : resurrectedSummary;
+      return { id: mapped.peer_id, restored_summary: restored };
     }
+
+    // No peer_sessions mapping yet for this key. This is the state of EVERY
+    // CLI session at the moment session_key support first lands (or any
+    // session that has never sent one before): do NOT fall through to
+    // minting — that would orphan the pid-keyed row this session already
+    // has, splitting it into two live `peers` rows for one process. Fall
+    // back to the pid lookup and, on a hit, ADOPT that peer's id and record
+    // the key -> id mapping so the next registration resolves by key
+    // directly instead of taking this fallback again.
+    const adopted = claimPeerByPid(body.pid, body, now, cliKey);
+    if (adopted) return adopted;
+  } else if (isCli) {
+    // CLI re-registration for a pid we already know (the Claude Code session
+    // pid — its MCP server process may have been respawned by /mcp reconnect):
+    // keep the SAME peer id so addresses other agents hold stay valid, and keep
+    // the summary unless a new one is given.
+    const existing = claimPeerByPid(body.pid, body, now, null);
+    if (existing) return existing;
   }
 
+  return mintPeer(body, now, cliKey, peerType, isCli, id, token);
+}
+
+function mintPeer(body: RegisterRequest, now: string, cliKey: string | null, peerType: string, isCli: boolean, id = generateId(), token: string | null = null): RegisterResponse {
   // Carry forward cached summary for CLI sessions in the same workspace.
   // Desktop sessions always set fresh summaries and would collide on one cache slot.
   let summary = body.summary;
@@ -290,12 +469,86 @@ function handleRegister(body: RegisterRequest): RegisterResponse {
     cacheSummary(body.cwd, body.git_root, summary);
   }
 
+  // Only reached when a genuinely new peer is being minted. Record its durable
+  // key so the next registration under the same session reclaims this id.
+  if (cliKey) {
+    db.run("INSERT OR REPLACE INTO peer_sessions (session_key, peer_id, peer_type, updated_at) VALUES (?, ?, 'cli', ?)", [cliKey, id, now]);
+  }
+
   insertPeer.run(id, body.pid, body.cwd, body.git_root, body.tty, summary, peerType, now, now, token);
   return { id, restored_summary: summary !== body.summary ? summary : undefined };
 }
 
+// In-session /resume switches the conversation after the MCP server spawned,
+// so the server registered under the launch session's key and was minted a
+// new id. The SessionStart hook sees the live session id and posts it here
+// with the Claude Code pid. Find the CLI peer that process owns and, if the live
+// session already owns a different id, move the row onto that id so other
+// agents' addresses and mail queued for it stay valid. The server picks the
+// change up on its next heartbeat: its peer row is gone, so ensureRegistered
+// re-registers, and registration resolves this process through
+// process_sessions to the live session's key, hence the reclaimed id.
+/** The session this process's SessionStart hook last reported, if any. */
+function liveSessionKey(pid: number): string | null {
+  const started = pidStartTime(pid);
+  if (!started) return null;
+  const row = db.query("SELECT session_key FROM process_sessions WHERE pid = ? AND pid_started = ?").get(pid, started) as { session_key: string } | null;
+  return row?.session_key ?? null;
+}
+
+const sessionStart = db.transaction((body: SessionStartRequest, now: string): SessionStartResponse => {
+  const live = (db.query("SELECT id, pid, pid_started FROM peers WHERE pid = ? AND peer_type != 'desktop'")
+    .all(body.pid) as { id: string; pid: number; pid_started: string | null }[]).find(isSameProcess);
+  if (!live) return { ok: false, reason: "no_live_peer" };
+
+  // From now on this process registers under the live session, not the key
+  // its server was spawned with.
+  const started = pidStartTime(body.pid);
+  if (started) {
+    db.run("INSERT OR REPLACE INTO process_sessions (pid, pid_started, session_key, updated_at) VALUES (?, ?, ?, ?)", [body.pid, started, body.session_key, now]);
+  }
+
+  const mapped = db.query("SELECT peer_id FROM peer_sessions WHERE session_key = ?").get(body.session_key) as { peer_id: string } | null;
+  if (!mapped) {
+    db.run("INSERT INTO peer_sessions (session_key, peer_id, peer_type, updated_at) VALUES (?, ?, 'cli', ?)", [body.session_key, live.id, now]);
+    return { ok: true, peer_id: live.id, action: "mapped" };
+  }
+  if (mapped.peer_id === live.id) {
+    db.run("UPDATE peer_sessions SET updated_at = ? WHERE session_key = ?", [now, body.session_key]);
+    return { ok: true, peer_id: live.id, action: "noop" };
+  }
+
+  // The same conversation is open in another terminal that is still running:
+  // that process owns the id. Leave both alone.
+  const owner = db.query("SELECT pid, pid_started FROM peers WHERE id = ?").get(mapped.peer_id) as { pid: number; pid_started: string | null } | null;
+  if (owner && owner.pid !== live.pid && isPidAlive(owner.pid) && isSameProcess(owner)) return { ok: false, reason: "conflict" };
+
+  // Move the live row onto the resumed session's id. Only the row moves: the
+  // conversation this process was in before keeps its own key mapping and its
+  // undelivered mail, dormant until that conversation is resumed somewhere.
+  const target = mapped.peer_id;
+  db.run("DELETE FROM peers WHERE id = ?", [target]);
+  db.run("UPDATE peers SET id = ?, last_seen = ? WHERE id = ?", [target, now, live.id]);
+  db.run("UPDATE peer_sessions SET updated_at = ? WHERE session_key = ?", [now, body.session_key]);
+  return { ok: true, peer_id: target, action: "rekeyed" };
+});
+
+function handleSessionStart(body: SessionStartRequest): SessionStartResponse {
+  if (typeof body?.session_key !== "string" || !body.session_key || !Number.isInteger(body.pid) || body.pid <= 1) {
+    return { ok: false, reason: "bad_request" };
+  }
+  return sessionStart(body, new Date().toISOString());
+}
+
 function handleHeartbeat(body: HeartbeatRequest): void {
-  updateLastSeen.run(new Date().toISOString(), body.id);
+  const now = new Date().toISOString();
+  updateLastSeen.run(now, body.id);
+  // Keeps this peer's peer_sessions mapping alive past cleanStalePeers' 30-day
+  // TTL as long as it keeps heartbeating. Without this, a session that
+  // registered once and ran longer than the TTL would have its mapping swept
+  // out from under it while still alive, and its next reconnect would mint a
+  // new id. Single UPDATE, keyed on peer_id: heartbeat is a hot path.
+  touchPeerSessionByPeerId.run(now, body.id);
 }
 
 function handleSetSummary(body: SetSummaryRequest): { ok: boolean; error?: string } {
@@ -343,13 +596,9 @@ function handleListPeers(body: ListPeersRequest): Peer[] {
   // Desktop peers share one VM PID — skip the kill check; heartbeat timeout handles staleness.
   return peers.filter((p) => {
     if (p.peer_type === "desktop") return true;
-    try {
-      process.kill(p.pid, 0);
-      return true;
-    } catch {
-      deletePeer.run(p.id);
-      return false;
-    }
+    // A dead pid is hidden from this listing, not deleted here. Row cleanup is
+    // cleanStalePeers' job, and mail is never deleted (see Task 4 rationale).
+    return isPidAlive(p.pid);
   });
 }
 
@@ -476,6 +725,8 @@ Bun.serve<WatchData>({
           return Response.json({ ok: true });
         case "/peek-messages":
           return Response.json(handlePeekMessages(body as { id: string; since_id?: number }));
+        case "/session-start":
+          return Response.json(handleSessionStart(body as SessionStartRequest));
         case "/unregister":
           handleUnregister(body as { id: string });
           return Response.json({ ok: true });

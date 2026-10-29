@@ -27,6 +27,16 @@ updates `.mcp.json`, every `CLAUDE.md` reference, and provides a migration path 
 ## Architecture
 
 - `broker.ts` — Singleton HTTP daemon on localhost:7899 + SQLite. Auto-launched by the MCP server.
+  Peer identity is durable for CLI peers: `peer_sessions` maps
+  `CLAUDE_CODE_SESSION_ID` to a peer id, so a restarted CLI session reclaims
+  its id and mail sent to it *before* it died is still delivered. Desktop
+  still reclaims via `desktop_tokens`, unchanged by this; Desktop does get a
+  `peer_sessions` row too, but it's a mirror nothing reads yet. That
+  guarantee doesn't cover mail sent *while* it's down:
+  `handleSendMessage` refuses any send whose `to_id` has no `peers` row, and
+  `cleanStalePeers` deletes that row ~30s after the process dies, so a dead
+  peer can't be sent to at all until it re-registers. Undelivered mail is
+  never deleted on reap; the pre-existing 72h TTL is the only bound.
 - `server.ts` — MCP stdio server, one per Claude Code instance. Connects to broker, exposes tools, pushes channel notifications.
 - `shared/types.ts` — Shared TypeScript types for broker API.
 - `shared/summarize.ts` — Auto-summary generation via gpt-5.4-nano.

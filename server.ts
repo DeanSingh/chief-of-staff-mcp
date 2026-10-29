@@ -49,6 +49,23 @@ const BROKER_WS_URL = `ws://127.0.0.1:${BROKER_PORT}`;
  */
 const HOST_PID = process.ppid && process.ppid > 1 ? process.ppid : process.pid;
 
+/**
+ * Claude Code's own session id, which this MCP server inherits in its
+ * environment. Measured 2026-09-09: present in the server process and equal to
+ * the `sessionId` from `claude agents --json`. Stable across
+ * `claude --resume <id>` and across crash+restart, so the broker keys CLI peer
+ * identity on it and a restarted session keeps its id and its queued mail.
+ * Read once at spawn, so it goes stale when the conversation is switched
+ * afterwards (in-session /resume, measured 2026-10-29): the SessionStart hook
+ * (hook.ts) reports the live id and the broker re-keys this peer. Undefined
+ * when run standalone; the broker falls back to pid matching.
+ *
+ * Desktop is unaffected: one bridge process serves many sessions, so a
+ * process-level variable cannot discriminate between them and those sessions
+ * continue to use claim_session / peer_session.
+ */
+const SESSION_KEY = process.env.CLAUDE_CODE_SESSION_ID || undefined;
+
 /** WebSocket feed URL for a peer's inbound messages (see broker /watch). */
 export function watchUrl(peerId: PeerId): string {
   return `${BROKER_WS_URL}/watch/${encodeURIComponent(peerId)}`;
@@ -120,6 +137,32 @@ async function isBrokerAlive(): Promise<boolean> {
   }
 }
 
+/**
+ * The registration payload every CLI path must send. One builder so the
+ * call sites cannot drift apart — a missing session_key silently reverts a
+ * peer to pid-keyed identity, which no test would catch.
+ */
+export function cliRegisterBody(summary: string | undefined) {
+  return {
+    pid: HOST_PID,
+    cwd: myCwd,
+    git_root: myGitRoot,
+    tty: getTty(),
+    summary,
+    // Hardcoded, NOT PEER_TYPE: this is the CLI-only builder. One call site
+    // (the set_summary re-register path) reaches it from the `else` of an
+    // `if (sessionId && PEER_TYPE === "desktop")` check, so on a desktop
+    // server with a falsy sessionId it would otherwise post
+    // peer_type: "desktop" with no session_token — minting a token-less
+    // desktop ghost that pid-reaping never collects and list_peers never
+    // hides. That path is unreachable today only because of a guard
+    // elsewhere; this builder must not be able to emit a desktop
+    // registration regardless.
+    peer_type: "cli",
+    session_key: SESSION_KEY,
+  };
+}
+
 async function ensureBroker(): Promise<void> {
   if (await isBrokerAlive()) {
     log("Broker already running");
@@ -178,15 +221,7 @@ async function ensureRegistered(): Promise<void> {
       git_root: myGitRoot,
     });
     if (!peers.some((p) => p.id === myId)) {
-      const tty = getTty();
-      const reg = await brokerFetch<RegisterResponse>("/register", {
-        pid: HOST_PID,
-        cwd: myCwd,
-        git_root: myGitRoot,
-        tty,
-        summary: myLastSummary || PEER_NAME,
-        peer_type: PEER_TYPE,
-      });
+      const reg = await brokerFetch<RegisterResponse>("/register", cliRegisterBody(myLastSummary || PEER_NAME));
       log(`Re-registered as peer ${reg.id} (was ${myId})`);
       myId = reg.id;
     }
@@ -820,14 +855,7 @@ ${watchInstructions(reg.id)}`,
                 content: [{ type: "text" as const, text: `Re-registered and summary set: "${summary}" (new peer ID: ${reg.id})` }],
               };
             } else {
-              const tty = getTty();
-              const reg = await brokerFetch<RegisterResponse>("/register", {
-                pid: HOST_PID,
-                cwd: myCwd,
-                git_root: myGitRoot,
-                tty,
-                summary,
-              });
+              const reg = await brokerFetch<RegisterResponse>("/register", cliRegisterBody(summary));
               myId = reg.id;
               myLastSummary = summary;
               log(`Re-registered as peer ${myId} after stale cleanup`);
@@ -1115,16 +1143,9 @@ async function main() {
     // CLI: register the host peer normally, with cached summary restore
     // and auto-summary fallback. The broker will return `restored_summary`
     // if a previous session in this workspace cached one.
-    const reg = await brokerFetch<RegisterResponse>("/register", {
-      pid: HOST_PID,
-      cwd: myCwd,
-      git_root: myGitRoot,
-      tty,
-      summary: PEER_NAME,
-      peer_type: PEER_TYPE,
-    });
+    const reg = await brokerFetch<RegisterResponse>("/register", cliRegisterBody(PEER_NAME));
     myId = reg.id;
-    log(`Registered as peer ${myId} (host pid ${HOST_PID})`);
+    log(`Registered as peer ${myId} (host pid ${HOST_PID}, session_key ${SESSION_KEY ? "present" : "absent — falling back to pid"})`);
 
     if (reg.restored_summary) {
       myLastSummary = reg.restored_summary;

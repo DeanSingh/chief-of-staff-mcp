@@ -40,6 +40,14 @@ export interface RegisterRequest {
    * reconnects) is serving the call.
    */
   session_token?: string;
+  /**
+   * CLI only: Claude Code's own session id (process.env.CLAUDE_CODE_SESSION_ID).
+   * Stable across --resume and across crash+restart, so the broker keys the
+   * peer on it and the same id comes back after the process dies. Absent when
+   * the server runs standalone or on a Claude Code without the variable, in
+   * which case registration falls back to pid matching.
+   */
+  session_key?: string;
 }
 
 export interface RegisterResponse {
@@ -81,3 +89,18 @@ export interface PollMessagesResponse {
 export interface AckMessagesRequest {
   message_ids: number[];
 }
+
+/**
+ * Posted by the SessionStart hook with the LIVE session id, which the MCP
+ * server cannot see after /clear or an in-session /resume (its env var was
+ * fixed at spawn). `pid` is the Claude Code process the hook ran under.
+ */
+export interface SessionStartRequest {
+  session_key: string;
+  pid: number;
+  source: string;
+}
+
+export type SessionStartResponse =
+  | { ok: true; peer_id: PeerId; action: "noop" | "mapped" | "rekeyed" }
+  | { ok: false; reason: "no_live_peer" | "conflict" | "bad_request" };
