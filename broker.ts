@@ -20,6 +20,8 @@ import type {
   PollMessagesRequest,
   PollMessagesResponse,
   AckMessagesRequest,
+  SessionStartRequest,
+  SessionStartResponse,
   Peer,
   Message,
 } from "./shared/types.ts";
@@ -121,6 +123,16 @@ db.run(`
   SELECT token, peer_id, 'desktop', updated_at FROM desktop_tokens
 `);
 
+/** Signal 0 checks existence without killing. */
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // Clean up stale peers (PIDs that no longer exist) on startup
 function cleanStalePeers() {
   // PID liveness applies to CLI peers only. A desktop peer's pid is whichever
@@ -130,10 +142,7 @@ function cleanStalePeers() {
   // a bridge process exited. Desktop peers are reaped by heartbeat below.
   const peers = db.query("SELECT id, pid, peer_type FROM peers WHERE peer_type != 'desktop'").all() as { id: string; pid: number; peer_type: string }[];
   for (const peer of peers) {
-    try {
-      // Check if process is still alive (signal 0 doesn't kill, just checks)
-      process.kill(peer.pid, 0);
-    } catch {
+    if (!isPidAlive(peer.pid)) {
       // Process is gone: drop the row so it stops showing up as live.
       // Do NOT delete its undelivered mail. The peer id is durable via
       // peer_sessions, so a restarted session reclaims this id and must still
@@ -413,6 +422,52 @@ function handleRegister(body: RegisterRequest): RegisterResponse {
   return { id, restored_summary: summary !== body.summary ? summary : undefined };
 }
 
+// In-session /resume switches the conversation after the MCP server spawned,
+// so the server registered under the launch session's key and was minted a
+// new id. The SessionStart hook sees the live session id and posts it here
+// with its ancestor pids. Find the CLI peer that process owns and, if the live
+// session already owns a different id, move the row onto that id so other
+// agents' addresses and mail queued for it stay valid. The server picks the
+// change up on its next heartbeat: its peer row is gone, so ensureRegistered
+// re-registers with the launch key, which now maps to the reclaimed id.
+const sessionStart = db.transaction((body: SessionStartRequest, now: string): SessionStartResponse => {
+  let live: { id: string; pid: number } | null = null;
+  for (const pid of body.pids) {
+    live = db.query("SELECT id, pid FROM peers WHERE pid = ? AND peer_type != 'desktop'").get(pid) as { id: string; pid: number } | null;
+    if (live) break;
+  }
+  if (!live) return { ok: false, reason: "no_live_peer" };
+
+  const mapped = db.query("SELECT peer_id FROM peer_sessions WHERE session_key = ?").get(body.session_key) as { peer_id: string } | null;
+  if (!mapped) {
+    db.run("INSERT INTO peer_sessions (session_key, peer_id, peer_type, updated_at) VALUES (?, ?, 'cli', ?)", [body.session_key, live.id, now]);
+    return { ok: true, peer_id: live.id, action: "mapped" };
+  }
+  if (mapped.peer_id === live.id) {
+    db.run("UPDATE peer_sessions SET updated_at = ? WHERE session_key = ?", [now, body.session_key]);
+    return { ok: true, peer_id: live.id, action: "noop" };
+  }
+
+  // The same conversation is open in another terminal that is still running:
+  // that process owns the id. Leave both alone.
+  const owner = db.query("SELECT pid FROM peers WHERE id = ?").get(mapped.peer_id) as { pid: number } | null;
+  if (owner && owner.pid !== live.pid && isPidAlive(owner.pid)) return { ok: false, reason: "conflict" };
+
+  const target = mapped.peer_id;
+  db.run("DELETE FROM peers WHERE id = ?", [target]);
+  db.run("UPDATE peers SET id = ?, last_seen = ? WHERE id = ?", [target, now, live.id]);
+  db.run("UPDATE messages SET to_id = ? WHERE to_id = ? AND delivered = 0", [target, live.id]);
+  db.run("UPDATE peer_sessions SET peer_id = ?, updated_at = ? WHERE peer_id = ?", [target, now, live.id]);
+  return { ok: true, peer_id: target, action: "rekeyed" };
+});
+
+function handleSessionStart(body: SessionStartRequest): SessionStartResponse {
+  if (typeof body?.session_key !== "string" || !body.session_key || !Array.isArray(body.pids) || body.pids.length === 0) {
+    return { ok: false, reason: "bad_request" };
+  }
+  return sessionStart(body, new Date().toISOString());
+}
+
 function handleHeartbeat(body: HeartbeatRequest): void {
   const now = new Date().toISOString();
   updateLastSeen.run(now, body.id);
@@ -469,14 +524,9 @@ function handleListPeers(body: ListPeersRequest): Peer[] {
   // Desktop peers share one VM PID — skip the kill check; heartbeat timeout handles staleness.
   return peers.filter((p) => {
     if (p.peer_type === "desktop") return true;
-    try {
-      process.kill(p.pid, 0);
-      return true;
-    } catch {
-      // Hide it from this listing, but do not delete here. Row cleanup is
-      // cleanStalePeers' job, and mail is never deleted (see Task 4 rationale).
-      return false;
-    }
+    // A dead pid is hidden from this listing, not deleted here. Row cleanup is
+    // cleanStalePeers' job, and mail is never deleted (see Task 4 rationale).
+    return isPidAlive(p.pid);
   });
 }
 
@@ -603,6 +653,8 @@ Bun.serve<WatchData>({
           return Response.json({ ok: true });
         case "/peek-messages":
           return Response.json(handlePeekMessages(body as { id: string; since_id?: number }));
+        case "/session-start":
+          return Response.json(handleSessionStart(body as SessionStartRequest));
         case "/unregister":
           handleUnregister(body as { id: string });
           return Response.json({ ok: true });

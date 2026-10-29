@@ -89,3 +89,18 @@ export interface PollMessagesResponse {
 export interface AckMessagesRequest {
   message_ids: number[];
 }
+
+/**
+ * Posted by the SessionStart hook with the LIVE session id, which the MCP
+ * server cannot see after an in-session /resume (its env var was fixed at
+ * spawn). `pids` is the hook's ancestor chain, nearest first.
+ */
+export interface SessionStartRequest {
+  session_key: string;
+  pids: number[];
+  source: string;
+}
+
+export type SessionStartResponse =
+  | { ok: true; peer_id: PeerId; action: "noop" | "mapped" | "rekeyed" }
+  | { ok: false; reason: "no_live_peer" | "conflict" | "bad_request" };
