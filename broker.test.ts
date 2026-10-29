@@ -1110,3 +1110,66 @@ describe("/unread", () => {
     expect(await post<{ count: number }>("/unread", { pid: 999999 })).toEqual({ count: 0 });
   });
 });
+
+describe("summaries after a restart", () => {
+  // Several agents share one repo. A peer coming back must get its OWN last
+  // summary, never whichever agent in that repo set one most recently.
+  const REPO = "/tmp/shared-repo-summaries";
+  const sleepers: ReturnType<typeof Bun.spawn>[] = [];
+  const livePid = () => { const p = Bun.spawn(["sleep", "30"]); sleepers.push(p); return p.pid; };
+  afterAll(() => { for (const p of sleepers) { try { p.kill(); } catch {} } });
+  const cli = (pid: number, session_key: string, summary = "") => post<{ id: string; restored_summary?: string }>("/register", {
+    pid, cwd: REPO, git_root: REPO, tty: null, summary, peer_type: "cli", session_key,
+  });
+  const desk = (token: string, summary = "") => post<{ id: string; restored_summary?: string }>("/register", {
+    pid: process.pid, cwd: "/", git_root: null, tty: null, summary, peer_type: "desktop", session_token: token,
+  });
+  const summaryOf = async (id: string) =>
+    (await post<Array<{ id: string; summary: string }>>("/list-peers", { scope: "machine", cwd: "/", git_root: null }))
+      .find((p) => p.id === id)?.summary;
+
+  test("a returning CLI session gets its own last summary, not the repo's latest", async () => {
+    const a = await cli(livePid(), "sum-a", "Coding Agent 1");
+    const b = await cli(livePid(), "sum-b");
+    await post("/set-summary", { id: b.id, summary: "Security Agent" }); // B speaks last in the repo
+    await post("/unregister", { id: a.id }); // A's row is reaped
+    const back = await cli(livePid(), "sum-a");
+    expect(back.id).toBe(a.id);
+    expect(back.restored_summary).toBe("Coding Agent 1");
+    expect(await summaryOf(a.id)).toBe("Coding Agent 1");
+  });
+
+  test("a summary set after registering is the one restored", async () => {
+    const a = await cli(livePid(), "sum-c", "QA Agent");
+    await post("/set-summary", { id: a.id, summary: "QA Agent. Grading PR 12" });
+    await cli(livePid(), "sum-d", "Coding Agent 3");
+    await post("/unregister", { id: a.id });
+    expect((await cli(livePid(), "sum-c")).restored_summary).toBe("QA Agent. Grading PR 12");
+  });
+
+  test("a brand-new CLI session in a shared repo doesn't inherit another agent's summary", async () => {
+    await cli(livePid(), "sum-e", "Production Monitor");
+    const fresh = await cli(livePid(), "sum-new");
+    expect(fresh.restored_summary).toBeUndefined();
+    expect(await summaryOf(fresh.id)).toBe("");
+  });
+
+  test("a returning desktop session gets its own last summary", async () => {
+    const a = await desk("cs_sum_pm", "PM agent");
+    await desk("cs_sum_design", "Design agent");
+    await post("/unregister", { id: a.id });
+    const back = await desk("cs_sum_pm");
+    expect(back.id).toBe(a.id);
+    expect(back.restored_summary).toBe("PM agent");
+    expect(await summaryOf(a.id)).toBe("PM agent");
+  });
+
+  test("a session without a key (older Claude Code) still falls back to the workspace summary", async () => {
+    const pid = livePid();
+    await post("/register", { pid, cwd: "/tmp/legacy-ws", git_root: null, tty: null, summary: "Legacy agent", peer_type: "cli" });
+    const fresh = await post<{ id: string; restored_summary?: string }>("/register", {
+      pid: livePid(), cwd: "/tmp/legacy-ws", git_root: null, tty: null, summary: "", peer_type: "cli",
+    });
+    expect(fresh.restored_summary).toBe("Legacy agent");
+  });
+});
