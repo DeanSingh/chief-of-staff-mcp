@@ -53,6 +53,7 @@ export interface RegisterRequest {
 export interface RegisterResponse {
   id: PeerId;
   restored_summary?: string; // Set when a cached summary from a previous session was restored
+  wake_topic?: string; // Desktop only: the secret relay topic this identity is woken on (absent when the relay is off)
 }
 
 export interface HeartbeatRequest {
