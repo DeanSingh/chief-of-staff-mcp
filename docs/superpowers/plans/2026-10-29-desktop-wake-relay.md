@@ -30,6 +30,7 @@
 3. **Topic leakage via `list_peers`**: another peer's listing must not contain any topic. → Task 2 test `list_peers shows only the caller's own topic`.
 4. **Reaped and resurrected desktop peer**: it must keep the same topic, or its armed Monitor goes deaf. → Task 1 test `topic survives reap and resurrection`.
 5. **Relay disabled**: no publish and no Monitor copy, and the existing pull behavior is unchanged. → Task 1 test `off disables publishing`; Task 2 test `off omits the wake copy`.
+6. **Stream ends silently** (observed 18:24Z: `curl` exited 0 about 2.5 min after `wake2`, 19 min before the Monitor's timeout): a bare `curl` leaves the agent deaf until it notices. The copy loops `curl` and resumes with `since=<last connect − 5s>`, so a wake published during the gap is still delivered, and an `awk` filter outside the loop drops the replayed duplicate. Verified locally 2026-10-29 with forced 4s drops: a publish made during the gap was delivered exactly once. → Task 2 test `wake command reconnects and resumes with since=`. Task 3 Step 4 is a live check that runs past one stream drop.
 
 ---
 
@@ -77,7 +78,7 @@ Exact copy (the tests pin the command string):
 ```
 To be woken when a peer messages you, arm this Monitor now, then carry on:
 
-    Monitor({ command: "curl -sN <relay>/<topic>/json | grep --line-buffered '\"event\":\"message\"'", description: "claude-peers wake", timeout_ms: 1800000 })
+    Monitor({ command: "t=$(date +%s); while true; do curl -sN \"<relay>/<topic>/json?since=$t\" | grep --line-buffered '\"event\":\"message\"'; t=$(( $(date +%s) - 5 )); sleep 2; done | awk '!s[$0]++ { print; fflush() }'", description: "claude-peers wake", timeout_ms: 1800000 })
 
 When it fires: call check_messages (with your peer_session) and answer what you find. When it expires (every 30 min), arm it again with the same call. This topic is private to you; do not share it.
 ```
@@ -85,6 +86,7 @@ When it fires: call check_messages (with your peer_session) and answer what you 
 - [ ] **Step 1: Failing tests:**
   - `wakeInstructions embeds the exact curl|grep command and timeout 1800000`
   - `no copy contains "persistent"`
+  - `wake command reconnects and resumes with since=` (asserts the `while true` loop, `?since=$t`, the `- 5` back-off, and the `awk '!s[$0]++'` dedupe are in the command)
   - `cli list_peers header has no Monitor copy`
   - `list_peers shows only the caller's own topic`
   - `off omits the wake copy`
