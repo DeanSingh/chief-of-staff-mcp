@@ -14,12 +14,13 @@ let proc: ReturnType<typeof Bun.spawn>;
 // hang so a test can prove /send-message never waits on it.
 const relayHits: Array<{ path: string; body: string }> = [];
 let relayHang = false;
+let relayStatus = 200;
 const relay = Bun.serve({
   port: 0, hostname: "127.0.0.1",
   async fetch(req) {
     relayHits.push({ path: new URL(req.url).pathname, body: await req.text() });
     if (relayHang) return new Promise<Response>(() => {});
-    return new Response("ok");
+    return new Response("ok", { status: relayStatus });
   },
 });
 const BROKER_ENV = {
@@ -745,7 +746,7 @@ const startedOf = (pid: number) => new TextDecoder().decode(Bun.spawnSync(["ps",
 });
 
 describe("wake relay", () => {
-  type Reg = { id: string; wake_topic?: string };
+  type Reg = { id: string; wake_topic?: string; wake_url?: string };
   const TOPIC = /^cp-wake-[0-9a-f]{24}$/;
   const sleepers: ReturnType<typeof Bun.spawn>[] = [];
   const livePid = () => { const p = Bun.spawn(["sleep", "30"]); sleepers.push(p); return p.pid; };
@@ -766,6 +767,14 @@ describe("wake relay", () => {
   test("desktop register returns a cp-wake- topic; cli does not", async () => {
     expect((await regDesktop("cs_wake_a")).wake_topic).toMatch(TOPIC);
     expect((await regCli()).wake_topic).toBeUndefined();
+  });
+
+  test("desktop register returns the full wake URL on the broker's own relay", async () => {
+    // The broker is the single source of truth for the relay: a server whose
+    // env names a different relay must not print a URL nobody publishes to.
+    const d = await regDesktop("cs_wake_url");
+    expect(d.wake_url).toBe(`http://127.0.0.1:${relay.port}/${d.wake_topic}`);
+    expect((await regCli()).wake_url).toBeUndefined();
   });
 
   test("same token → same topic across re-register", async () => {
@@ -863,6 +872,7 @@ describe("wake relay", () => {
       }
       const d = await regDesktop("cs_wake_off", OFF_HTTP);
       expect(d.wake_topic).toBeUndefined();
+      expect(d.wake_url).toBeUndefined();
       const s = await regCli(OFF_HTTP);
       const before = relayHits.length;
       await fetch(`${OFF_HTTP}/send-message`, {
@@ -875,6 +885,40 @@ describe("wake relay", () => {
       off.kill();
       await off.exited;
       for (const suffix of ["", "-wal", "-shm"]) { try { await Bun.file(OFF_DB + suffix).delete(); } catch {} }
+    }
+  });
+
+  test("an HTTP error from the relay is logged, without the topic", async () => {
+    const ERR_PORT = PORT + 300;
+    const ERR_HTTP = `http://127.0.0.1:${ERR_PORT}`;
+    const ERR_DB = `${import.meta.dir}/.test-broker-err-${ERR_PORT}.db`;
+    const b = Bun.spawn(["bun", `${import.meta.dir}/broker.ts`], {
+      env: { ...BROKER_ENV, CLAUDE_PEERS_PORT: String(ERR_PORT), CLAUDE_PEERS_DB: ERR_DB },
+      stdout: "ignore", stderr: "pipe",
+    });
+    relayStatus = 429;
+    try {
+      for (let i = 0; i < 50; i++) {
+        try { if ((await fetch(`${ERR_HTTP}/health`)).ok) break; } catch {}
+        await Bun.sleep(100);
+      }
+      const d = await regDesktop("cs_wake_err", ERR_HTTP);
+      const s = await regCli(ERR_HTTP);
+      await fetch(`${ERR_HTTP}/send-message`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ from_id: s.id, to_id: d.id, text: "x" }),
+      });
+      await waitFor(() => hitsFor(d.wake_topic!).length > 0);
+      await Bun.sleep(200);
+      b.kill();
+      const err = await new Response(b.stderr as ReadableStream).text();
+      expect(err).toContain("wake publish failed: HTTP 429");
+      expect(err).not.toContain(d.wake_topic!);
+    } finally {
+      relayStatus = 200;
+      b.kill();
+      await b.exited;
+      for (const suffix of ["", "-wal", "-shm"]) { try { await Bun.file(ERR_DB + suffix).delete(); } catch {} }
     }
   });
 });

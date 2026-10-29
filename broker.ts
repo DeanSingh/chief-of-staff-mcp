@@ -355,6 +355,9 @@ function handleRegister(body: RegisterRequest): RegisterResponse {
     db.run("UPDATE peers SET pid_started = ? WHERE id = ?", [pidStartTime(body.pid), res.id]);
   } else if (WAKE_ON && body.session_token) {
     res.wake_topic = wakeTopicFor(body.session_token);
+    // The full subscribe base, so the server never pairs this topic with a
+    // relay of its own (its env may differ from the one that launched us).
+    if (res.wake_topic) res.wake_url = `${WAKE_RELAY}/${res.wake_topic}`;
   }
   return res;
 }
@@ -392,6 +395,11 @@ function publishWake(topic: string): void {
 // mail is already queued; the agent still finds it on its next pull.
 function postWake(topic: string): void {
   fetch(`${WAKE_RELAY}/${topic}`, { method: "POST", body: "wake", signal: AbortSignal.timeout(3000) })
+    .then((r) => {
+      // fetch resolves on 4xx/5xx; a rate-limited relay (429) must not fail silently.
+      if (!r.ok) console.error(`[claude-peers broker] wake publish failed: HTTP ${r.status}`);
+      return r.body?.cancel();
+    })
     .catch((e) => console.error(`[claude-peers broker] wake publish failed: ${e}`));
 }
 
@@ -576,9 +584,12 @@ const sessionStart = db.transaction((body: SessionStartRequest, now: string): Se
   // Move the live row onto the resumed session's id. Only the row moves: the
   // conversation this process was in before keeps its own key mapping, dormant
   // until that conversation is resumed somewhere. Its undelivered mail stays
-  // with it too, unless that id never stood for more than the launch key (the
-  // moments between launch and /resume): then whoever wrote to it was
-  // addressing the agent in this terminal, so the mail follows the row.
+  // with it too, unless that id is mapped by at most one key, i.e. it was never
+  // /clear'd into a second conversation. Then the mail follows the row on the
+  // reading that whoever wrote to it was addressing the agent in this terminal
+  // (the case this exists for: mail sent to the id minted between launch and
+  // /resume). "Undelivered" means unacked, so a channel-pushed message the old
+  // conversation saw but never acked also moves and shows up again here.
   const target = mapped.peer_id;
   const keys = (db.query("SELECT COUNT(*) AS n FROM peer_sessions WHERE peer_id = ?").get(live.id) as { n: number }).n;
   if (keys <= 1) db.run("UPDATE messages SET to_id = ? WHERE to_id = ? AND delivered = 0", [target, live.id]);

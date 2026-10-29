@@ -65,9 +65,6 @@ const HOST_PID = process.ppid && process.ppid > 1 ? process.ppid : process.pid;
  */
 const SESSION_KEY = process.env.CLAUDE_CODE_SESSION_ID || undefined;
 
-/** Outbound relay the broker publishes wakes to ("off" disables). Mirrors broker.ts. */
-const WAKE_RELAY = (process.env.CLAUDE_PEERS_WAKE_RELAY ?? "https://ntfy.sh").replace(/\/+$/, "");
-
 /**
  * The exact Monitor call that wakes a Desktop/Cowork session when a peer
  * messages it. Returned from claim_session/list_peers because Desktop's
@@ -76,28 +73,38 @@ const WAKE_RELAY = (process.env.CLAUDE_PEERS_WAKE_RELAY ?? "https://ntfy.sh").re
  *
  * Cloud sessions can't reach the broker's loopback, so the broker POSTs a bare
  * "wake" to the session's secret topic on an outbound relay (ntfy) and the
- * Monitor streams that topic. The stream can end silently, so the command
- * reconnects, resuming 5s before its last connect so a wake published in the
- * gap still arrives; awk drops the replayed duplicate. Monitor caps timeout_ms
- * at 30 min and has no persistent option, hence the re-arm instruction.
+ * Monitor streams that topic. `url` is <relay>/<topic> exactly as the broker
+ * publishes it. Each stream is capped at 10 min so a half-open connection
+ * can't leave the agent deaf, and every reconnect resumes 5s before the
+ * previous connect, so wakes published during a drop or stall are replayed;
+ * awk drops the duplicates. Monitor caps timeout_ms at 30 min and has no
+ * persistent option, hence the re-arm instruction, and a re-arm starts from
+ * "now", hence the check_messages after it.
+ *
+ * "claim" is the first-time copy; "list" (printed on every list_peers) only
+ * asks for a Monitor that isn't already running, so repeat calls don't stack
+ * duplicate watchers.
  */
-export function wakeInstructions(topic: string, relay: string): string {
-  const command = `t=$(date +%s); while true; do curl -sN "${relay}/${topic}/json?since=$t" | grep --line-buffered '"event":"message"'; t=$(( $(date +%s) - 5 )); sleep 2; done | awk '!s[$0]++ { print; fflush() }'`;
-  return `To be woken when a peer messages you, arm this Monitor now, then carry on:
+export function wakeInstructions(url: string, mode: "claim" | "list"): string {
+  const command = `t=$(date +%s); while true; do c=$(date +%s); curl -sN --max-time 600 "${url}/json?since=$t" | grep --line-buffered '"event":"message"'; t=$(( c - 5 )); sleep 2; done | awk '!s[$0]++ { print; fflush() }'`;
+  const lead = mode === "claim"
+    ? "To be woken when a peer messages you, arm this Monitor now, then carry on:"
+    : `If your "claude-peers wake" Monitor is not running (or has expired), arm it:`;
+  return `${lead}
 
     Monitor({ command: ${JSON.stringify(command)}, description: "claude-peers wake", timeout_ms: 1800000 })
 
-When it fires: call check_messages (with your ${SESSION_PARAM}) and answer what you find. When it expires (every 30 min), arm it again with the same call. This topic is private to you; do not share it.`;
+When it fires: call check_messages (with your ${SESSION_PARAM}) and answer what you find. When it expires (every 30 min), arm it again with the same call, then call check_messages once to catch anything sent while it was down. This URL is private to you; do not share it.`;
 }
 
-/** The wake copy for a session, or "" when it has no topic or the relay is off. */
-export function wakeCopy(topic: string | undefined, relay = WAKE_RELAY): string {
-  return topic && relay !== "off" ? wakeInstructions(topic, relay) : "";
+/** The wake copy for a session, or "" when the broker gave it no wake URL (relay off, or no token). */
+export function wakeCopy(url: string | undefined, mode: "claim" | "list"): string {
+  return url ? wakeInstructions(url, mode) : "";
 }
 
-/** list_peers header for a caller with an identity. CLI callers have no topic (channel push wakes them). */
-export function peerListHeader(peerId: PeerId, wakeTopic: string | undefined, relay = WAKE_RELAY): string {
-  const copy = wakeCopy(wakeTopic, relay);
+/** list_peers header for a caller with an identity. CLI callers have no wake URL (channel push wakes them). */
+export function peerListHeader(peerId: PeerId, wakeUrl: string | undefined): string {
+  const copy = wakeCopy(wakeUrl, "list");
   return `Your peer ID: ${peerId}\n\n${copy ? `${copy}\n\n` : ""}`;
 }
 
@@ -290,7 +297,7 @@ let hasSamplingSupport = false; // Whether the client supports sampling (createM
 
 // For desktop (Cowork), multiple sessions share this server process.
 // Each session registers as a separate peer, keyed by its peer_session value.
-const desktopPeers = new Map<string, { peerId: PeerId; summary: string; wakeTopic?: string }>();
+const desktopPeers = new Map<string, { peerId: PeerId; summary: string; wakeUrl?: string }>();
 
 /**
  * Session paths that are NOT unique per session and therefore cannot be used
@@ -310,6 +317,16 @@ const AMBIGUOUS_SESSION_PATHS = new Set(["/home/claude", "/", "/root", "/app"]);
 
 export function isAmbiguousSession(value: string): boolean {
   return AMBIGUOUS_SESSION_PATHS.has(value.trim().replace(/\/+$/, "") || "/");
+}
+
+/**
+ * The session value an identity may be resolved from. GUARD 2 rejects
+ * ambiguous values for identity-bearing tools, but list_peers is exempt, and
+ * resolving /home/claude there would register it as a shared token and print
+ * its wake URL to every cloud session that passed it.
+ */
+export function resolvableSession(value: string | undefined): string | undefined {
+  return value && !isAmbiguousSession(value) ? value : undefined;
 }
 
 /** Mints an unguessable, collision-free session token. */
@@ -339,7 +356,7 @@ async function getDesktopPeerId(sessionId: string): Promise<PeerId> {
   if (!reg.restored_summary && PEER_NAME) {
     await brokerFetch("/set-summary", { id: reg.id, summary: PEER_NAME }).catch(() => {});
   }
-  desktopPeers.set(sessionId, { peerId: reg.id, summary, wakeTopic: reg.wake_topic });
+  desktopPeers.set(sessionId, { peerId: reg.id, summary, wakeUrl: reg.wake_url });
   return reg.id;
 }
 
@@ -367,7 +384,7 @@ CRITICAL FIRST STEPS — do these immediately when you start:
 1. (Desktop only) Call \`claim_session\` with a short label to get your peer_session token.
 2. Call set_summary with your role/name and what you're working on (e.g. "Design agent. Reviewing clinician UX mockups."), passing peer_session if you are on Desktop.
 3. Call list_peers with scope "machine" to see who else is online and learn your own peer ID.
-4. (Desktop only) claim_session and list_peers print a Monitor call that wakes you when a peer messages you. Arm it as soon as you see it, and re-arm it whenever it expires.
+4. (Desktop only) claim_session prints a Monitor call that wakes you when a peer messages you. Arm it once; re-arm it whenever it expires. list_peers repeats it in case yours is not running.
 
 Use summaries to identify peers — peer IDs change on restart, but summaries tell you who's who.
 
@@ -655,11 +672,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     };
   }
 
+  const identitySession = resolvableSession(sessionId);
   const effectivePeerId =
-    sessionId && PEER_TYPE === "desktop"
-      ? await getDesktopPeerId(sessionId)
+    identitySession && PEER_TYPE === "desktop"
+      ? await getDesktopPeerId(identitySession)
       : myId;
-  const toolResult = await handleTool(name, args, effectivePeerId, sessionId);
+  const toolResult = await handleTool(name, args, effectivePeerId, identitySession);
   return appendPendingMessages(toolResult, name, effectivePeerId);
 });
 
@@ -678,9 +696,9 @@ async function handleTool(name: string, args: Record<string, unknown> | undefine
           peer_type: "desktop",
           session_token: token,
         });
-        desktopPeers.set(token, { peerId: reg.id, summary: label || PEER_NAME, wakeTopic: reg.wake_topic });
+        desktopPeers.set(token, { peerId: reg.id, summary: label || PEER_NAME, wakeUrl: reg.wake_url });
         log(`Claimed session ${token} -> peer ${reg.id} (${label})`);
-        const wake = wakeCopy(reg.wake_topic);
+        const wake = wakeCopy(reg.wake_url, "claim");
         return {
           content: [
             {
@@ -721,7 +739,7 @@ Next: call set_summary (with your token) to tell other peers what you are workin
         });
 
         const header = effectivePeerId
-          ? peerListHeader(effectivePeerId, sessionId ? desktopPeers.get(sessionId)?.wakeTopic : undefined)
+          ? peerListHeader(effectivePeerId, sessionId ? desktopPeers.get(sessionId)?.wakeUrl : undefined)
           : `⚠️ You have no peer identity yet. Desktop/Cowork sessions must call \`claim_session\` (with a short label) to get a \`${SESSION_PARAM}\` token, then pass that token on every claude-peers tool call except list_peers. Do NOT use \`pwd\` — every cloud session shares /home/claude and would collide onto one identity. Note the parameter is \`${SESSION_PARAM}\`, NOT \`session_id\` — Claude Desktop reserves that name and strips it in transit. Until you claim one, other peers cannot message you and set_summary/send_message will error.\n\n`;
 
         if (peers.length === 0) {
@@ -860,7 +878,7 @@ Next: call set_summary (with your token) to tell other peers what you are workin
                 peer_type: "desktop",
                 session_token: sessionId,
               });
-              desktopPeers.set(sessionId, { peerId: reg.id, summary, wakeTopic: reg.wake_topic });
+              desktopPeers.set(sessionId, { peerId: reg.id, summary, wakeUrl: reg.wake_url });
               log(`Re-registered desktop session ${sessionId} as peer ${reg.id}`);
               return {
                 content: [{ type: "text" as const, text: `Re-registered and summary set: "${summary}" (new peer ID: ${reg.id})` }],

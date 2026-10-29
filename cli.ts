@@ -13,7 +13,7 @@
  *   bun cli.ts kill-broker     — Stop the broker daemon
  */
 
-import { realpathSync, renameSync } from "node:fs";
+import { chmodSync, realpathSync, renameSync, statSync, unlinkSync } from "node:fs";
 
 const BROKER_PORT = parseInt(process.env.CLAUDE_PEERS_PORT ?? "7899", 10);
 const BROKER_URL = `http://127.0.0.1:${BROKER_PORT}`;
@@ -233,11 +233,19 @@ switch (cmd) {
     // Write a sibling temp file and rename it over the original, so a crash
     // mid-write can't leave Claude Code a truncated settings.json. Resolve
     // symlinks first (dotfile managers link this file), or the rename would
-    // replace the link with a plain file.
-    const real = (await file.exists()) ? realpathSync(path) : path;
+    // replace the link with a plain file. The temp file takes the original's
+    // permissions: settings.json can hold secrets in env and is often 0600.
+    const exists = await file.exists();
+    const real = exists ? realpathSync(path) : path;
     const tmp = `${real}.tmp-${process.pid}`;
-    await Bun.write(tmp, JSON.stringify(settings, null, 2) + "\n");
-    renameSync(tmp, real);
+    try {
+      await Bun.write(tmp, JSON.stringify(settings, null, 2) + "\n");
+      if (exists) chmodSync(tmp, statSync(real).mode & 0o7777);
+      renameSync(tmp, real);
+    } catch (e) {
+      try { unlinkSync(tmp); } catch {}
+      throw e;
+    }
     console.log(`Installed SessionStart hook in ${path}:\n  ${command}`);
     break;
   }

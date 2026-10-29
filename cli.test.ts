@@ -1,5 +1,5 @@
 import { test, expect, describe, afterAll } from "bun:test";
-import { mkdtempSync, rmSync, statSync, lstatSync, symlinkSync, readdirSync, readlinkSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync, lstatSync, symlinkSync, readdirSync, readlinkSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -77,5 +77,14 @@ describe("install-hooks", () => {
     expect(lstatSync(link).isSymbolicLink()).toBe(true);
     expect(readlinkSync(link)).toBe(real);
     expect(commands(await Bun.file(real).json())).toEqual([OURS]);
+  });
+
+  test("install-hooks keeps settings.json's permissions (it can hold secrets in env)", async () => {
+    const path = join(DIR, `mode-${n++}.json`);
+    await Bun.write(path, JSON.stringify({ env: { TOKEN: "x" } }));
+    chmodSync(path, 0o600);
+    const proc = Bun.spawn(["bun", `${import.meta.dir}/cli.ts`, "install-hooks", "--settings", path], { stdout: "pipe", stderr: "pipe" });
+    expect(await proc.exited).toBe(0);
+    expect(statSync(path).mode & 0o777).toBe(0o600);
   });
 });
