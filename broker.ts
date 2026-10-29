@@ -10,6 +10,8 @@
  */
 
 import { Database } from "bun:sqlite";
+import { chmodSync } from "node:fs";
+import { ensureSecret, peerSecret, secretPath, secretsEqual, PEER_HEADER } from "./shared/auth.ts";
 import type {
   RegisterRequest,
   RegisterResponse,
@@ -34,6 +36,12 @@ const DB_PATH = process.env.CLAUDE_PEERS_DB ?? `${process.env.HOME}/.claude-peer
 const db = new Database(DB_PATH);
 db.run("PRAGMA journal_mode = WAL");
 db.run("PRAGMA busy_timeout = 3000");
+// The DB holds every peer's mail and session tokens: owner-only.
+for (const suffix of ["", "-wal", "-shm"]) {
+  try { chmodSync(DB_PATH + suffix, 0o600); } catch { /* not created yet */ }
+}
+
+const SECRET = ensureSecret(secretPath(DB_PATH));
 
 db.run(`
   CREATE TABLE IF NOT EXISTS peers (
@@ -247,16 +255,22 @@ const deletePeer = db.prepare(`
   DELETE FROM peers WHERE id = ?
 `);
 
+// What other peers may see of a peer. Never SELECT * here: session_token is
+// a desktop session's bearer identity. Older desktop rows also carry the
+// token as their cwd (servers registered with cwd = token), so mask it there.
+const PUBLIC_CWD = "CASE WHEN session_token IS NOT NULL AND instr(cwd, session_token) > 0 THEN replace(cwd, session_token, '(desktop session)') ELSE cwd END";
+const PUBLIC_PEER_COLUMNS = `id, pid, ${PUBLIC_CWD} AS cwd, git_root, tty, summary, peer_type, registered_at, last_seen`;
+
 const selectAllPeers = db.prepare(`
-  SELECT * FROM peers
+  SELECT ${PUBLIC_PEER_COLUMNS} FROM peers
 `);
 
 const selectPeersByDirectory = db.prepare(`
-  SELECT * FROM peers WHERE cwd = ?
+  SELECT ${PUBLIC_PEER_COLUMNS} FROM peers WHERE cwd = ?
 `);
 
 const selectPeersByGitRoot = db.prepare(`
-  SELECT * FROM peers WHERE git_root = ?
+  SELECT ${PUBLIC_PEER_COLUMNS} FROM peers WHERE git_root = ?
 `);
 
 const insertMessage = db.prepare(`
@@ -282,7 +296,7 @@ const selectSummaryCache = db.prepare(`
 `);
 
 const markDelivered = db.prepare(`
-  UPDATE messages SET delivered = 1 WHERE id = ?
+  UPDATE messages SET delivered = 1 WHERE id = ? AND to_id = ?
 `);
 
 // --- Generate peer ID ---
@@ -342,7 +356,7 @@ function handleRegister(body: RegisterRequest): RegisterResponse {
   if ((body.peer_type ?? "cli") !== "desktop") {
     db.run("UPDATE peers SET pid_started = ? WHERE id = ?", [pidStartTime(body.pid), res.id]);
   }
-  return res;
+  return { ...res, peer_secret: peerSecret(SECRET, res.id) };
 }
 
 function registerPeer(body: RegisterRequest): RegisterResponse {
@@ -502,18 +516,23 @@ const sessionStart = db.transaction((body: SessionStartRequest, now: string): Se
   if (!live) return { ok: false, reason: "no_live_peer" };
 
   // From now on this process registers under the live session, not the key
-  // its server was spawned with.
-  const started = pidStartTime(body.pid);
-  if (started) {
-    db.run("INSERT OR REPLACE INTO process_sessions (pid, pid_started, session_key, updated_at) VALUES (?, ?, ?, ?)", [body.pid, started, body.session_key, now]);
-  }
+  // its server was spawned with. Recorded only once the call is accepted: a
+  // refused conflict must leave the process where it was.
+  const recordLiveSession = () => {
+    const started = pidStartTime(body.pid);
+    if (started) {
+      db.run("INSERT OR REPLACE INTO process_sessions (pid, pid_started, session_key, updated_at) VALUES (?, ?, ?, ?)", [body.pid, started, body.session_key, now]);
+    }
+  };
 
   const mapped = db.query("SELECT peer_id FROM peer_sessions WHERE session_key = ?").get(body.session_key) as { peer_id: string } | null;
   if (!mapped) {
+    recordLiveSession();
     db.run("INSERT INTO peer_sessions (session_key, peer_id, peer_type, updated_at) VALUES (?, ?, 'cli', ?)", [body.session_key, live.id, now]);
     return { ok: true, peer_id: live.id, action: "mapped" };
   }
   if (mapped.peer_id === live.id) {
+    recordLiveSession();
     db.run("UPDATE peer_sessions SET updated_at = ? WHERE session_key = ?", [now, body.session_key]);
     return { ok: true, peer_id: live.id, action: "noop" };
   }
@@ -522,6 +541,7 @@ const sessionStart = db.transaction((body: SessionStartRequest, now: string): Se
   // that process owns the id. Leave both alone.
   const owner = db.query("SELECT pid, pid_started FROM peers WHERE id = ?").get(mapped.peer_id) as { pid: number; pid_started: string | null } | null;
   if (owner && owner.pid !== live.pid && isPidAlive(owner.pid) && isSameProcess(owner)) return { ok: false, reason: "conflict" };
+  recordLiveSession();
 
   // Move the live row onto the resumed session's id. Only the row moves: the
   // conversation this process was in before keeps its own key mapping and its
@@ -538,6 +558,16 @@ function handleSessionStart(body: SessionStartRequest): SessionStartResponse {
     return { ok: false, reason: "bad_request" };
   }
   return sessionStart(body, new Date().toISOString());
+}
+
+/** Unread mail for the CLI peer a Claude Code process owns: the UserPromptSubmit nudge. */
+function handleUnread(body: { pid: number }): { count: number } {
+  if (!Number.isInteger(body?.pid)) return { count: 0 };
+  const live = (db.query("SELECT id, pid, pid_started FROM peers WHERE pid = ? AND peer_type != 'desktop'")
+    .all(body.pid) as { id: string; pid: number; pid_started: string | null }[]).find(isSameProcess);
+  if (!live) return { count: 0 };
+  const row = db.query("SELECT COUNT(*) AS n FROM messages WHERE to_id = ? AND delivered = 0").get(live.id) as { n: number };
+  return { count: row.n };
 }
 
 function handleHeartbeat(body: HeartbeatRequest): void {
@@ -631,7 +661,7 @@ function handleSendMessage(body: SendMessageRequest): { ok: boolean; error?: str
 
   const sent_at = new Date().toISOString();
   const res = insertMessage.run(body.from_id, body.to_id, body.text, sent_at);
-  const sender = db.query("SELECT summary, cwd FROM peers WHERE id = ?").get(body.from_id) as { summary: string; cwd: string } | null;
+  const sender = db.query(`SELECT summary, ${PUBLIC_CWD} AS cwd FROM peers WHERE id = ?`).get(body.from_id) as { summary: string; cwd: string } | null;
   const woke = notifyWatchers(body.to_id, {
     type: "peer_message",
     id: Number(res.lastInsertRowid),
@@ -652,9 +682,10 @@ function handlePollMessages(body: PollMessagesRequest): PollMessagesResponse {
 }
 
 function handleAckMessages(body: AckMessagesRequest): void {
+  // Only the recipient can mark its mail read.
   db.transaction(() => {
     for (const id of body.message_ids) {
-      markDelivered.run(id);
+      markDelivered.run(id, body.id);
     }
   })();
 }
@@ -672,6 +703,57 @@ function handleUnregister(body: { id: string }): void {
 
 // --- HTTP Server ---
 
+// --- Request gate ---
+// Loopback is not a security boundary against the browser: any page Dean
+// opens can POST here (a text/plain "simple request" needs no CORS
+// preflight), and a DNS-rebinding page can read the answers too. Clients of
+// this broker are local processes, so refuse anything that looks like a
+// browser, and require the install secret on every POST.
+const ALLOWED_HOSTS = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`]);
+
+// The body field naming the peer a route acts as. Those routes also need that
+// peer's credential, so a caller can only act as the peer it registered.
+const ACTS_AS: Record<string, "id" | "from_id"> = {
+  "/send-message": "from_id",
+  "/heartbeat": "id",
+  "/set-summary": "id",
+  "/poll-messages": "id",
+  "/peek-messages": "id",
+  "/ack-messages": "id",
+  "/unregister": "id",
+};
+// `bun cli.ts send` speaks for the human at the terminal, not for a peer.
+const OPERATOR_ID = "cli";
+
+function gate(req: Request, path: string): Response | null {
+  if (!ALLOWED_HOSTS.has(req.headers.get("host") ?? "")) {
+    return new Response("forbidden host", { status: 403 });
+  }
+  // Local clients (servers, hooks, the CLI, Monitor) never send Origin.
+  // Browsers always do on cross-site requests.
+  if (req.headers.get("origin") !== null) {
+    return new Response("forbidden origin", { status: 403 });
+  }
+  if (req.method !== "POST") return null;
+  if (!(req.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json")) {
+    return new Response("content-type must be application/json", { status: 415 });
+  }
+  const bearer = req.headers.get("authorization")?.replace(/^Bearer /, "");
+  if (!secretsEqual(bearer, SECRET)) {
+    return Response.json({ ok: false, error: "missing or wrong broker secret" }, { status: 401 });
+  }
+  return null;
+}
+
+function actsAsCaller(req: Request, path: string, body: Record<string, unknown>): boolean {
+  const field = ACTS_AS[path];
+  if (!field) return true;
+  const id = body?.[field];
+  if (typeof id !== "string") return false;
+  if (path === "/send-message" && id === OPERATOR_ID) return true;
+  return secretsEqual(req.headers.get(PEER_HEADER), peerSecret(SECRET, id));
+}
+
 Bun.serve<WatchData>({
   port: PORT,
   hostname: "127.0.0.1",
@@ -679,14 +761,13 @@ Bun.serve<WatchData>({
     const url = new URL(req.url);
     const path = url.pathname;
 
+    const refused = gate(req, path);
+    if (refused) return refused;
+
     if (req.method !== "POST") {
       if (path.startsWith("/watch/")) {
-        // Watchers are local harness processes (Monitor, cli.ts watch), which
-        // never send an Origin header. Browsers always do — refuse them so a
-        // web page can't hijack a peer's message feed cross-site.
-        if (req.headers.get("origin") !== null) {
-          return new Response("forbidden origin", { status: 403 });
-        }
+        // Origin was already refused above, so a web page can't hijack a
+        // peer's message feed cross-site.
         const peer = decodeURIComponent(path.slice("/watch/".length));
         if (!peer) return new Response("missing peer id", { status: 400 });
         if (server.upgrade(req, { data: { peer } })) return;
@@ -699,7 +780,10 @@ Bun.serve<WatchData>({
     }
 
     try {
-      const body = await req.json();
+      const body = (await req.json()) as Record<string, any>;
+      if (!actsAsCaller(req, path, body)) {
+        return Response.json({ ok: false, error: `not authorized to act as ${String(body?.[ACTS_AS[path]!])}` }, { status: 403 });
+      }
 
       switch (path) {
         case "/register":
@@ -727,6 +811,8 @@ Bun.serve<WatchData>({
           return Response.json(handlePeekMessages(body as { id: string; since_id?: number }));
         case "/session-start":
           return Response.json(handleSessionStart(body as SessionStartRequest));
+        case "/unread":
+          return Response.json(handleUnread(body as { pid: number }));
         case "/unregister":
           handleUnregister(body as { id: string });
           return Response.json({ ok: true });

@@ -1,4 +1,6 @@
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
+import { statSync } from "node:fs";
+import { peerSecret, readSecret, secretPath, PEER_HEADER } from "./shared/auth.ts";
 
 // Spawn a real broker on a private port + temp DB and exercise the
 // /watch WebSocket feed end to end: subscribe, send, receive, and confirm the
@@ -10,14 +12,28 @@ const DB = `${import.meta.dir}/.test-broker-${PORT}.db`;
 
 let proc: ReturnType<typeof Bun.spawn>;
 
-async function post<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${HTTP}${path}`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
+// Every POST carries the install secret, and peer-scoped routes carry the
+// credential for the id they act as, the way server.ts sends them. Tests that
+// probe the gate itself use raw fetch.
+const SUBJECT: Record<string, string> = {
+  "/send-message": "from_id", "/heartbeat": "id", "/set-summary": "id", "/poll-messages": "id",
+  "/peek-messages": "id", "/ack-messages": "id", "/unregister": "id",
+};
+function headersFor(db: string, path: string, body: unknown): Record<string, string> {
+  const h: Record<string, string> = { "content-type": "application/json" };
+  const secret = readSecret(secretPath(db));
+  if (!secret) return h;
+  h.authorization = `Bearer ${secret}`;
+  const id = (body as Record<string, unknown> | null)?.[SUBJECT[path] ?? ""];
+  if (typeof id === "string") h[PEER_HEADER] = peerSecret(secret, id);
+  return h;
+}
+
+async function postTo<T>(http: string, db: string, path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${http}${path}`, { method: "POST", headers: headersFor(db, path, body), body: JSON.stringify(body) });
   return res.json() as Promise<T>;
 }
+const post = <T>(path: string, body: unknown) => postTo<T>(HTTP, DB, path, body);
 
 // cleanStalePeers runs on broker startup, so a restart against the same DB is
 // the deterministic way to trigger the stale-peer sweep. The other trigger is a
@@ -88,7 +104,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   proc.kill();
-  for (const suffix of ["", "-wal", "-shm"]) {
+  for (const suffix of ["", "-wal", "-shm", ".secret"]) {
     try { await Bun.file(DB + suffix).delete(); } catch {}
   }
 });
@@ -412,14 +428,7 @@ describe("broker /watch WebSocket feed", () => {
     const MIGRATION_TEST_DB = `${import.meta.dir}/.test-broker-migration-${MIGRATION_TEST_PORT}.db`;
     const MIGRATION_TEST_HTTP = `http://127.0.0.1:${MIGRATION_TEST_PORT}`;
 
-    async function migrationPost<T>(path: string, body: unknown): Promise<T> {
-      const res = await fetch(`${MIGRATION_TEST_HTTP}${path}`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      return res.json() as Promise<T>;
-    }
+    const migrationPost = <T>(path: string, body: unknown) => postTo<T>(MIGRATION_TEST_HTTP, MIGRATION_TEST_DB, path, body);
 
     // Step 1: Seed a temp DB with a desktop_tokens row (no peer_sessions table yet)
     const { Database } = await import("bun:sqlite");
@@ -512,7 +521,7 @@ describe("broker /watch WebSocket feed", () => {
         try { await migProc.exited; } catch {} // Wait for process to actually exit
       }
       // Delete temp files - only after process is truly gone
-      for (const suffix of ["", "-wal", "-shm"]) {
+      for (const suffix of ["", "-wal", "-shm", ".secret"]) {
         const filePath = MIGRATION_TEST_DB + suffix;
         try { await Bun.file(filePath).delete(); } catch {} // Missing file is OK
       }
@@ -611,6 +620,22 @@ describe("/session-start", () => {
     expect(ids).toContain(idB);
   });
 
+  test("a refused conflict records nothing for the caller's pid", async () => {
+    const procA = Bun.spawn(["sleep", "30"]);
+    const idA = await regCli(procA.pid, "ss-orig-c2");
+    const pidB = livePid();
+    const idB = await regCli(pidB, "ss-launch-c2");
+    expect(await ss({ session_key: "ss-orig-c2", pid: pidB, source: "resume" }))
+      .toEqual({ ok: false, reason: "conflict" });
+    // Once A is gone, B re-registering under its own launch key must still be
+    // B. Had the refused call been recorded, B would now resolve to A's id.
+    procA.kill();
+    await procA.exited;
+    await post("/unregister", { id: idB });
+    expect(await regCli(pidB, "ss-launch-c2")).toBe(idB);
+    expect(idA).not.toBe(idB);
+  });
+
   test("desktop rows are never matched", async () => {
     const pid = livePid();
     await post("/register", {
@@ -705,5 +730,164 @@ const startedOf = (pid: number) => new TextDecoder().decode(Bun.spawnSync(["ps",
     await regCli(parent, "ss-parent");
     expect(await ss({ session_key: "ss-child", pid: livePid(), source: "startup" }))
       .toEqual({ ok: false, reason: "no_live_peer" });
+  });
+});
+
+describe("request gate", () => {
+  const secret = () => readSecret(secretPath(DB))!;
+  const auth = () => ({ "content-type": "application/json", authorization: `Bearer ${secret()}` });
+  const raw = (path: string, headers: Record<string, string>, body: unknown = { scope: "machine", cwd: "/", git_root: null }) =>
+    fetch(`${HTTP}${path}`, { method: "POST", headers, body: JSON.stringify(body) });
+  const peer = async (summary: string) => {
+    const r = await post<{ id: string; peer_secret: string }>("/register", {
+      pid: process.pid, cwd: `/tmp/gate-${summary}`, git_root: null, tty: null, summary, peer_type: "desktop", session_token: `cs_gate_${summary}`,
+    });
+    return r;
+  };
+  const undelivered = async (id: string) =>
+    (await post<{ messages: Array<{ id: number; text: string }> }>("/peek-messages", { id })).messages;
+
+  test("the install secret is created 0600 beside the DB, and the DB is 0600", () => {
+    expect(secret()).toMatch(/^[0-9a-f]{64}$/);
+    expect(statSync(secretPath(DB)).mode & 0o777).toBe(0o600);
+    expect(statSync(DB).mode & 0o777).toBe(0o600);
+  });
+
+  test("a text/plain POST is refused", async () => {
+    const res = await raw("/list-peers", { ...auth(), "content-type": "text/plain" });
+    expect(res.status).toBe(415);
+  });
+
+  test("a foreign Host is refused (DNS rebinding)", async () => {
+    const res = await raw("/list-peers", { ...auth(), host: `attacker.example:${PORT}` });
+    expect(res.status).toBe(403);
+    const health = await fetch(`${HTTP}/health`, { headers: { host: `attacker.example:${PORT}` } });
+    expect(health.status).toBe(403);
+  });
+
+  test("localhost and 127.0.0.1 Hosts are accepted", async () => {
+    expect((await raw("/list-peers", { ...auth(), host: `localhost:${PORT}` })).status).toBe(200);
+    expect((await raw("/list-peers", { ...auth(), host: `127.0.0.1:${PORT}` })).status).toBe(200);
+  });
+
+  test("any Origin is refused (cross-site requests)", async () => {
+    expect((await raw("/list-peers", { ...auth(), origin: "http://attacker.example" })).status).toBe(403);
+    expect((await raw("/list-peers", { ...auth(), origin: "null" })).status).toBe(403);
+  });
+
+  test("a POST without the install secret is refused", async () => {
+    const plain = { "content-type": "application/json" };
+    for (const path of ["/register", "/list-peers", "/send-message", "/session-start", "/ack-messages"]) {
+      expect((await raw(path, plain)).status).toBe(401);
+      expect((await raw(path, { ...plain, authorization: "Bearer " + "0".repeat(64) })).status).toBe(401);
+    }
+  });
+
+  test("GET /health stays open so clients can probe liveness", async () => {
+    expect((await fetch(`${HTTP}/health`)).status).toBe(200);
+  });
+
+  test("register hands back this peer's credential", async () => {
+    const r = await peer("cred");
+    expect(r.peer_secret).toBe(peerSecret(secret(), r.id));
+  });
+
+  test("send-message refuses a from_id that isn't the caller's", async () => {
+    const a = await peer("send-a");
+    const b = await peer("send-b");
+    const target = await peer("send-t");
+    const spoof = await raw("/send-message", { ...auth(), [PEER_HEADER]: b.peer_secret }, { from_id: a.id, to_id: target.id, text: "spoofed" });
+    expect(spoof.status).toBe(403);
+    const none = await raw("/send-message", auth(), { from_id: a.id, to_id: target.id, text: "no credential" });
+    expect(none.status).toBe(403);
+    expect(await undelivered(target.id)).toEqual([]);
+    const own = await raw("/send-message", { ...auth(), [PEER_HEADER]: a.peer_secret }, { from_id: a.id, to_id: target.id, text: "genuine" });
+    expect(((await own.json()) as { ok: boolean }).ok).toBe(true);
+    expect((await undelivered(target.id)).map((m) => m.text)).toEqual(["genuine"]);
+  });
+
+  test("peer-scoped routes refuse another peer's id", async () => {
+    const a = await peer("scope-a");
+    const b = await peer("scope-b");
+    const asB = { ...auth(), [PEER_HEADER]: b.peer_secret };
+    for (const [path, body] of [
+      ["/heartbeat", { id: a.id }],
+      ["/set-summary", { id: a.id, summary: "hijacked" }],
+      ["/poll-messages", { id: a.id }],
+      ["/peek-messages", { id: a.id }],
+      ["/ack-messages", { id: a.id, message_ids: [1] }],
+      ["/unregister", { id: a.id }],
+    ] as const) {
+      expect([path, (await raw(path, asB, body)).status]).toEqual([path, 403]);
+    }
+    const list = await post<Array<{ id: string; summary: string }>>("/list-peers", { scope: "machine", cwd: "/", git_root: null });
+    expect(list.find((p) => p.id === a.id)?.summary).toBe("scope-a");
+  });
+
+  test("ack marks only the caller's own mail", async () => {
+    const a = await peer("ack-a");
+    const b = await peer("ack-b");
+    await post("/send-message", { from_id: "cli", to_id: a.id, text: "for a" });
+    const [msg] = await undelivered(a.id);
+    await post("/ack-messages", { id: b.id, message_ids: [msg!.id] });
+    expect((await undelivered(a.id)).map((m) => m.text)).toEqual(["for a"]);
+    await post("/ack-messages", { id: a.id, message_ids: [msg!.id] });
+    expect(await undelivered(a.id)).toEqual([]);
+  });
+
+  test("the cli sender needs only the install secret", async () => {
+    const t = await peer("cli-t");
+    const res = await raw("/send-message", auth(), { from_id: "cli", to_id: t.id, text: "from the terminal" });
+    expect(((await res.json()) as { ok: boolean }).ok).toBe(true);
+  });
+
+  test("list-peers never returns session tokens, even through cwd", async () => {
+    await post("/register", {
+      pid: process.pid, cwd: "cs_gate_leak1", git_root: null, tty: null, summary: "leaky", peer_type: "desktop", session_token: "cs_gate_leak1",
+    });
+    const list = await post<Array<Record<string, unknown>>>("/list-peers", { scope: "machine", cwd: "/", git_root: null });
+    expect(list.some((p) => p.summary === "leaky")).toBe(true);
+    expect(JSON.stringify(list)).not.toContain("cs_gate_");
+    for (const p of list) {
+      expect(p).not.toHaveProperty("session_token");
+      expect(p).not.toHaveProperty("pid_started");
+    }
+  });
+
+  test("a watch frame never carries the sender's token as from_cwd", async () => {
+    const sender = await post<{ id: string }>("/register", {
+      pid: process.pid, cwd: "cs_gate_leak2", git_root: null, tty: null, summary: "", peer_type: "desktop", session_token: "cs_gate_leak2",
+    });
+    const target = await peer("watch-t");
+    const w = await connectWatch(target.id);
+    try {
+      await w.next(); // "watching" handshake
+      await post("/send-message", { from_id: sender.id, to_id: target.id, text: "hi" });
+      const frame = await w.next();
+      expect(JSON.stringify(frame)).not.toContain("cs_gate_leak2");
+    } finally {
+      w.ws.close();
+    }
+  });
+});
+
+describe("/unread", () => {
+  test("counts a live CLI peer's undelivered mail by its host pid", async () => {
+    const proc = Bun.spawn(["sleep", "30"]);
+    try {
+      const { id } = await post<{ id: string }>("/register", {
+        pid: proc.pid, cwd: "/tmp/unread", git_root: null, tty: null, summary: "", peer_type: "cli", session_key: "unread-key",
+      });
+      expect(await post<{ count: number }>("/unread", { pid: proc.pid })).toEqual({ count: 0 });
+      await post("/send-message", { from_id: "cli", to_id: id, text: "one" });
+      await post("/send-message", { from_id: "cli", to_id: id, text: "two" });
+      expect(await post<{ count: number }>("/unread", { pid: proc.pid })).toEqual({ count: 2 });
+    } finally {
+      proc.kill();
+    }
+  });
+
+  test("an unknown pid has nothing unread", async () => {
+    expect(await post<{ count: number }>("/unread", { pid: 999999 })).toEqual({ count: 0 });
   });
 });
