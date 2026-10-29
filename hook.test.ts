@@ -15,7 +15,7 @@ const stub = Bun.serve({
 });
 afterAll(() => stub.stop(true));
 
-async function runHook(input: unknown, port: number) {
+async function runHook(input: unknown, port: number | undefined) {
   const started = performance.now();
   const proc = Bun.spawn(["bun", HOOK], {
     stdin: new Blob([JSON.stringify(input)]),
