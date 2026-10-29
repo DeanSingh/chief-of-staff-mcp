@@ -48,6 +48,10 @@ const WAKE_COALESCE_MS = Number(process.env.CLAUDE_PEERS_WAKE_COALESCE_MS) || 10
 
 // --- Database setup ---
 
+// Every file the broker creates (DB, -wal, -shm, secret) is owner-only, even
+// one SQLite recreates mid-run after the startup chmod below.
+process.umask(0o077);
+
 const db = new Database(DB_PATH);
 db.run("PRAGMA journal_mode = WAL");
 db.run("PRAGMA busy_timeout = 3000");
