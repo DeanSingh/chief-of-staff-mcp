@@ -33,6 +33,10 @@ const DB_PATH = process.env.CLAUDE_PEERS_DB ?? `${process.env.HOME}/.claude-peer
 
 // --- Database setup ---
 
+// Every file the broker creates (DB, -wal, -shm, secret) is owner-only, even
+// one SQLite recreates mid-run after the startup chmod below.
+process.umask(0o077);
+
 const db = new Database(DB_PATH);
 db.run("PRAGMA journal_mode = WAL");
 db.run("PRAGMA busy_timeout = 3000");

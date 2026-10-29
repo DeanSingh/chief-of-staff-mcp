@@ -751,6 +751,9 @@ describe("request gate", () => {
     expect(secret()).toMatch(/^[0-9a-f]{64}$/);
     expect(statSync(secretPath(DB)).mode & 0o777).toBe(0o600);
     expect(statSync(DB).mode & 0o777).toBe(0o600);
+    // The WAL holds recent mail until checkpoint: it must be owner-only too,
+    // though SQLite creates it after the broker's startup chmod.
+    expect(statSync(`${DB}-wal`).mode & 0o777).toBe(0o600);
   });
 
   test("a text/plain POST is refused", async () => {
