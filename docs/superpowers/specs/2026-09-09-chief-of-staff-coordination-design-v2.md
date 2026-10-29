@@ -183,6 +183,35 @@ scratchpad directory, confirming it is the real identifier.
 no `/bind-session` route, no hook↔server join over the Claude Code pid, and no
 arrival-ordering problem between a hook and a registration.
 
+**Amended 2026-10-29: the environment key goes stale, so a `SessionStart` hook is
+required after all.** The server reads `CLAUDE_CODE_SESSION_ID` once, at spawn.
+When the conversation changes after that, the key no longer names the live
+session. Measured on Claude Code 2.1.312, with the branch broker:
+
+| Event | Live session id | Server's env key | Peer id without the hook | With the hook |
+| --- | --- | --- | --- | --- |
+| Start | `00b69402…` | `00b69402…` | `i0x113h1` (new) | same |
+| `/clear` | **`7f15c2b3…` (new)** | `00b69402…` | `i0x113h1` (kept, but the new session id maps to nothing) | `i0x113h1`, and `7f15c2b3… → i0x113h1` is recorded (`mapped`) |
+| `/compact` | `7f15c2b3…` (unchanged) | `00b69402…` | `i0x113h1` (kept) | same (`noop`) |
+| Plain `claude`, then in-session `/resume` of `c4d427b1…` (owned `sr79due2`) | `c4d427b1…` | `64627da0…` (launch) | **`l8lwqn48` (new, so `sr79due2` was orphaned)** | `sr79due2` reclaimed (`rekeyed`); the server re-registered onto it within one heartbeat |
+
+Rows observed afterwards: one `peers` row per process and no orphans. The
+`/clear` gap is silent, but it matters: without the mapping, a later
+`claude --resume 7f15c2b3…` would get a new id.
+
+So identity takes two sources. The environment key covers launch, including
+`claude --resume <id>` at launch. The `SessionStart` hook reports the live
+`session_id` and its ancestor pids to `POST /session-start`, which:
+
+- maps an unknown key to the process's peer;
+- re-keys the process onto the id the session already owns, re-addressing
+  undelivered mail;
+- refuses (`conflict`) when that id is held by another live process.
+
+The hook and the server are joined on the Claude Code pid **plus that process's
+start time**, so a reused pid never inherits an identity (SE condition, 10-29).
+Rows written before the start time was recorded match on pid alone.
+
 **This does not generalize to Desktop.** One bridge MCP server process serves
 many Desktop/Cowork sessions, so a process-level environment variable cannot
 discriminate between them. `claim_session` / `peer_session` remain necessary and
@@ -389,8 +418,10 @@ A small bundle in `~/.claude/settings.json`. This is the deterministic signal;
 | `UserPromptSubmit` | **Out-of-band close.** The human answered in the agent's own terminal, so its open request is stale. | `session_id` → cancel that session's `pending`/`escalated` requests as `canceled`, `answered_via: 'terminal'` |
 | `Stop` | Turn ended — an `info` event marking idleness. | `session_id`, `last_assistant_message` |
 
-`SessionStart` is **not** in this bundle. Identity comes from the environment
-(§4); a hook for it would be redundant.
+`SessionStart` **is** in this bundle (amended 2026-10-29; see §4). The
+environment key goes stale after `/clear` and an in-session `/resume`, and only
+the hook sees the live session id. It is installed by `bun cli.ts install-hooks`
+and posts to `/session-start`.
 
 Without the `UserPromptSubmit` rule, `pending` fills with questions the human
 already answered by typing directly into the blocked agent — noise within a day,
