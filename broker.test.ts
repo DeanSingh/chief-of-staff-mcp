@@ -878,33 +878,43 @@ describe("wake relay", () => {
     } finally { relayHang = false; }
   });
 
-  test("off disables publishing", async () => {
-    const OFF_PORT = PORT + 200;
-    const OFF_HTTP = `http://127.0.0.1:${OFF_PORT}`;
-    const OFF_DB = `${import.meta.dir}/.test-broker-off-${OFF_PORT}.db`;
-    const off = Bun.spawn(["bun", `${import.meta.dir}/broker.ts`], {
-      env: { ...BROKER_ENV, CLAUDE_PEERS_PORT: String(OFF_PORT), CLAUDE_PEERS_DB: OFF_DB, CLAUDE_PEERS_WAKE_RELAY: "off" },
-      stdout: "ignore", stderr: "ignore",
-    });
-    try {
-      for (let i = 0; i < 50; i++) {
-        try { if ((await fetch(`${OFF_HTTP}/health`)).ok) break; } catch {}
-        await Bun.sleep(100);
+  // Off unless Dean opts in: an unset relay, "off", and a relay that would
+  // publish in clear text over the internet all mean no topics and no egress.
+  const { CLAUDE_PEERS_WAKE_RELAY: _relay, ...UNSET } = BROKER_ENV;
+  for (const [i, [label, env]] of ([
+    ["unset (the default)", UNSET],
+    ["off", { ...BROKER_ENV, CLAUDE_PEERS_WAKE_RELAY: "off" }],
+    ["a plain-http remote relay", { ...BROKER_ENV, CLAUDE_PEERS_WAKE_RELAY: "http://ntfy.example" }],
+  ] as const).entries()) {
+    test(`relay ${label}: no topic, no publish`, async () => {
+      const OFF_PORT = PORT + 200 + i;
+      const OFF_HTTP = `http://127.0.0.1:${OFF_PORT}`;
+      const OFF_DB = `${import.meta.dir}/.test-broker-off-${OFF_PORT}.db`;
+      const off = Bun.spawn(["bun", `${import.meta.dir}/broker.ts`], {
+        env: { ...env, CLAUDE_PEERS_PORT: String(OFF_PORT), CLAUDE_PEERS_DB: OFF_DB },
+        stdout: "ignore", stderr: "ignore",
+      });
+      try {
+        for (let i = 0; i < 50; i++) {
+          try { if ((await fetch(`${OFF_HTTP}/health`)).ok) break; } catch {}
+          await Bun.sleep(100);
+        }
+        const d = await regDesktop(`cs_wake_off${i}`, OFF_HTTP, OFF_DB);
+        expect(d.id).toBeDefined();
+        expect(d.wake_topic).toBeUndefined();
+        expect(d.wake_url).toBeUndefined();
+        const s = await regCli(OFF_HTTP, OFF_DB);
+        const before = relayHits.length;
+        await postTo(OFF_HTTP, OFF_DB, "/send-message", { from_id: s.id, to_id: d.id, text: "x" });
+        await Bun.sleep(300);
+        expect(relayHits.length).toBe(before);
+      } finally {
+        off.kill();
+        await off.exited;
+        for (const suffix of ["", "-wal", "-shm", ".secret"]) { try { await Bun.file(OFF_DB + suffix).delete(); } catch {} }
       }
-      const d = await regDesktop("cs_wake_off", OFF_HTTP, OFF_DB);
-      expect(d.wake_topic).toBeUndefined();
-      expect(d.wake_url).toBeUndefined();
-      const s = await regCli(OFF_HTTP, OFF_DB);
-      const before = relayHits.length;
-      await postTo(OFF_HTTP, OFF_DB, "/send-message", { from_id: s.id, to_id: d.id, text: "x" });
-      await Bun.sleep(300);
-      expect(relayHits.length).toBe(before);
-    } finally {
-      off.kill();
-      await off.exited;
-      for (const suffix of ["", "-wal", "-shm", ".secret"]) { try { await Bun.file(OFF_DB + suffix).delete(); } catch {} }
-    }
-  });
+    });
+  }
 
   test("an HTTP error from the relay is logged, without the topic", async () => {
     const ERR_PORT = PORT + 300;

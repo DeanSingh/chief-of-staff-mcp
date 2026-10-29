@@ -86,8 +86,26 @@ const SESSION_KEY = process.env.CLAUDE_CODE_SESSION_ID || undefined;
  * asks for a Monitor that isn't already running, so repeat calls don't stack
  * duplicate watchers.
  */
+/**
+ * The shell command an agent's wake Monitor runs. Everything it prints lands
+ * in the agent's context, and anyone holding the topic can publish to it, so
+ * it never echoes a byte from the network: each new event id prints the
+ * constant "wake", at most once per `gapSec`. Duplicates are the replays the
+ * `since=` resume deliberately causes. The gap sits under the broker's 10s
+ * coalescing window, so a genuine trailing wake is never dropped, while a
+ * leaked topic can at most burn one turn per gap.
+ *
+ * Plain POSIX sh, no awk or grep: mawk (Debian/Ubuntu's default awk) holds
+ * piped input until EOF, which would sit on every wake until the stream
+ * closed, and `grep --line-buffered` isn't in busybox. `echo` after curl ends
+ * a stream cut mid-line, so the next event isn't glued onto it.
+ */
+export function wakeCommand(url: string, gapSec = 8): string {
+  return `t=$(date +%s); while true; do c=$(date +%s); curl -sN --max-time 600 "${url}/json?since=$t"; echo; t=$(( c - 5 )); sleep 2; done | while IFS= read -r l; do case $l in *'"event":"message"'*) ;; *) continue ;; esac; i=\${l#*'"id":"'}; i=\${i%%'"'*}; case " $s " in *" $i "*) continue ;; esac; s="$s $i"; n=$(date +%s); [ $(( n - \${w:-0} )) -lt ${gapSec} ] && continue; w=$n; echo wake; done`;
+}
+
 export function wakeInstructions(url: string, mode: "claim" | "list"): string {
-  const command = `t=$(date +%s); while true; do c=$(date +%s); curl -sN --max-time 600 "${url}/json?since=$t" | grep --line-buffered '"event":"message"'; t=$(( c - 5 )); sleep 2; done | awk '!s[$0]++ { print; fflush() }'`;
+  const command = wakeCommand(url);
   const lead = mode === "claim"
     ? "To be woken when a peer messages you, arm this Monitor now, then carry on:"
     : `If your "claude-peers wake" Monitor is not running (or has expired), arm it:`;

@@ -34,8 +34,13 @@ const DB_PATH = process.env.CLAUDE_PEERS_DB ?? `${process.env.HOME}/.claude-peer
 // woken through an outbound pub/sub relay instead: each desktop identity gets a
 // secret topic, and a send POSTs the bare word "wake" to it. Message content
 // never leaves the machine. "off" disables the relay.
-const WAKE_RELAY = (process.env.CLAUDE_PEERS_WAKE_RELAY ?? "https://ntfy.sh").replace(/\/+$/, "");
-const WAKE_ON = WAKE_RELAY !== "off";
+// Off unless configured: the relay is a third party that sees when each
+// desktop identity gets mail. It must be https, except on this machine.
+const WAKE_RELAY = (process.env.CLAUDE_PEERS_WAKE_RELAY ?? "off").replace(/\/+$/, "");
+const WAKE_ON = /^https:\/\/|^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(WAKE_RELAY);
+if (WAKE_RELAY !== "off" && !WAKE_ON) {
+  console.error("[claude-peers broker] CLAUDE_PEERS_WAKE_RELAY must be https:// (or http:// on 127.0.0.1/localhost); wake relay disabled");
+}
 const WAKE_COALESCE_MS = Number(process.env.CLAUDE_PEERS_WAKE_COALESCE_MS) || 10_000;
 
 // --- Database setup ---
