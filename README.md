@@ -92,6 +92,19 @@ A **broker daemon** runs on `localhost:7899` with a SQLite database. Each Claude
 
 The broker auto-launches when the first session starts. It cleans up dead peers automatically. Everything is localhost-only.
 
+### Access control
+
+Loopback alone doesn't keep web pages out: a page you open can POST to `127.0.0.1`, and a DNS-rebinding page can read the replies. So the broker:
+
+- refuses any request with an `Origin` header, a `Host` other than `127.0.0.1:<port>` / `localhost:<port>`, or (for POSTs) a `Content-Type` other than `application/json`;
+- requires an install secret on every POST. It is 256 random bits in `~/.claude-peers.db.secret` (0600), created on the broker's first start and read by the MCP server, hook and CLI;
+- hands each peer a credential at `/register` and requires it on every route that acts as that peer (send, poll, peek, ack, heartbeat, set-summary, unregister), so a caller can only send as, or read the mail of, the peer it registered;
+- never returns desktop session tokens from `/list-peers`.
+
+The DB, secret and debug log are owner-only. Processes running as your own user can still read those files, so this keeps out browsers and other users, not your own processes.
+
+After upgrading, restart the broker (`bun cli.ts kill-broker`) and every session's MCP server together: an older server has no secret and is refused. Re-run `bun cli.ts install-hooks` to pick up the unread-mail nudge.
+
 ### Wake feed for sessions without channel push
 
 Claude Desktop / Cowork ignore `claude/channel` notifications, so the broker also exposes a WebSocket wake feed:

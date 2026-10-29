@@ -9,9 +9,12 @@
  *   bun cli.ts peers           — List all peers
  *   bun cli.ts send <id> <msg> — Send a message to a peer
  *   bun cli.ts watch <id>      — Stream incoming messages for a peer (for Monitor tool)
- *   bun cli.ts install-hooks   — Register the SessionStart identity hook in ~/.claude/settings.json
+ *   bun cli.ts install-hooks   — Register the identity and unread hooks in ~/.claude/settings.json
  *   bun cli.ts kill-broker     — Stop the broker daemon
  */
+
+import { authHeaders } from "./shared/auth.ts";
+import { hookCommand } from "./hook.ts";
 
 const BROKER_PORT = parseInt(process.env.CLAUDE_PEERS_PORT ?? "7899", 10);
 const BROKER_URL = `http://127.0.0.1:${BROKER_PORT}`;
@@ -20,7 +23,7 @@ async function brokerFetch<T>(path: string, body?: unknown): Promise<T> {
   const opts: RequestInit = body
     ? {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: authHeaders(),
         body: JSON.stringify(body),
       }
     : {};
@@ -209,8 +212,8 @@ switch (cmd) {
   }
 
   case "install-hooks": {
-    // Registers hook.ts for SessionStart so a resumed conversation reclaims its
-    // peer id (see hook.ts). The command is generated from this file's own
+    // Registers hook.ts for SessionStart, so a resumed conversation reclaims its
+    // peer id, and for UserPromptSubmit, the unread-mail nudge (see hook.ts). The command is generated from this file's own
     // location, so re-run this after moving the repo. Our entry is recognised
     // by its trailing "# claude-peers" shell comment: re-running replaces it in
     // place instead of appending a duplicate, and anything else is untouched.
@@ -219,17 +222,19 @@ switch (cmd) {
     const path = flag > 0 ? process.argv[flag + 1]! : `${process.env.HOME}/.claude/settings.json`;
     const file = Bun.file(path);
     const settings: any = (await file.exists()) ? await file.json() : {};
-    const command = `bun "${import.meta.dir}/hook.ts" ${MARK}`;
+    const command = hookCommand(import.meta.dir);
 
     settings.hooks ??= {};
-    const groups: any[] = (settings.hooks.SessionStart ?? [])
-      .map((g: any) => ({ ...g, hooks: (g.hooks ?? []).filter((h: any) => !String(h.command ?? "").endsWith(MARK)) }))
-      .filter((g: any) => g.hooks.length > 0);
-    groups.push({ hooks: [{ type: "command", command, timeout: 1 }] });
-    settings.hooks.SessionStart = groups;
+    for (const event of ["SessionStart", "UserPromptSubmit"]) {
+      const groups: any[] = (settings.hooks[event] ?? [])
+        .map((g: any) => ({ ...g, hooks: (g.hooks ?? []).filter((h: any) => !String(h.command ?? "").endsWith(MARK)) }))
+        .filter((g: any) => g.hooks.length > 0);
+      groups.push({ hooks: [{ type: "command", command, timeout: 1 }] });
+      settings.hooks[event] = groups;
+    }
 
     await Bun.write(path, JSON.stringify(settings, null, 2) + "\n");
-    console.log(`Installed SessionStart hook in ${path}:\n  ${command}`);
+    console.log(`Installed SessionStart and UserPromptSubmit hooks in ${path}:\n  ${command}`);
     break;
   }
 
@@ -241,6 +246,6 @@ Usage:
   bun cli.ts peers           List all peers
   bun cli.ts send <id> <msg> Send a message to a peer
   bun cli.ts watch <id>      Stream incoming messages for a peer (for Monitor tool)
-  bun cli.ts install-hooks   Register the SessionStart identity hook [--settings <path>]
+  bun cli.ts install-hooks   Register the identity and unread hooks [--settings <path>]
   bun cli.ts kill-broker     Stop the broker daemon`);
 }

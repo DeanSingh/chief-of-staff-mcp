@@ -53,6 +53,8 @@ export interface RegisterRequest {
 export interface RegisterResponse {
   id: PeerId;
   restored_summary?: string; // Set when a cached summary from a previous session was restored
+  /** This peer's credential: send it as the PEER_HEADER on routes that act as this peer. */
+  peer_secret?: string;
 }
 
 export interface HeartbeatRequest {
@@ -87,6 +89,8 @@ export interface PollMessagesResponse {
 }
 
 export interface AckMessagesRequest {
+  /** The recipient acking; only its own messages are marked delivered. */
+  id: PeerId;
   message_ids: number[];
 }
 
