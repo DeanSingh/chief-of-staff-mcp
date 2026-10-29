@@ -92,12 +92,12 @@ export interface AckMessagesRequest {
 
 /**
  * Posted by the SessionStart hook with the LIVE session id, which the MCP
- * server cannot see after an in-session /resume (its env var was fixed at
- * spawn). `pids` is the hook's ancestor chain, nearest first.
+ * server cannot see after /clear or an in-session /resume (its env var was
+ * fixed at spawn). `pid` is the Claude Code process the hook ran under.
  */
 export interface SessionStartRequest {
   session_key: string;
-  pids: number[];
+  pid: number;
   source: string;
 }
 

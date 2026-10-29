@@ -27,7 +27,7 @@ async function restartBroker() {
   await proc.exited;
   await Bun.sleep(200); // Give port time to be released by OS
   proc = Bun.spawn(["bun", `${import.meta.dir}/broker.ts`], {
-    env: { ...process.env, CLAUDE_PEERS_PORT: String(PORT), CLAUDE_PEERS_DB: DB },
+    env: { ...process.env, CLAUDE_PEERS_PORT: String(PORT), CLAUDE_PEERS_DB: DB, LC_ALL: "fr_FR.UTF-8", TZ: "Asia/Tokyo" },
     stdout: "ignore", stderr: "ignore",
   });
   for (let i = 0; i < 50; i++) {
@@ -76,7 +76,7 @@ function connectWatch(peerId: string): Promise<{ ws: WebSocket; frames: unknown[
 
 beforeAll(async () => {
   proc = Bun.spawn(["bun", `${import.meta.dir}/broker.ts`], {
-    env: { ...process.env, CLAUDE_PEERS_PORT: String(PORT), CLAUDE_PEERS_DB: DB },
+    env: { ...process.env, CLAUDE_PEERS_PORT: String(PORT), CLAUDE_PEERS_DB: DB, LC_ALL: "fr_FR.UTF-8", TZ: "Asia/Tokyo" },
     stdout: "ignore", stderr: "ignore",
   });
   for (let i = 0; i < 50; i++) {
@@ -183,7 +183,10 @@ describe("broker /watch WebSocket feed", () => {
       pid, cwd: "/tmp/cli-sess", git_root: null, tty: "ttys100", summary,
       peer_type: "cli", session_key: "sess-aaaa-1111",
     });
-    const first = await reg(LIVE_PIDS[0]!, "CA1");
+    const doomed = Bun.spawn(["sleep", "30"]);
+    const first = await reg(doomed.pid, "CA1");
+    doomed.kill();
+    await doomed.exited;
     // Same session, restarted: a DIFFERENT pid, same session_key.
     const second = await reg(LIVE_PIDS[1]!, "");
     expect(second.id).toBe(first.id);
@@ -222,7 +225,11 @@ describe("broker /watch WebSocket feed", () => {
       // The assertions above also hold on a broker that ignores session_key
       // entirely (same pid -> same id). What proves the adoption RECORDED the
       // key -> id mapping is a later registration that can only resolve by
-      // key: same session_key, a different pid.
+      // key: same session_key, a different pid. The original process has
+      // exited first, as it would on a real restart (a still-running original
+      // keeps the id; see "a second live process resuming the same session").
+      doomed.kill();
+      await doomed.exited;
       const later = await post<{ id: string }>("/register", {
         pid: restarted.pid, cwd: "/tmp/upgrade-cli", git_root: null, tty: null,
         summary: "", peer_type: "cli", session_key: "sess-upgrade-adopt-1",
@@ -530,24 +537,26 @@ describe("/session-start", () => {
 
   test("no live peer: no rows created", async () => {
     const before = (await machine()).length;
-    const r = await ss({ session_key: "ss-none", pids: [livePid()], source: "startup" });
+    const r = await ss({ session_key: "ss-none", pid: livePid(), source: "startup" });
     expect(r).toEqual({ ok: false, reason: "no_live_peer" });
     expect((await machine()).length).toBe(before);
   });
 
   test("unmapped key is mapped to the live peer", async () => {
-    const pid = livePid();
-    const id = await regCli(pid, "ss-launch-m");
-    const r = await ss({ session_key: "ss-fresh-m", pids: [pid], source: "clear" });
+    const proc = Bun.spawn(["sleep", "30"]);
+    const id = await regCli(proc.pid, "ss-launch-m");
+    const r = await ss({ session_key: "ss-fresh-m", pid: proc.pid, source: "clear" });
     expect(r).toEqual({ ok: true, peer_id: id, action: "mapped" });
-    // A later process registering under the new key gets the same id back.
+    // After that process exits, resuming the new key elsewhere gets the same id.
+    proc.kill();
+    await proc.exited;
     expect(await regCli(livePid(), "ss-fresh-m")).toBe(id);
   });
 
   test("same key is a noop", async () => {
     const pid = livePid();
     const id = await regCli(pid, "ss-noop");
-    expect(await ss({ session_key: "ss-noop", pids: [pid], source: "startup" }))
+    expect(await ss({ session_key: "ss-noop", pid: pid, source: "startup" }))
       .toEqual({ ok: true, peer_id: id, action: "noop" });
   });
 
@@ -558,14 +567,14 @@ describe("/session-start", () => {
     const idB = await regCli(pidB, "ss-launch-r");
     expect(idB).not.toBe(idA);
 
-    const r = await ss({ session_key: "ss-orig-r", pids: [pidB], source: "resume" });
+    const r = await ss({ session_key: "ss-orig-r", pid: pidB, source: "resume" });
     expect(r).toEqual({ ok: true, peer_id: idA, action: "rekeyed" });
     const peers = await machine();
     expect(peers.find((p) => p.id === idA)?.pid).toBe(pidB);
     expect(peers.some((p) => p.id === idB)).toBe(false);
   });
 
-  test("rekey re-addresses undelivered mail", async () => {
+  test("rekey leaves mail with the id it was addressed to", async () => {
     const idA = await regCli(livePid(), "ss-orig-mail");
     await post("/unregister", { id: idA });
     const pidB = livePid();
@@ -573,9 +582,12 @@ describe("/session-start", () => {
     const sender = await register("SS sender", "cli");
     await post("/send-message", { from_id: sender, to_id: idB, text: "sent to the launch id" });
 
-    await ss({ session_key: "ss-orig-mail", pids: [pidB], source: "resume" });
-    const peek = await post<{ messages: Array<{ text: string }> }>("/peek-messages", { id: idA });
-    expect(peek.messages.map((m) => m.text)).toContain("sent to the launch id");
+    await ss({ session_key: "ss-orig-mail", pid: pidB, source: "resume" });
+    // idB is the launch conversation's identity; its mail waits for it.
+    const atB = await post<{ messages: Array<{ text: string }> }>("/peek-messages", { id: idB });
+    const atA = await post<{ messages: Array<{ text: string }> }>("/peek-messages", { id: idA });
+    expect(atB.messages.map((m) => m.text)).toContain("sent to the launch id");
+    expect(atA.messages.map((m) => m.text)).not.toContain("sent to the launch id");
   });
 
   test("launch key resolves to the reclaimed id after rekey", async () => {
@@ -583,7 +595,7 @@ describe("/session-start", () => {
     await post("/unregister", { id: idA });
     const pidB = livePid();
     await regCli(pidB, "ss-launch-l");
-    await ss({ session_key: "ss-orig-l", pids: [pidB], source: "resume" });
+    await ss({ session_key: "ss-orig-l", pid: pidB, source: "resume" });
     // What the MCP server's ensureRegistered does on its next heartbeat.
     expect(await regCli(pidB, "ss-launch-l")).toBe(idA);
   });
@@ -592,7 +604,7 @@ describe("/session-start", () => {
     const idA = await regCli(livePid(), "ss-orig-c");
     const pidB = livePid();
     const idB = await regCli(pidB, "ss-launch-c");
-    expect(await ss({ session_key: "ss-orig-c", pids: [pidB], source: "resume" }))
+    expect(await ss({ session_key: "ss-orig-c", pid: pidB, source: "resume" }))
       .toEqual({ ok: false, reason: "conflict" });
     const ids = (await machine()).map((p) => p.id);
     expect(ids).toContain(idA);
@@ -604,13 +616,13 @@ describe("/session-start", () => {
     await post("/register", {
       pid, cwd: "cs_ss_desktop", git_root: null, tty: null, summary: "", peer_type: "desktop", session_token: "cs_ss_desktop",
     });
-    expect(await ss({ session_key: "ss-desk", pids: [pid], source: "startup" }))
+    expect(await ss({ session_key: "ss-desk", pid: pid, source: "startup" }))
       .toEqual({ ok: false, reason: "no_live_peer" });
   });
 
   test("malformed body → bad_request", async () => {
     expect(await ss({})).toEqual({ ok: false, reason: "bad_request" });
-    expect(await ss({ session_key: "x", pids: [] })).toEqual({ ok: false, reason: "bad_request" });
+    expect(await ss({ session_key: "x" })).toEqual({ ok: false, reason: "bad_request" });
   });
   // SE condition (3): pids get reused, so a pid match alone must not hand a
   // new process someone else's identity. Rows record the process start time.
@@ -618,7 +630,10 @@ describe("/session-start", () => {
   const setStarted = (id: string, v: string | null) => {
     const d = new Database(DB); d.run("UPDATE peers SET pid_started = ? WHERE id = ?", [v, id]); d.close();
   };
-  const startedOf = (pid: number) => new TextDecoder().decode(Bun.spawnSync(["ps", "-o", "lstart=", "-p", String(pid)]).stdout).trim();
+  // Recorded in the C locale and UTC whatever the broker's own environment is
+// (it inherits whichever session auto-launched it), or a broker restart under
+// another LANG/TZ would make every stored value mismatch.
+const startedOf = (pid: number) => new TextDecoder().decode(Bun.spawnSync(["ps", "-o", "lstart=", "-p", String(pid)], { env: { ...process.env, LC_ALL: "C", TZ: "UTC" } }).stdout).trim();
 
   test("CLI rows record the process start time", async () => {
     const pid = livePid();
@@ -641,7 +656,7 @@ describe("/session-start", () => {
     const pid = livePid();
     const id = await regCli(pid, "ss-reuse");
     setStarted(id, "Mon Jan  1 00:00:00 2001");
-    expect(await ss({ session_key: "ss-reuse-new", pids: [pid], source: "resume" }))
+    expect(await ss({ session_key: "ss-reuse-new", pid: pid, source: "resume" }))
       .toEqual({ ok: false, reason: "no_live_peer" });
   });
 
@@ -649,7 +664,7 @@ describe("/session-start", () => {
     const pid = livePid();
     const id = await regCli(pid, "ss-legacy");
     setStarted(id, null);
-    expect(await ss({ session_key: "ss-legacy-new", pids: [pid], source: "clear" }))
+    expect(await ss({ session_key: "ss-legacy-new", pid: pid, source: "clear" }))
       .toEqual({ ok: true, peer_id: id, action: "mapped" });
   });
 
@@ -658,7 +673,37 @@ describe("/session-start", () => {
     setStarted(idA, "Mon Jan  1 00:00:00 2001");
     const pidB = livePid();
     await regCli(pidB, "ss-launch-u");
-    expect(await ss({ session_key: "ss-orig-u", pids: [pidB], source: "resume" }))
+    expect(await ss({ session_key: "ss-orig-u", pid: pidB, source: "resume" }))
       .toEqual({ ok: true, peer_id: idA, action: "rekeyed" });
+  });
+  test("rekey keeps the previous conversation's identity", async () => {
+    const idA = await regCli(livePid(), "ss-orig-k");
+    await post("/unregister", { id: idA });
+    const pidB = livePid();
+    const idB = await regCli(pidB, "ss-conv-b"); // B has been conversation "ss-conv-b" for hours
+    await ss({ session_key: "ss-orig-k", pid: pidB, source: "resume" }); // ...then /resume A
+    // Resuming conversation B elsewhere later must get B's id, not A's.
+    expect(await regCli(livePid(), "ss-conv-b")).toBe(idB);
+  });
+
+  test("a second live process resuming the same session gets its own id", async () => {
+    const pidA = livePid();
+    const idA = await regCli(pidA, "ss-twice");
+    const pidB = livePid();
+    const idB = await regCli(pidB, "ss-twice");
+    expect(idB).not.toBe(idA);
+    const peers = await machine();
+    expect(peers.find((p) => p.id === idA)?.pid).toBe(pidA);
+    // And re-registering B (heartbeat re-register) keeps B's own id.
+    expect(await regCli(pidB, "ss-twice")).toBe(idB);
+  });
+
+  test("only the given pid is considered", async () => {
+    // A nested `claude` whose server has not registered must not resolve to a
+    // parent session's row: the hook sends exactly one pid and nothing walks up.
+    const parent = livePid();
+    await regCli(parent, "ss-parent");
+    expect(await ss({ session_key: "ss-child", pid: livePid(), source: "startup" }))
+      .toEqual({ ok: false, reason: "no_live_peer" });
   });
 });

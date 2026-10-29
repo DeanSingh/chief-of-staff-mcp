@@ -1,5 +1,5 @@
 import { test, expect, describe, afterAll } from "bun:test";
-import { ancestorPids } from "./hook.ts";
+import { hostPid } from "./hook.ts";
 
 const HOOK = `${import.meta.dir}/hook.ts`;
 
@@ -15,23 +15,41 @@ const stub = Bun.serve({
 });
 afterAll(() => stub.stop(true));
 
-async function runHook(input: unknown, port: number | undefined) {
+async function runHook(input: unknown, port: number | undefined, hostComm = "bun") {
   const started = performance.now();
   const proc = Bun.spawn(["bun", HOOK], {
     stdin: new Blob([JSON.stringify(input)]),
     stdout: "pipe",
     stderr: "pipe",
-    env: { ...process.env, CLAUDE_PEERS_PORT: String(port) },
+    // The hook looks for its host by process name. Under test the host is this
+    // bun process, not a claude.
+    env: { ...process.env, CLAUDE_PEERS_PORT: String(port), CLAUDE_PEERS_HOST_COMM: hostComm },
   });
   const exitCode = await proc.exited;
   return { exitCode, elapsed: performance.now() - started, stdout: await new Response(proc.stdout).text() };
 }
 
 describe("hook.ts", () => {
-  test("ancestorPids starts at the given pid and includes this test's parent", () => {
-    const chain = ancestorPids(process.pid);
-    expect(chain[0]).toBe(process.pid);
-    expect(chain).toContain(process.ppid);
+  test("hostPid returns the nearest ancestor with the host's name, or null", async () => {
+    const sh = Bun.spawn(["sh", "-c", "sleep 30; true"]);
+    try {
+      let child = 0;
+      for (let i = 0; i < 50 && !child; i++) {
+        child = parseInt(new TextDecoder().decode(Bun.spawnSync(["pgrep", "-P", String(sh.pid)]).stdout).trim(), 10) || 0;
+        if (!child) await Bun.sleep(20);
+      }
+      expect(hostPid(child, "sh")).toBe(sh.pid);
+      expect(hostPid(child, "no-such-process-name")).toBeNull();
+    } finally {
+      sh.kill();
+    }
+  });
+
+  test("no host process: no request", async () => {
+    const before = hits.length;
+    const r = await runHook({ hook_event_name: "SessionStart", session_id: "s-nohost", source: "startup" }, stub.port, "no-such-process-name");
+    expect(r.exitCode).toBe(0);
+    expect(hits.length).toBe(before);
   });
 
   test("exits 0 within 1s when the broker is unreachable", async () => {
@@ -59,8 +77,7 @@ describe("hook.ts", () => {
     const hit = hits.find((h) => h.body?.session_key === "s-1");
     expect(hit?.path).toBe("/session-start");
     expect(hit?.body.source).toBe("resume");
-    // The hook was spawned directly by this test process, so its nearest
-    // ancestor is us.
-    expect(hit?.body.pids[0]).toBe(process.pid);
+    // The hook was spawned directly by this test process, so its host is us.
+    expect(hit?.body.pid).toBe(process.pid);
   });
 });
