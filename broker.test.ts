@@ -885,6 +885,7 @@ describe("wake relay", () => {
     ["unset (the default)", UNSET],
     ["off", { ...BROKER_ENV, CLAUDE_PEERS_WAKE_RELAY: "off" }],
     ["a plain-http remote relay", { ...BROKER_ENV, CLAUDE_PEERS_WAKE_RELAY: "http://ntfy.example" }],
+    ["a relay URL with shell metacharacters", { ...BROKER_ENV, CLAUDE_PEERS_WAKE_RELAY: 'https://ntfy.example/x";touch /tmp/cp-pwned;"' }],
   ] as const).entries()) {
     test(`relay ${label}: no topic, no publish`, async () => {
       const OFF_PORT = PORT + 200 + i;

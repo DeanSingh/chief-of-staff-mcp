@@ -35,11 +35,14 @@ const DB_PATH = process.env.CLAUDE_PEERS_DB ?? `${process.env.HOME}/.claude-peer
 // secret topic, and a send POSTs the bare word "wake" to it. Message content
 // never leaves the machine. "off" disables the relay.
 // Off unless configured: the relay is a third party that sees when each
-// desktop identity gets mail. It must be https, except on this machine.
+// desktop identity gets mail. It must be https, except on this machine, and
+// URL-safe characters only: it is pasted into the shell command every agent's
+// Monitor runs.
 const WAKE_RELAY = (process.env.CLAUDE_PEERS_WAKE_RELAY ?? "off").replace(/\/+$/, "");
-const WAKE_ON = /^https:\/\/|^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(WAKE_RELAY);
+const WAKE_ON = /^[A-Za-z0-9.:\/_-]+$/.test(WAKE_RELAY)
+  && /^https:\/\/|^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(WAKE_RELAY);
 if (WAKE_RELAY !== "off" && !WAKE_ON) {
-  console.error("[claude-peers broker] CLAUDE_PEERS_WAKE_RELAY must be https:// (or http:// on 127.0.0.1/localhost); wake relay disabled");
+  console.error("[claude-peers broker] CLAUDE_PEERS_WAKE_RELAY must be https:// (or http:// on 127.0.0.1/localhost) and use only [A-Za-z0-9.:/_-]; wake relay disabled");
 }
 const WAKE_COALESCE_MS = Number(process.env.CLAUDE_PEERS_WAKE_COALESCE_MS) || 10_000;
 

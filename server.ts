@@ -78,7 +78,7 @@ const SESSION_KEY = process.env.CLAUDE_CODE_SESSION_ID || undefined;
  * publishes it. Each stream is capped at 10 min so a half-open connection
  * can't leave the agent deaf, and every reconnect resumes 5s before the
  * previous connect, so wakes published during a drop or stall are replayed;
- * awk drops the duplicates. Monitor caps timeout_ms at 30 min and has no
+ * the read loop drops the duplicates. Monitor caps timeout_ms at 30 min and has no
  * persistent option, hence the re-arm instruction, and a re-arm starts from
  * "now", hence the check_messages after it.
  *
