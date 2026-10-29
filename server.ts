@@ -37,7 +37,6 @@ import {
 
 const BROKER_PORT = parseInt(process.env.CLAUDE_PEERS_PORT ?? "7899", 10);
 const BROKER_URL = `http://127.0.0.1:${BROKER_PORT}`;
-const BROKER_WS_URL = `ws://127.0.0.1:${BROKER_PORT}`;
 
 /**
  * The pid a CLI peer registers under. This MCP server is a child of the
@@ -66,26 +65,42 @@ const HOST_PID = process.ppid && process.ppid > 1 ? process.ppid : process.pid;
  */
 const SESSION_KEY = process.env.CLAUDE_CODE_SESSION_ID || undefined;
 
-/** WebSocket feed URL for a peer's inbound messages (see broker /watch). */
-export function watchUrl(peerId: PeerId): string {
-  return `${BROKER_WS_URL}/watch/${encodeURIComponent(peerId)}`;
-}
+/** Outbound relay the broker publishes wakes to ("off" disables). Mirrors broker.ts. */
+const WAKE_RELAY = (process.env.CLAUDE_PEERS_WAKE_RELAY ?? "https://ntfy.sh").replace(/\/+$/, "");
 
 /**
- * The exact Monitor invocation a session should run to get woken on inbound
- * peer messages. Returned from claim_session/list_peers because Desktop's
+ * The exact Monitor call that wakes a Desktop/Cowork session when a peer
+ * messages it. Returned from claim_session/list_peers because Desktop's
  * localMcpBridge drops server-level instructions — tool responses are the
  * only channel guaranteed to reach a Desktop/Cowork agent.
+ *
+ * Cloud sessions can't reach the broker's loopback, so the broker POSTs a bare
+ * "wake" to the session's secret topic on an outbound relay (ntfy) and the
+ * Monitor streams that topic. The stream can end silently, so the command
+ * reconnects, resuming 5s before its last connect so a wake published in the
+ * gap still arrives; awk drops the replayed duplicate. Monitor caps timeout_ms
+ * at 30 min and has no persistent option, hence the re-arm instruction.
  */
-export function watchInstructions(peerId: PeerId): string {
-  return `To be woken instantly when a peer messages you, arm a Monitor now (Claude Code v2.1.98+ / Cowork):
+export function wakeInstructions(topic: string, relay: string): string {
+  const command = `t=$(date +%s); while true; do curl -sN "${relay}/${topic}/json?since=$t" | grep --line-buffered '"event":"message"'; t=$(( $(date +%s) - 5 )); sleep 2; done | awk '!s[$0]++ { print; fflush() }'`;
+  return `To be woken when a peer messages you, arm this Monitor now, then carry on:
 
-    Monitor({ ws: { url: "${watchUrl(peerId)}" }, description: "claude-peers inbox ${peerId}", persistent: true, timeout_ms: 3600000 })
+    Monitor({ command: ${JSON.stringify(command)}, description: "claude-peers wake", timeout_ms: 1800000 })
 
-Each frame is JSON: {"type":"peer_message","from_id":"...","from_summary":"...","text":"..."}. When one arrives, PAUSE your current work, reply with send_message(to_id=from_id), then call check_messages to ack. If your Monitor lacks the ws option, use command: "bun ${import.meta.dir}/cli.ts watch ${peerId}" instead.
-
-ONLY IF YOU RUN ON THIS MACHINE. The feed is on the broker host's loopback. If \`pwd\` is /home/claude you are a cloud Cowork sandbox and cannot reach it — skip the Monitor (it will fail with close code 1006); you will receive peer messages on your next claude-peers tool call or via check_messages.`;
+When it fires: call check_messages (with your ${SESSION_PARAM}) and answer what you find. When it expires (every 30 min), arm it again with the same call. This topic is private to you; do not share it.`;
 }
+
+/** The wake copy for a session, or "" when it has no topic or the relay is off. */
+export function wakeCopy(topic: string | undefined, relay = WAKE_RELAY): string {
+  return topic && relay !== "off" ? wakeInstructions(topic, relay) : "";
+}
+
+/** list_peers header for a caller with an identity. CLI callers have no topic (channel push wakes them). */
+export function peerListHeader(peerId: PeerId, wakeTopic: string | undefined, relay = WAKE_RELAY): string {
+  const copy = wakeCopy(wakeTopic, relay);
+  return `Your peer ID: ${peerId}\n\n${copy ? `${copy}\n\n` : ""}`;
+}
+
 const POLL_INTERVAL_MS = 1000;
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const BROKER_SCRIPT = new URL("./broker.ts", import.meta.url).pathname;
@@ -275,7 +290,7 @@ let hasSamplingSupport = false; // Whether the client supports sampling (createM
 
 // For desktop (Cowork), multiple sessions share this server process.
 // Each session registers as a separate peer, keyed by its peer_session value.
-const desktopPeers = new Map<string, { peerId: PeerId; summary: string }>();
+const desktopPeers = new Map<string, { peerId: PeerId; summary: string; wakeTopic?: string }>();
 
 /**
  * Session paths that are NOT unique per session and therefore cannot be used
@@ -324,21 +339,11 @@ async function getDesktopPeerId(sessionId: string): Promise<PeerId> {
   if (!reg.restored_summary && PEER_NAME) {
     await brokerFetch("/set-summary", { id: reg.id, summary: PEER_NAME }).catch(() => {});
   }
-  desktopPeers.set(sessionId, { peerId: reg.id, summary });
+  desktopPeers.set(sessionId, { peerId: reg.id, summary, wakeTopic: reg.wake_topic });
   return reg.id;
 }
 
-// --- MCP Server ---
-
-const mcp = new Server(
-  { name: "claude-peers", version: "0.1.0" },
-  {
-    capabilities: {
-      experimental: { "claude/channel": {} },
-      tools: {},
-      logging: {},
-    },
-    instructions: `You are connected to the claude-peers network. Other Claude Code instances on this machine can see you and send you messages.
+export const SERVER_INSTRUCTIONS = `You are connected to the claude-peers network. Other Claude Code instances on this machine can see you and send you messages.
 
 IMPORTANT: When you receive a <channel source="claude-peers" ...> message, RESPOND IMMEDIATELY. Do not wait until your current task is finished. Pause what you are doing, reply to the message using send_message, then resume your work. Treat incoming peer messages like a coworker tapping you on the shoulder — answer right away, even if you're in the middle of something.
 
@@ -362,19 +367,26 @@ CRITICAL FIRST STEPS — do these immediately when you start:
 1. (Desktop only) Call \`claim_session\` with a short label to get your peer_session token.
 2. Call set_summary with your role/name and what you're working on (e.g. "Design agent. Reviewing clinician UX mockups."), passing peer_session if you are on Desktop.
 3. Call list_peers with scope "machine" to see who else is online and learn your own peer ID.
-4. If you have access to the Monitor tool (Claude Code v2.1.98+ / Cowork), start watching for incoming peer messages IMMEDIATELY:
-     Monitor({ ws: { url: "ws://127.0.0.1:${BROKER_PORT}/watch/<your-peer-id>" }, description: "claude-peers inbox", persistent: true, timeout_ms: 3600000 })
-   (fallback if ws is unsupported: Monitor(command: "bun ${import.meta.dir}/cli.ts watch <your-peer-id>"))
-   Each event is one JSON peer message with from_id, from_summary and text.
-   When an event arrives, PAUSE your current work, reply using send_message with to_id="<from_id>", then check_messages to ack.
-   This is the reliable real-time channel for Desktop sessions (which lack native channel push). claim_session and list_peers print the exact call for your peer ID.
+4. (Desktop only) claim_session and list_peers print a Monitor call that wakes you when a peer messages you. Arm it as soon as you see it, and re-arm it whenever it expires.
 
 Use summaries to identify peers — peer IDs change on restart, but summaries tell you who's who.
 
 MESSAGING ROUTING — each peer has a Type (cli or desktop) shown in list_peers:
 - To message a "cli" peer: use send_message (they receive it instantly via channel push)
-- To message a "desktop" peer: use send_message. Local sessions with a Monitor ws watch are woken instantly; cloud Cowork sessions receive it on their next claude-peers tool call or check_messages. Desktop peers are pull-based — if you need an answer promptly, say so in the message so the human can nudge them.` +
-      (PEER_NAME ? `\n\nYour assigned identity is: "${PEER_NAME}". Always include this name when setting your summary. This is who you are on the network — do not adopt a different identity even if other peers' summaries seem to conflict.` : ""),
+- To message a "desktop" peer: use send_message. A desktop session with its wake Monitor armed is woken within seconds; one without it receives the message on its next claude-peers tool call or check_messages. If you need an answer promptly, say so in the message so the human can nudge them.` +
+      (PEER_NAME ? `\n\nYour assigned identity is: "${PEER_NAME}". Always include this name when setting your summary. This is who you are on the network — do not adopt a different identity even if other peers' summaries seem to conflict.` : "");
+
+// --- MCP Server ---
+
+const mcp = new Server(
+  { name: "claude-peers", version: "0.1.0" },
+  {
+    capabilities: {
+      experimental: { "claude/channel": {} },
+      tools: {},
+      logging: {},
+    },
+    instructions: SERVER_INSTRUCTIONS,
   }
 );
 
@@ -666,8 +678,9 @@ async function handleTool(name: string, args: Record<string, unknown> | undefine
           peer_type: "desktop",
           session_token: token,
         });
-        desktopPeers.set(token, { peerId: reg.id, summary: label || PEER_NAME });
+        desktopPeers.set(token, { peerId: reg.id, summary: label || PEER_NAME, wakeTopic: reg.wake_topic });
         log(`Claimed session ${token} -> peer ${reg.id} (${label})`);
+        const wake = wakeCopy(reg.wake_topic);
         return {
           content: [
             {
@@ -680,9 +693,7 @@ Your ${SESSION_PARAM} token is:
 
 Pass \`"${SESSION_PARAM}": "${token}"\` on EVERY subsequent claude-peers call (send_message, set_summary, check_messages). Remember it for the whole conversation — do not call claim_session again unless you have lost it, because each claim creates a new peer identity.
 
-Next: call set_summary (with your token) to tell other peers what you are working on.
-
-${watchInstructions(reg.id)}`,
+Next: call set_summary (with your token) to tell other peers what you are working on.${wake ? `\n\n${wake}` : ""}`,
             },
           ],
         };
@@ -710,7 +721,7 @@ ${watchInstructions(reg.id)}`,
         });
 
         const header = effectivePeerId
-          ? `Your peer ID: ${effectivePeerId}\n\n${watchInstructions(effectivePeerId)}\n\n`
+          ? peerListHeader(effectivePeerId, sessionId ? desktopPeers.get(sessionId)?.wakeTopic : undefined)
           : `⚠️ You have no peer identity yet. Desktop/Cowork sessions must call \`claim_session\` (with a short label) to get a \`${SESSION_PARAM}\` token, then pass that token on every claude-peers tool call except list_peers. Do NOT use \`pwd\` — every cloud session shares /home/claude and would collide onto one identity. Note the parameter is \`${SESSION_PARAM}\`, NOT \`session_id\` — Claude Desktop reserves that name and strips it in transit. Until you claim one, other peers cannot message you and set_summary/send_message will error.\n\n`;
 
         if (peers.length === 0) {
@@ -849,7 +860,7 @@ ${watchInstructions(reg.id)}`,
                 peer_type: "desktop",
                 session_token: sessionId,
               });
-              desktopPeers.set(sessionId, { peerId: reg.id, summary });
+              desktopPeers.set(sessionId, { peerId: reg.id, summary, wakeTopic: reg.wake_topic });
               log(`Re-registered desktop session ${sessionId} as peer ${reg.id}`);
               return {
                 content: [{ type: "text" as const, text: `Re-registered and summary set: "${summary}" (new peer ID: ${reg.id})` }],

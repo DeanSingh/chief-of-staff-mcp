@@ -788,6 +788,12 @@ describe("wake relay", () => {
     expect(relayHits.some((h) => h.body.includes("secret") || h.path.includes(d.id) || h.path.includes(s.id))).toBe(false);
   });
 
+  test("list-peers never carries a wake topic", async () => {
+    await regDesktop("cs_wake_h");
+    const peers = await post<unknown[]>("/list-peers", { scope: "machine", cwd: "/", git_root: null });
+    expect(JSON.stringify(peers)).not.toContain("cp-wake-");
+  });
+
   test("send to a cli peer publishes nothing", async () => {
     const a = await regCli();
     const b = await regCli();

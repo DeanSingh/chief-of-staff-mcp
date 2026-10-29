@@ -113,14 +113,60 @@ describe("cli schema never demands a session parameter", () => {
   }
 });
 
-describe("watch instructions", () => {
-  test("watchInstructions gives the Monitor ws call for the peer's feed", async () => {
-    const { watchInstructions, watchUrl } = await import("./server.ts");
-    const text = watchInstructions("abc123");
-    expect(watchUrl("abc123")).toMatch(/^ws:\/\/127\.0\.0\.1:\d+\/watch\/abc123$/);
-    expect(text).toContain(`Monitor({ ws: { url: "${watchUrl("abc123")}" }`);
-    expect(text).toContain("persistent: true");
-    expect(text).toContain("cli.ts watch abc123");
+describe("wake instructions", () => {
+  const RELAY = "https://ntfy.example";
+  const TOPIC = "cp-wake-0123456789abcdef01234567";
+  const OTHER = "cp-wake-fedcba9876543210fedcba98";
+  // The command as the agent's shell will run it. The copy embeds it as a JSON
+  // string, which is what the agent passes to Monitor.
+  const RAW = `t=$(date +%s); while true; do curl -sN "${RELAY}/${TOPIC}/json?since=$t" | grep --line-buffered '"event":"message"'; t=$(( $(date +%s) - 5 )); sleep 2; done | awk '!s[$0]++ { print; fflush() }'`;
+
+  test("wakeInstructions embeds the exact curl|grep command and timeout 1800000", async () => {
+    const { wakeInstructions } = await import("./server.ts");
+    expect(wakeInstructions(TOPIC, RELAY)).toContain(
+      `Monitor({ command: ${JSON.stringify(RAW)}, description: "claude-peers wake", timeout_ms: 1800000 })`,
+    );
+  });
+
+  test("wake command reconnects and resumes with since=", async () => {
+    const { wakeInstructions } = await import("./server.ts");
+    const text = wakeInstructions(TOPIC, RELAY);
+    for (const part of ["while true", "/json?since=$t", "$(date +%s) - 5", "awk '!s[$0]++"]) {
+      expect(text).toContain(part);
+    }
+  });
+
+  test("no copy contains \"persistent\"", async () => {
+    const { wakeInstructions, peerListHeader, SERVER_INSTRUCTIONS } = await import("./server.ts");
+    for (const text of [wakeInstructions(TOPIC, RELAY), peerListHeader("abc", TOPIC, RELAY), peerListHeader("abc", undefined, RELAY), SERVER_INSTRUCTIONS]) {
+      expect(text).not.toContain("persistent");
+    }
+  });
+
+  test("server instructions carry no Monitor call (cli sessions read them)", async () => {
+    const { SERVER_INSTRUCTIONS } = await import("./server.ts");
+    expect(SERVER_INSTRUCTIONS).not.toContain("Monitor(");
+    expect(SERVER_INSTRUCTIONS).not.toContain("/watch/");
+  });
+
+  test("cli list_peers header has no Monitor copy", async () => {
+    const { peerListHeader } = await import("./server.ts");
+    expect(peerListHeader("abc", undefined, RELAY)).toBe("Your peer ID: abc\n\n");
+  });
+
+  test("list_peers shows only the caller's own topic", async () => {
+    const { peerListHeader } = await import("./server.ts");
+    const mine = peerListHeader("abc", TOPIC, RELAY);
+    expect(mine).toContain(`${RELAY}/${TOPIC}/json`);
+    expect(mine).not.toContain(OTHER);
+    expect(peerListHeader("def", OTHER, RELAY)).not.toContain(TOPIC);
+  });
+
+  test("off omits the wake copy", async () => {
+    const { peerListHeader, wakeCopy } = await import("./server.ts");
+    expect(wakeCopy(TOPIC, "off")).toBe("");
+    expect(wakeCopy(undefined, RELAY)).toBe("");
+    expect(peerListHeader("abc", TOPIC, "off")).toBe("Your peer ID: abc\n\n");
   });
 });
 
