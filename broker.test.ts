@@ -612,4 +612,53 @@ describe("/session-start", () => {
     expect(await ss({})).toEqual({ ok: false, reason: "bad_request" });
     expect(await ss({ session_key: "x", pids: [] })).toEqual({ ok: false, reason: "bad_request" });
   });
+  // SE condition (3): pids get reused, so a pid match alone must not hand a
+  // new process someone else's identity. Rows record the process start time.
+  const { Database } = require("bun:sqlite");
+  const setStarted = (id: string, v: string | null) => {
+    const d = new Database(DB); d.run("UPDATE peers SET pid_started = ? WHERE id = ?", [v, id]); d.close();
+  };
+  const startedOf = (pid: number) => new TextDecoder().decode(Bun.spawnSync(["ps", "-o", "lstart=", "-p", String(pid)]).stdout).trim();
+
+  test("CLI rows record the process start time", async () => {
+    const pid = livePid();
+    const id = await regCli(pid, "ss-started");
+    const d = new Database(DB, { readonly: true });
+    const row = d.query("SELECT pid_started FROM peers WHERE id = ?").get(id) as { pid_started: string };
+    d.close();
+    expect(row.pid_started).toBe(startedOf(pid));
+  });
+
+  test("register does not adopt a pid-matched row left by a reused pid", async () => {
+    const pid = livePid();
+    const old = await post<{ id: string }>("/register", { pid, cwd: "/tmp/reuse", git_root: null, tty: null, summary: "", peer_type: "cli" });
+    setStarted(old.id, "Mon Jan  1 00:00:00 2001");
+    const again = await post<{ id: string }>("/register", { pid, cwd: "/tmp/reuse", git_root: null, tty: null, summary: "", peer_type: "cli" });
+    expect(again.id).not.toBe(old.id);
+  });
+
+  test("session-start ignores a row whose recorded start time differs", async () => {
+    const pid = livePid();
+    const id = await regCli(pid, "ss-reuse");
+    setStarted(id, "Mon Jan  1 00:00:00 2001");
+    expect(await ss({ session_key: "ss-reuse-new", pids: [pid], source: "resume" }))
+      .toEqual({ ok: false, reason: "no_live_peer" });
+  });
+
+  test("rows with no recorded start time (pre-upgrade) still match", async () => {
+    const pid = livePid();
+    const id = await regCli(pid, "ss-legacy");
+    setStarted(id, null);
+    expect(await ss({ session_key: "ss-legacy-new", pids: [pid], source: "clear" }))
+      .toEqual({ ok: true, peer_id: id, action: "mapped" });
+  });
+
+  test("an owner whose pid is alive but reused is not a conflict", async () => {
+    const idA = await regCli(livePid(), "ss-orig-u");
+    setStarted(idA, "Mon Jan  1 00:00:00 2001");
+    const pidB = livePid();
+    await regCli(pidB, "ss-launch-u");
+    expect(await ss({ session_key: "ss-orig-u", pids: [pidB], source: "resume" }))
+      .toEqual({ ok: true, peer_id: idA, action: "rekeyed" });
+  });
 });

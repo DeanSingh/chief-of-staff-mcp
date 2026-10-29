@@ -77,6 +77,12 @@ if (!peerCols.includes("session_token")) {
   db.run("ALTER TABLE peers ADD COLUMN session_token TEXT");
 }
 db.run("CREATE INDEX IF NOT EXISTS idx_peers_session_token ON peers(session_token)");
+// CLI rows record their process's start time: pids are reused, so a pid match
+// alone could hand a new process a dead session's identity. NULL on rows
+// written before this column existed, which are matched on pid alone.
+if (!peerCols.includes("pid_started")) {
+  db.run("ALTER TABLE peers ADD COLUMN pid_started TEXT");
+}
 
 // Durable session_token -> peer id mapping. The peers row is ephemeral (a
 // desktop peer expires after 30 min without heartbeats), but the session and
@@ -131,6 +137,17 @@ function isPidAlive(pid: number): boolean {
   } catch {
     return false;
   }
+}
+
+/** The process's start time as `ps` reports it, or null if it isn't running. */
+function pidStartTime(pid: number): string | null {
+  const out = Bun.spawnSync(["ps", "-o", "lstart=", "-p", String(pid)]);
+  return new TextDecoder().decode(out.stdout).trim() || null;
+}
+
+/** True unless the row's recorded start time shows its pid now belongs to another process. */
+function isSameProcess(row: { pid: number; pid_started: string | null }): boolean {
+  return row.pid_started == null || pidStartTime(row.pid) === row.pid_started;
 }
 
 // Clean up stale peers (PIDs that no longer exist) on startup
@@ -287,7 +304,8 @@ function getCachedSummary(cwd: string, git_root: string | null): string | null {
 // key without needing this fallback again. Returns null when no pid match
 // exists, so the caller falls through to minting a fresh peer.
 function claimPeerByPid(pid: number, body: RegisterRequest, now: string, cliKey: string | null): { id: string; restored_summary?: string } | null {
-  const existing = db.query("SELECT id, summary FROM peers WHERE pid = ? AND peer_type != 'desktop'").get(pid) as { id: string; summary: string } | null;
+  const existing = (db.query("SELECT id, summary, pid, pid_started FROM peers WHERE pid = ? AND peer_type != 'desktop'")
+    .all(pid) as { id: string; summary: string; pid: number; pid_started: string | null }[]).find(isSameProcess);
   if (!existing) return null;
   db.run(
     "UPDATE peers SET cwd = ?, git_root = ?, tty = ?, last_seen = ?, summary = CASE WHEN ? = '' THEN summary ELSE ? END WHERE id = ?",
@@ -301,6 +319,14 @@ function claimPeerByPid(pid: number, body: RegisterRequest, now: string, cliKey:
 }
 
 function handleRegister(body: RegisterRequest): RegisterResponse {
+  const res = registerPeer(body);
+  if ((body.peer_type ?? "cli") !== "desktop") {
+    db.run("UPDATE peers SET pid_started = ? WHERE id = ?", [pidStartTime(body.pid), res.id]);
+  }
+  return res;
+}
+
+function registerPeer(body: RegisterRequest): RegisterResponse {
   const now = new Date().toISOString();
 
   const peerType = body.peer_type ?? "cli";
@@ -431,9 +457,10 @@ function handleRegister(body: RegisterRequest): RegisterResponse {
 // change up on its next heartbeat: its peer row is gone, so ensureRegistered
 // re-registers with the launch key, which now maps to the reclaimed id.
 const sessionStart = db.transaction((body: SessionStartRequest, now: string): SessionStartResponse => {
-  let live: { id: string; pid: number } | null = null;
+  let live: { id: string; pid: number } | undefined;
   for (const pid of body.pids) {
-    live = db.query("SELECT id, pid FROM peers WHERE pid = ? AND peer_type != 'desktop'").get(pid) as { id: string; pid: number } | null;
+    live = (db.query("SELECT id, pid, pid_started FROM peers WHERE pid = ? AND peer_type != 'desktop'")
+      .all(pid) as { id: string; pid: number; pid_started: string | null }[]).find(isSameProcess);
     if (live) break;
   }
   if (!live) return { ok: false, reason: "no_live_peer" };
@@ -450,8 +477,8 @@ const sessionStart = db.transaction((body: SessionStartRequest, now: string): Se
 
   // The same conversation is open in another terminal that is still running:
   // that process owns the id. Leave both alone.
-  const owner = db.query("SELECT pid FROM peers WHERE id = ?").get(mapped.peer_id) as { pid: number } | null;
-  if (owner && owner.pid !== live.pid && isPidAlive(owner.pid)) return { ok: false, reason: "conflict" };
+  const owner = db.query("SELECT pid, pid_started FROM peers WHERE id = ?").get(mapped.peer_id) as { pid: number; pid_started: string | null } | null;
+  if (owner && owner.pid !== live.pid && isPidAlive(owner.pid) && isSameProcess(owner)) return { ok: false, reason: "conflict" };
 
   const target = mapped.peer_id;
   db.run("DELETE FROM peers WHERE id = ?", [target]);
