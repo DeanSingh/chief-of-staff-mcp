@@ -30,6 +30,21 @@ import type {
 
 const PORT = parseInt(process.env.CLAUDE_PEERS_PORT ?? "7899", 10);
 const DB_PATH = process.env.CLAUDE_PEERS_DB ?? `${process.env.HOME}/.claude-peers.db`;
+// Cloud Desktop/Cowork sessions can't reach this loopback broker, so they are
+// woken through an outbound pub/sub relay instead: each desktop identity gets a
+// secret topic, and a send POSTs the bare word "wake" to it. Message content
+// never leaves the machine. "off" disables the relay.
+// Off unless configured: the relay is a third party that sees when each
+// desktop identity gets mail. It must be https, except on this machine, and
+// URL-safe characters only: it is pasted into the shell command every agent's
+// Monitor runs.
+const WAKE_RELAY = (process.env.CLAUDE_PEERS_WAKE_RELAY ?? "off").replace(/\/+$/, "");
+const WAKE_ON = /^[A-Za-z0-9.:\/_-]+$/.test(WAKE_RELAY)
+  && /^https:\/\/|^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(WAKE_RELAY);
+if (WAKE_RELAY !== "off" && !WAKE_ON) {
+  console.error("[claude-peers broker] CLAUDE_PEERS_WAKE_RELAY must be https:// (or http:// on 127.0.0.1/localhost) and use only [A-Za-z0-9.:/_-]; wake relay disabled");
+}
+const WAKE_COALESCE_MS = Number(process.env.CLAUDE_PEERS_WAKE_COALESCE_MS) || 10_000;
 
 // --- Database setup ---
 
@@ -107,6 +122,11 @@ db.run(`
     updated_at TEXT NOT NULL
   )
 `);
+// The topic lives beside the token so it outlives the reaped peers row: an
+// agent's armed Monitor keeps listening on it across resurrection.
+if (!(db.query("PRAGMA table_info(desktop_tokens)").all() as { name: string }[]).some((c) => c.name === "wake_topic")) {
+  db.run("ALTER TABLE desktop_tokens ADD COLUMN wake_topic TEXT");
+}
 
 // Cache summaries by workspace so they survive across sessions
 db.run(`
@@ -359,8 +379,54 @@ function handleRegister(body: RegisterRequest): RegisterResponse {
   const res = registerPeer(body);
   if ((body.peer_type ?? "cli") !== "desktop") {
     db.run("UPDATE peers SET pid_started = ? WHERE id = ?", [pidStartTime(body.pid), res.id]);
+  } else if (WAKE_ON && body.session_token) {
+    res.wake_topic = wakeTopicFor(body.session_token);
+    // The full subscribe base, so the server never pairs this topic with a
+    // relay of its own (its env may differ from the one that launched us).
+    if (res.wake_topic) res.wake_url = `${WAKE_RELAY}/${res.wake_topic}`;
   }
   return { ...res, peer_secret: peerSecret(SECRET, res.id) };
+}
+
+/** The token's wake topic, minted on first use (including tokens claimed before topics existed). */
+function wakeTopicFor(token: string): string | undefined {
+  const row = db.query("SELECT wake_topic FROM desktop_tokens WHERE token = ?").get(token) as { wake_topic: string | null } | null;
+  if (!row) return undefined;
+  if (row.wake_topic) return row.wake_topic;
+  const topic = "cp-wake-" + Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => b.toString(16).padStart(2, "0")).join("");
+  db.run("UPDATE desktop_tokens SET wake_topic = ? WHERE token = ?", [topic, token]);
+  return topic;
+}
+
+// At most one publish per topic per window. A send inside the window schedules
+// one trailing publish at its end, so mail that lands just after a wake (while
+// the agent is already reading its inbox) still wakes it again.
+const wakeWindows = new Map<string, { last: number; trailing: boolean }>();
+
+function publishWake(topic: string): void {
+  const now = Date.now();
+  const w = wakeWindows.get(topic);
+  if (w && now - w.last < WAKE_COALESCE_MS) {
+    if (!w.trailing) {
+      w.trailing = true;
+      setTimeout(() => { w.trailing = false; w.last = Date.now(); postWake(topic); }, w.last + WAKE_COALESCE_MS - now);
+    }
+    return;
+  }
+  wakeWindows.set(topic, { last: now, trailing: false });
+  postWake(topic);
+}
+
+// Fire-and-forget: a slow or dead relay must never delay or fail a send. The
+// mail is already queued; the agent still finds it on its next pull.
+function postWake(topic: string): void {
+  fetch(`${WAKE_RELAY}/${topic}`, { method: "POST", body: "wake", signal: AbortSignal.timeout(3000) })
+    .then((r) => {
+      // fetch resolves on 4xx/5xx; a rate-limited relay (429) must not fail silently.
+      if (!r.ok) console.error(`[claude-peers broker] wake publish failed: HTTP ${r.status}`);
+      return r.body?.cancel();
+    })
+    .catch((e) => console.error(`[claude-peers broker] wake publish failed: ${e}`));
 }
 
 function registerPeer(body: RegisterRequest): RegisterResponse {
@@ -548,9 +614,17 @@ const sessionStart = db.transaction((body: SessionStartRequest, now: string): Se
   recordLiveSession();
 
   // Move the live row onto the resumed session's id. Only the row moves: the
-  // conversation this process was in before keeps its own key mapping and its
-  // undelivered mail, dormant until that conversation is resumed somewhere.
+  // conversation this process was in before keeps its own key mapping, dormant
+  // until that conversation is resumed somewhere. Its undelivered mail stays
+  // with it too, unless that id is mapped by at most one key, i.e. it was never
+  // /clear'd into a second conversation. Then the mail follows the row on the
+  // reading that whoever wrote to it was addressing the agent in this terminal
+  // (the case this exists for: mail sent to the id minted between launch and
+  // /resume). "Undelivered" means unacked, so a channel-pushed message the old
+  // conversation saw but never acked also moves and shows up again here.
   const target = mapped.peer_id;
+  const keys = (db.query("SELECT COUNT(*) AS n FROM peer_sessions WHERE peer_id = ?").get(live.id) as { n: number }).n;
+  if (keys <= 1) db.run("UPDATE messages SET to_id = ? WHERE to_id = ? AND delivered = 0", [target, live.id]);
   db.run("DELETE FROM peers WHERE id = ?", [target]);
   db.run("UPDATE peers SET id = ?, last_seen = ? WHERE id = ?", [target, now, live.id]);
   db.run("UPDATE peer_sessions SET updated_at = ? WHERE session_key = ?", [now, body.session_key]);
@@ -675,6 +749,10 @@ function handleSendMessage(body: SendMessageRequest): { ok: boolean; error?: str
     sent_at,
     text: body.text,
   });
+  if (WAKE_ON && target.peer_type === "desktop") {
+    const t = db.query("SELECT wake_topic FROM desktop_tokens WHERE peer_id = ? AND wake_topic IS NOT NULL").get(body.to_id) as { wake_topic: string } | null;
+    if (t) publishWake(t.wake_topic);
+  }
   return { ok: true, woke, target_last_seen: target.last_seen, target_type: target.peer_type };
 }
 

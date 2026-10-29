@@ -13,6 +13,7 @@
  *   bun cli.ts kill-broker     — Stop the broker daemon
  */
 
+import { chmodSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { authHeaders } from "./shared/auth.ts";
 import { hookCommand } from "./hook.ts";
 
@@ -233,7 +234,25 @@ switch (cmd) {
       settings.hooks[event] = groups;
     }
 
-    await Bun.write(path, JSON.stringify(settings, null, 2) + "\n");
+    // Write a sibling temp file and rename it over the original, so a crash
+    // mid-write can't leave Claude Code a truncated settings.json. Resolve
+    // symlinks first (dotfile managers link this file), or the rename would
+    // replace the link with a plain file. The temp file is created with the
+    // original's permissions, never wider even for a moment: settings.json can
+    // hold secrets in env and is often 0600. (chmod after too: umask can only
+    // narrow the creation mode.)
+    const exists = await file.exists();
+    const real = exists ? realpathSync(path) : path;
+    const tmp = `${real}.tmp-${process.pid}`;
+    try {
+      const mode = exists ? statSync(real).mode & 0o7777 : 0o644;
+      writeFileSync(tmp, JSON.stringify(settings, null, 2) + "\n", { mode, flag: "wx" });
+      chmodSync(tmp, mode);
+      renameSync(tmp, real);
+    } catch (e) {
+      try { unlinkSync(tmp); } catch {}
+      throw e;
+    }
     console.log(`Installed SessionStart and UserPromptSubmit hooks in ${path}:\n  ${command}`);
     break;
   }

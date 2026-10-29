@@ -123,6 +123,10 @@ Monitor({ ws: { url: "ws://127.0.0.1:7899/watch/<peer-id>" }, description: "clau
 
 Limits: the feed is on the broker host's loopback, so **cloud Cowork sandboxes (`pwd` = `/home/claude`) cannot reach it** — they stay pull-based (next tool call / `check_messages`). Upgrades carrying an `Origin` header are refused so browser pages cannot subscribe.
 
+### Wake relay for cloud Cowork sessions (opt-in)
+
+Cloud Cowork sandboxes can't reach the loopback feed above. With `CLAUDE_PEERS_WAKE_RELAY` set on the broker (an ntfy server: `https://…`, or `http://` on 127.0.0.1/localhost), each desktop identity gets a private topic, and a send to it POSTs the literal body `wake` there, never message content. `claim_session` and `list_peers` print a `Monitor` call that streams the topic and prints only the word `wake` (each event once, at most once per 8 s), so text published by anyone holding the topic never reaches the agent. The agent then calls `check_messages`. Unset or `off` (the default): no topics, no outbound traffic.
+
 ### CLI session identity
 
 A CLI peer is keyed on Claude Code's own session id, which the MCP server reads

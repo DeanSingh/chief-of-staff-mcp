@@ -104,3 +104,25 @@ When it fires: call check_messages (with your peer_session) and answer what you 
 - [ ] **Step 3:** In one idle Cowork agent, call `list_peers` and arm the Monitor it prints. Leave the agent idle, `bun cli.ts send <id> "wake check: reply 'woke'"`, and expect a reply within 60s with nobody typing.
 - [ ] **Step 4:** Repeat Step 3 after 30 minutes to confirm the re-arm.
 - [ ] **Step 5:** Update the README and CLAUDE.md "Architecture" paragraph to describe the relay and `CLAUDE_PEERS_WAKE_RELAY`. Commit and push.
+
+---
+
+### Task 4: SE follow-ups from PR #1
+
+From the SE approval of PR #1 (ed2242c). These are not part of the wake relay, but they ship on this branch.
+
+**Files:** `broker.ts` (`sessionStart` rekey branch), `cli.ts` (`install-hooks`), `broker.test.ts`, `cli.test.ts`
+
+- [ ] **Step 1: Failing tests**
+  ```ts
+  test("rekey moves undelivered mail from an id only its launch key maps to", ...)  // launch key K0 minted A; mail to A; resume K1→B; A's mail now peeks under B
+  test("rekey leaves mail on an id that more than one key maps to", ...)           // A mapped by K0 and K2 (/clear); resume → A's mail stays on A
+  test("install-hooks replaces settings.json by rename, not in place", ...)        // inode changes; no *.tmp left behind
+  test("install-hooks keeps a symlinked settings.json a symlink", ...)             // writes through to the link target
+  ```
+- [ ] **Step 2:** `bun test broker.test.ts cli.test.ts` → FAIL.
+- [ ] **Step 3:** Implement the changes:
+  - In the rekey branch, `UPDATE messages SET to_id = target WHERE to_id = old AND delivered = 0` when exactly one `peer_sessions` key maps to the old id.
+  - In install-hooks, resolve the real path, write `<real>.tmp-<pid>`, then rename it over `<real>`.
+- [ ] **Step 4:** `bun test` → all pass.
+- [ ] **Step 5:** Commit `SE follow-ups: rekey carries a launch-only id's mail; install-hooks writes atomically`.

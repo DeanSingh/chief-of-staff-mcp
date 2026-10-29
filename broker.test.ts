@@ -12,6 +12,24 @@ const DB = `${import.meta.dir}/.test-broker-${PORT}.db`;
 
 let proc: ReturnType<typeof Bun.spawn>;
 
+// Stand-in for the wake relay (ntfy). Records every publish; can be told to
+// hang so a test can prove /send-message never waits on it.
+const relayHits: Array<{ path: string; body: string }> = [];
+let relayHang = false;
+let relayStatus = 200;
+const relay = Bun.serve({
+  port: 0, hostname: "127.0.0.1",
+  async fetch(req) {
+    relayHits.push({ path: new URL(req.url).pathname, body: await req.text() });
+    if (relayHang) return new Promise<Response>(() => {});
+    return new Response("ok", { status: relayStatus });
+  },
+});
+const BROKER_ENV = {
+  ...process.env, CLAUDE_PEERS_PORT: String(PORT), CLAUDE_PEERS_DB: DB, LC_ALL: "fr_FR.UTF-8", TZ: "Asia/Tokyo",
+  CLAUDE_PEERS_WAKE_RELAY: `http://127.0.0.1:${relay.port}`, CLAUDE_PEERS_WAKE_COALESCE_MS: "1000",
+};
+
 // Every POST carries the install secret, and peer-scoped routes carry the
 // credential for the id they act as, the way server.ts sends them. Tests that
 // probe the gate itself use raw fetch.
@@ -43,7 +61,7 @@ async function restartBroker() {
   await proc.exited;
   await Bun.sleep(200); // Give port time to be released by OS
   proc = Bun.spawn(["bun", `${import.meta.dir}/broker.ts`], {
-    env: { ...process.env, CLAUDE_PEERS_PORT: String(PORT), CLAUDE_PEERS_DB: DB, LC_ALL: "fr_FR.UTF-8", TZ: "Asia/Tokyo" },
+    env: BROKER_ENV,
     stdout: "ignore", stderr: "ignore",
   });
   for (let i = 0; i < 50; i++) {
@@ -92,7 +110,7 @@ function connectWatch(peerId: string): Promise<{ ws: WebSocket; frames: unknown[
 
 beforeAll(async () => {
   proc = Bun.spawn(["bun", `${import.meta.dir}/broker.ts`], {
-    env: { ...process.env, CLAUDE_PEERS_PORT: String(PORT), CLAUDE_PEERS_DB: DB, LC_ALL: "fr_FR.UTF-8", TZ: "Asia/Tokyo" },
+    env: BROKER_ENV,
     stdout: "ignore", stderr: "ignore",
   });
   for (let i = 0; i < 50; i++) {
@@ -104,6 +122,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   proc.kill();
+  relay.stop(true);
   for (const suffix of ["", "-wal", "-shm", ".secret"]) {
     try { await Bun.file(DB + suffix).delete(); } catch {}
   }
@@ -583,7 +602,7 @@ describe("/session-start", () => {
     expect(peers.some((p) => p.id === idB)).toBe(false);
   });
 
-  test("rekey leaves mail with the id it was addressed to", async () => {
+  test("rekey moves undelivered mail from an id only its launch key maps to", async () => {
     const idA = await regCli(livePid(), "ss-orig-mail");
     await post("/unregister", { id: idA });
     const pidB = livePid();
@@ -592,11 +611,29 @@ describe("/session-start", () => {
     await post("/send-message", { from_id: sender, to_id: idB, text: "sent to the launch id" });
 
     await ss({ session_key: "ss-orig-mail", pid: pidB, source: "resume" });
-    // idB is the launch conversation's identity; its mail waits for it.
+    // idB only ever stood for the moments between launch and /resume. Whoever
+    // wrote to it was addressing the agent in this terminal, which is now idA.
     const atB = await post<{ messages: Array<{ text: string }> }>("/peek-messages", { id: idB });
     const atA = await post<{ messages: Array<{ text: string }> }>("/peek-messages", { id: idA });
-    expect(atB.messages.map((m) => m.text)).toContain("sent to the launch id");
-    expect(atA.messages.map((m) => m.text)).not.toContain("sent to the launch id");
+    expect(atA.messages.map((m) => m.text)).toContain("sent to the launch id");
+    expect(atB.messages).toEqual([]);
+  });
+
+  test("rekey leaves mail on an id that more than one key maps to", async () => {
+    const idA = await regCli(livePid(), "ss-orig-two");
+    await post("/unregister", { id: idA });
+    const pidB = livePid();
+    const idB = await regCli(pidB, "ss-launch-two");
+    // /clear in that terminal: idB now also carries a second conversation.
+    expect((await ss({ session_key: "ss-clear-two", pid: pidB, source: "clear" })).action).toBe("mapped");
+    const sender = await register("SS sender", "cli");
+    await post("/send-message", { from_id: sender, to_id: idB, text: "for the cleared conversation" });
+
+    await ss({ session_key: "ss-orig-two", pid: pidB, source: "resume" });
+    const atB = await post<{ messages: Array<{ text: string }> }>("/peek-messages", { id: idB });
+    const atA = await post<{ messages: Array<{ text: string }> }>("/peek-messages", { id: idA });
+    expect(atB.messages.map((m) => m.text)).toContain("for the cleared conversation");
+    expect(atA.messages.map((m) => m.text)).not.toContain("for the cleared conversation");
   });
 
   test("launch key resolves to the reclaimed id after rekey", async () => {
@@ -730,6 +767,185 @@ const startedOf = (pid: number) => new TextDecoder().decode(Bun.spawnSync(["ps",
     await regCli(parent, "ss-parent");
     expect(await ss({ session_key: "ss-child", pid: livePid(), source: "startup" }))
       .toEqual({ ok: false, reason: "no_live_peer" });
+  });
+});
+
+describe("wake relay", () => {
+  type Reg = { id: string; wake_topic?: string; wake_url?: string };
+  const TOPIC = /^cp-wake-[0-9a-f]{24}$/;
+  const sleepers: ReturnType<typeof Bun.spawn>[] = [];
+  const livePid = () => { const p = Bun.spawn(["sleep", "30"]); sleepers.push(p); return p.pid; };
+  afterAll(() => { for (const p of sleepers) { try { p.kill(); } catch {} } });
+  const regDesktop = (token: string, base = HTTP, db = DB) => postTo<Reg>(base, db, "/register",
+    { pid: LIVE_PIDS[0], cwd: token, git_root: null, tty: null, summary: "Cowork", peer_type: "desktop", session_token: token });
+  const regCli = (base = HTTP, db = DB) => postTo<Reg>(base, db, "/register",
+    { pid: livePid(), cwd: "/tmp/wake", git_root: null, tty: null, summary: "Sender", peer_type: "cli" });
+  const hitsFor = (topic: string) => relayHits.filter((h) => h.path === `/${topic}`);
+  async function waitFor(cond: () => boolean, ms = 1000) {
+    for (let t = 0; t < ms && !cond(); t += 20) await Bun.sleep(20);
+  }
+
+  test("desktop register returns a cp-wake- topic; cli does not", async () => {
+    expect((await regDesktop("cs_wake_a")).wake_topic).toMatch(TOPIC);
+    expect((await regCli()).wake_topic).toBeUndefined();
+  });
+
+  test("desktop register returns the full wake URL on the broker's own relay", async () => {
+    // The broker is the single source of truth for the relay: a server whose
+    // env names a different relay must not print a URL nobody publishes to.
+    const d = await regDesktop("cs_wake_url");
+    expect(d.wake_url).toBe(`http://127.0.0.1:${relay.port}/${d.wake_topic}`);
+    expect((await regCli()).wake_url).toBeUndefined();
+  });
+
+  test("same token → same topic across re-register", async () => {
+    const a = await regDesktop("cs_wake_b");
+    const b = await regDesktop("cs_wake_b");
+    expect(a.wake_topic).toMatch(TOPIC);
+    expect(b.id).toBe(a.id);
+    expect(b.wake_topic).toBe(a.wake_topic!);
+  });
+
+  test("topic survives reap and resurrection", async () => {
+    const a = await regDesktop("cs_wake_c");
+    await post("/unregister", { id: a.id });
+    await restartBroker();
+    const b = await regDesktop("cs_wake_c");
+    expect(a.wake_topic).toMatch(TOPIC);
+    expect(b.id).toBe(a.id);
+    expect(b.wake_topic).toBe(a.wake_topic!);
+  });
+
+  test("a token minted before topics existed gets one on its next register, then keeps it", async () => {
+    const a = await regDesktop("cs_wake_d");
+    const { Database } = require("bun:sqlite");
+    const d = new Database(DB); d.run("UPDATE desktop_tokens SET wake_topic = NULL WHERE token = ?", ["cs_wake_d"]); d.close();
+    const b = await regDesktop("cs_wake_d");
+    expect(b.wake_topic).toMatch(TOPIC);
+    expect(b.wake_topic).not.toBe(a.wake_topic!);
+    expect((await regDesktop("cs_wake_d")).wake_topic).toBe(b.wake_topic!);
+  });
+
+  test("send to a desktop peer publishes exactly 'wake' to its topic", async () => {
+    const d = await regDesktop("cs_wake_e");
+    const s = await regCli();
+    const res = await post<{ ok: boolean }>("/send-message", { from_id: s.id, to_id: d.id, text: "secret plans" });
+    expect(res.ok).toBe(true);
+    await waitFor(() => hitsFor(d.wake_topic!).length > 0);
+    expect(hitsFor(d.wake_topic!)).toEqual([{ path: `/${d.wake_topic}`, body: "wake" }]);
+    expect(relayHits.some((h) => h.body.includes("secret") || h.path.includes(d.id) || h.path.includes(s.id))).toBe(false);
+  });
+
+  test("list-peers never carries a wake topic", async () => {
+    await regDesktop("cs_wake_h");
+    const peers = await post<unknown[]>("/list-peers", { scope: "machine", cwd: "/", git_root: null });
+    expect(JSON.stringify(peers)).not.toContain("cp-wake-");
+  });
+
+  test("send to a cli peer publishes nothing", async () => {
+    const a = await regCli();
+    const b = await regCli();
+    const before = relayHits.length;
+    await post("/send-message", { from_id: a.id, to_id: b.id, text: "hi" });
+    await Bun.sleep(300);
+    expect(relayHits.length).toBe(before);
+  });
+
+  test("coalesces publishes within the window, then sends one trailing wake", async () => {
+    const d = await regDesktop("cs_wake_f");
+    const s = await regCli();
+    for (let i = 0; i < 5; i++) await post("/send-message", { from_id: s.id, to_id: d.id, text: `m${i}` });
+    await Bun.sleep(300);
+    expect(hitsFor(d.wake_topic!).length).toBe(1);
+    // Mail that arrived inside the window must still wake the agent once the
+    // window closes, or a message landing just after a wake is never seen.
+    await waitFor(() => hitsFor(d.wake_topic!).length > 1, 2000);
+    await Bun.sleep(300);
+    expect(hitsFor(d.wake_topic!).length).toBe(2);
+  });
+
+  test("send succeeds when the relay hangs", async () => {
+    const d = await regDesktop("cs_wake_g");
+    const s = await regCli();
+    relayHang = true;
+    try {
+      const t0 = performance.now();
+      const res = await post<{ ok: boolean }>("/send-message", { from_id: s.id, to_id: d.id, text: "still queued" });
+      expect(res.ok).toBe(true);
+      expect(performance.now() - t0).toBeLessThan(500);
+      const peek = await post<{ messages: Array<{ text: string }> }>("/peek-messages", { id: d.id });
+      expect(peek.messages.map((m) => m.text)).toContain("still queued");
+    } finally { relayHang = false; }
+  });
+
+  // Off unless Dean opts in: an unset relay, "off", and a relay that would
+  // publish in clear text over the internet all mean no topics and no egress.
+  const { CLAUDE_PEERS_WAKE_RELAY: _relay, ...UNSET } = BROKER_ENV;
+  for (const [i, [label, env]] of ([
+    ["unset (the default)", UNSET],
+    ["off", { ...BROKER_ENV, CLAUDE_PEERS_WAKE_RELAY: "off" }],
+    ["a plain-http remote relay", { ...BROKER_ENV, CLAUDE_PEERS_WAKE_RELAY: "http://ntfy.example" }],
+    ["a relay URL with shell metacharacters", { ...BROKER_ENV, CLAUDE_PEERS_WAKE_RELAY: 'https://ntfy.example/x";touch /tmp/cp-pwned;"' }],
+  ] as const).entries()) {
+    test(`relay ${label}: no topic, no publish`, async () => {
+      const OFF_PORT = PORT + 200 + i;
+      const OFF_HTTP = `http://127.0.0.1:${OFF_PORT}`;
+      const OFF_DB = `${import.meta.dir}/.test-broker-off-${OFF_PORT}.db`;
+      const off = Bun.spawn(["bun", `${import.meta.dir}/broker.ts`], {
+        env: { ...env, CLAUDE_PEERS_PORT: String(OFF_PORT), CLAUDE_PEERS_DB: OFF_DB },
+        stdout: "ignore", stderr: "ignore",
+      });
+      try {
+        for (let i = 0; i < 50; i++) {
+          try { if ((await fetch(`${OFF_HTTP}/health`)).ok) break; } catch {}
+          await Bun.sleep(100);
+        }
+        const d = await regDesktop(`cs_wake_off${i}`, OFF_HTTP, OFF_DB);
+        expect(d.id).toBeDefined();
+        expect(d.wake_topic).toBeUndefined();
+        expect(d.wake_url).toBeUndefined();
+        const s = await regCli(OFF_HTTP, OFF_DB);
+        const before = relayHits.length;
+        await postTo(OFF_HTTP, OFF_DB, "/send-message", { from_id: s.id, to_id: d.id, text: "x" });
+        await Bun.sleep(300);
+        expect(relayHits.length).toBe(before);
+      } finally {
+        off.kill();
+        await off.exited;
+        for (const suffix of ["", "-wal", "-shm", ".secret"]) { try { await Bun.file(OFF_DB + suffix).delete(); } catch {} }
+      }
+    });
+  }
+
+  test("an HTTP error from the relay is logged, without the topic", async () => {
+    const ERR_PORT = PORT + 300;
+    const ERR_HTTP = `http://127.0.0.1:${ERR_PORT}`;
+    const ERR_DB = `${import.meta.dir}/.test-broker-err-${ERR_PORT}.db`;
+    const b = Bun.spawn(["bun", `${import.meta.dir}/broker.ts`], {
+      env: { ...BROKER_ENV, CLAUDE_PEERS_PORT: String(ERR_PORT), CLAUDE_PEERS_DB: ERR_DB },
+      stdout: "ignore", stderr: "pipe",
+    });
+    relayStatus = 429;
+    try {
+      for (let i = 0; i < 50; i++) {
+        try { if ((await fetch(`${ERR_HTTP}/health`)).ok) break; } catch {}
+        await Bun.sleep(100);
+      }
+      const d = await regDesktop("cs_wake_err", ERR_HTTP, ERR_DB);
+      const s = await regCli(ERR_HTTP, ERR_DB);
+      await postTo(ERR_HTTP, ERR_DB, "/send-message", { from_id: s.id, to_id: d.id, text: "x" });
+      await waitFor(() => hitsFor(d.wake_topic!).length > 0);
+      await Bun.sleep(200);
+      b.kill();
+      const err = await new Response(b.stderr as ReadableStream).text();
+      expect(err).toContain("wake publish failed: HTTP 429");
+      expect(err).not.toContain(d.wake_topic!);
+    } finally {
+      relayStatus = 200;
+      b.kill();
+      await b.exited;
+      for (const suffix of ["", "-wal", "-shm", ".secret"]) { try { await Bun.file(ERR_DB + suffix).delete(); } catch {} }
+    }
   });
 });
 
