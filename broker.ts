@@ -169,6 +169,31 @@ db.run(`
   )
 `);
 
+// Each peer's own last summary, kept when its row is reaped so a returning
+// session (CLI by session key, desktop by token) gets its OWN summary back.
+// summary_cache can't do this: it is keyed by workspace, so with several
+// agents in one repo it holds whichever agent spoke last.
+db.run(`
+  CREATE TABLE IF NOT EXISTS peer_summaries (
+    peer_id    TEXT PRIMARY KEY,
+    summary    TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )
+`);
+db.run(`
+  CREATE TRIGGER IF NOT EXISTS keep_peer_summary BEFORE DELETE ON peers
+  WHEN OLD.summary != ''
+  BEGIN
+    INSERT OR REPLACE INTO peer_summaries (peer_id, summary, updated_at)
+    VALUES (OLD.id, OLD.summary, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+  END
+`);
+
+function ownSummary(peerId: string): string | null {
+  const row = db.query("SELECT summary FROM peer_summaries WHERE peer_id = ?").get(peerId) as { summary: string } | null;
+  return row?.summary ?? null;
+}
+
 // Idempotent: INSERT OR IGNORE means re-running on an already-migrated
 // database is a no-op, never a duplicate or a constraint error.
 db.run(`
@@ -238,6 +263,7 @@ function cleanStalePeers() {
   // swept out from under it and mint a new id on its next reconnect.
   db.run("DELETE FROM peer_sessions WHERE updated_at < ?", [new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()]);
   db.run("DELETE FROM summary_cache WHERE updated_at < ?", [new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()]);
+  db.run("DELETE FROM peer_summaries WHERE updated_at < ?", [new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()]);
 }
 
 cleanStalePeers();
@@ -453,10 +479,11 @@ function registerPeer(body: RegisterRequest): RegisterResponse {
     // agents hold stay valid and queued mail is still addressed correctly.
     const mapped = db.query("SELECT peer_id FROM desktop_tokens WHERE token = ?").get(token) as { peer_id: string } | null;
     if (mapped) {
-      insertPeer.run(mapped.peer_id, body.pid, body.cwd, body.git_root, body.tty, body.summary ?? "", peerType, now, now, token);
+      const restored = body.summary ? undefined : (ownSummary(mapped.peer_id) ?? undefined);
+      insertPeer.run(mapped.peer_id, body.pid, body.cwd, body.git_root, body.tty, body.summary || restored || "", peerType, now, now, token);
       db.run("UPDATE desktop_tokens SET updated_at = ? WHERE token = ?", [now, token]);
       db.run("UPDATE peer_sessions SET updated_at = ? WHERE session_key = ?", [now, token]);
-      return { id: mapped.peer_id };
+      return { id: mapped.peer_id, restored_summary: restored };
     }
   }
 
@@ -503,12 +530,11 @@ function registerPeer(body: RegisterRequest): RegisterResponse {
         );
       } else {
         // Row was reaped but the session is back: resurrect under the SAME id
-        // so mail queued for it is still addressed correctly. Fall back to the
-        // cached workspace summary when none was supplied, same as a fresh peer
-        // (below), so a reaped-and-restarted session doesn't rejoin blank.
+        // so mail queued for it is still addressed correctly, with its own
+        // last summary when none was supplied, so it doesn't rejoin blank.
         let summaryToInsert = body.summary;
         if (!summaryToInsert) {
-          summaryToInsert = getCachedSummary(body.cwd, body.git_root) ?? "";
+          summaryToInsert = ownSummary(mapped.peer_id) ?? "";
           if (summaryToInsert) resurrectedSummary = summaryToInsert;
         }
         insertPeer.run(mapped.peer_id, body.pid, body.cwd, body.git_root, body.tty, summaryToInsert, peerType, now, now, null);
@@ -542,10 +568,13 @@ function registerPeer(body: RegisterRequest): RegisterResponse {
 }
 
 function mintPeer(body: RegisterRequest, now: string, cliKey: string | null, peerType: string, isCli: boolean, id = generateId(), token: string | null = null): RegisterResponse {
-  // Carry forward cached summary for CLI sessions in the same workspace.
+  // A brand-new session starts blank. Only a caller with no session key (an
+  // older Claude Code) inherits the workspace's cached summary: pid matching
+  // is its only way back after a restart. With a key, a new id means a new
+  // session, and the cache holds whichever agent in the repo spoke last.
   // Desktop sessions always set fresh summaries and would collide on one cache slot.
   let summary = body.summary;
-  if (!summary && isCli) {
+  if (!summary && isCli && !cliKey && !body.session_key) {
     summary = getCachedSummary(body.cwd, body.git_root) ?? "";
   }
 
