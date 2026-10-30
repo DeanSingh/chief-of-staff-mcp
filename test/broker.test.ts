@@ -1792,3 +1792,60 @@ describe("summaries after a restart", () => {
     expect(fresh.restored_summary).toBe("Legacy agent");
   });
 });
+
+describe("cli desktop-wake", () => {
+  const run = async (...args: string[]) => {
+    const p = Bun.spawn(["bun", `${ROOT}/cli.ts`, "desktop-wake", ...args], {
+      env: { ...process.env, CLAUDE_PEERS_PORT: String(PORT), CLAUDE_PEERS_DB: DB },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [code, out, err] = await Promise.all([
+      p.exited,
+      new Response(p.stdout).text(),
+      new Response(p.stderr).text(),
+    ]);
+    return { code, out, err };
+  };
+  const desk = async (summary: string, token: string) =>
+    (
+      await post<{ id: string }>("/register", {
+        pid: process.pid,
+        cwd: `/tmp/${summary}`,
+        git_root: null,
+        tty: null,
+        summary,
+        peer_type: "desktop",
+        session_token: token,
+      })
+    ).id;
+
+  test("sets one agent by a unique part of its summary, then back to the global mode", async () => {
+    const id = await desk("Quokka wake agent", "cs_cliwake_quokka1");
+    const on = await run("active", "quokka");
+    expect(on.code).toBe(0);
+    expect(on.out).toMatch(new RegExp(`${id}\\s+active\\*`));
+    const back = await run("default", id);
+    expect(back.code).toBe(0);
+    expect(back.out).not.toMatch(new RegExp(`${id}\\s+\\w+\\*`));
+  });
+
+  test("refuses a name that matches several agents, or none", async () => {
+    await desk("Wombat wake agent one", "cs_cliwake_wombat1");
+    await desk("Wombat wake agent two", "cs_cliwake_wombat2");
+    const many = await run("active", "wombat");
+    expect(many.code).toBe(1);
+    expect(many.err).toContain('"wombat" matches 2 Desktop sessions');
+    const none = await run("active", "no-such-agent-xyz");
+    expect(none.code).toBe(1);
+    expect(none.err).toContain('No Desktop session matches "no-such-agent-xyz"');
+  });
+
+  test("an unknown mode, or default without an agent, prints usage and exits 1", async () => {
+    for (const args of [["bogus"], ["default"]]) {
+      const r = await run(...args);
+      expect(r.code).toBe(1);
+      expect(r.err).toContain("Usage: bun cli.ts desktop-wake");
+    }
+  });
+});
