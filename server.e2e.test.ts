@@ -11,7 +11,19 @@ const PORT = 7899 + 2000 + Math.floor(Math.random() * 500);
 const HTTP = `http://127.0.0.1:${PORT}`;
 const DIR = mkdtempSync(join(tmpdir(), "cp-e2e-"));
 const DB = join(DIR, "peers.db");
-const ENV = { ...process.env, CLAUDE_PEERS_PORT: String(PORT), CLAUDE_PEERS_DB: DB, CLAUDE_PEERS_LOG: join(DIR, "server.log") };
+// Stand-in for the wake relay, so no test ever publishes to a real one.
+const relayHits: Array<{ path: string; body: string }> = [];
+const relay = Bun.serve({
+  port: 0, hostname: "127.0.0.1",
+  async fetch(req) {
+    relayHits.push({ path: new URL(req.url).pathname, body: await req.text() });
+    return new Response("ok");
+  },
+});
+const ENV = {
+  ...process.env, CLAUDE_PEERS_PORT: String(PORT), CLAUDE_PEERS_DB: DB, CLAUDE_PEERS_LOG: join(DIR, "server.log"),
+  CLAUDE_PEERS_WAKE_RELAY: `http://127.0.0.1:${relay.port}`,
+};
 
 let broker: ReturnType<typeof Bun.spawn>;
 
@@ -99,6 +111,7 @@ beforeAll(async () => {
 
 afterAll(() => {
   broker.kill();
+  relay.stop(true);
   rmSync(DIR, { recursive: true, force: true });
 });
 
@@ -195,6 +208,48 @@ describe("desktop sessions after a reap", () => {
       expect(await desk.call("check_messages", { peer_session: token })).toContain("you're back");
     } finally {
       desk.stop();
+    }
+  }, 30_000);
+});
+
+describe("desktop wake mode", () => {
+  const setMode = async (body: Record<string, unknown>) => {
+    const secret = readSecret(secretPath(DB))!;
+    const res = await fetch(`${HTTP}/wake-mode`, {
+      method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${secret}` }, body: JSON.stringify(body),
+    });
+    expect(res.status).toBe(200);
+  };
+
+  test("a switch reaches a running session, and set_wake changes only that session", async () => {
+    const desk = new McpClient({ ...ENV, CLAUDE_PEERS_PEER_TYPE: "desktop", CLAUDE_PEERS_HEARTBEAT_MS: "1000" });
+    try {
+      await desk.init();
+      await setMode({ mode: "passive" });
+      const claimed = await desk.call("claim_session", { label: "e2e wake" });
+      const token = claimed.match(/cs_[0-9a-f]{12}/)![0];
+      expect(claimed).not.toContain("Monitor(");
+
+      // Turned on globally: the session hears about it on its next call.
+      await setMode({ mode: "active" });
+      await Bun.sleep(2500); // two heartbeats
+      const on = await desk.call("set_summary", { summary: "e2e wake", peer_session: token });
+      expect(on).toContain("now active");
+      expect(on).toContain("Monitor(");
+      const topic = on.match(/cp-wake-[0-9a-f]{24}/)![0];
+      // Told once, not on every call.
+      expect(await desk.call("set_summary", { summary: "e2e wake", peer_session: token })).not.toContain("Monitor(");
+
+      // The agent goes quiet on its own: its Monitor gets "off", the global mode stays active.
+      const off = await desk.call("set_wake", { mode: "passive", peer_session: token });
+      expect(off).toContain("now passive");
+      for (let i = 0; i < 50 && !relayHits.some((h) => h.path === `/${topic}` && h.body === "off"); i++) await Bun.sleep(20);
+      expect(relayHits.filter((h) => h.path === `/${topic}`).map((h) => h.body)).toEqual(["off"]);
+      await Bun.sleep(1500);
+      expect(await desk.call("set_summary", { summary: "e2e wake", peer_session: token })).not.toContain("now ");
+    } finally {
+      desk.stop();
+      await setMode({ mode: "active", clear_overrides: true });
     }
   }, 30_000);
 });
