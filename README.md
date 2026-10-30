@@ -222,6 +222,10 @@ bun run format     # apply Biome formatting
 ```
 
 CI runs lint, typecheck and tests on Linux and macOS for every pull request.
+
+`broker.ts`, `server.ts`, `cli.ts` and `hook.ts` at the root are entry
+points that installs reference by path; the code is in `src/` (`broker/`,
+`server/`, `cli/`, `hook.ts`, `shared/`) and the tests are in `test/`.
 To skip the formatting-only commit in `git blame`:
 `git config blame.ignoreRevsFile .git-blame-ignore-revs`.
 
