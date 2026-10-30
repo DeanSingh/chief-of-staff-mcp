@@ -40,7 +40,7 @@ const DB_PATH = process.env.CLAUDE_PEERS_DB ?? `${process.env.HOME}/.claude-peer
 // into the shell command every agent's Monitor runs.
 const WAKE_RELAY_ENV = process.env.CLAUDE_PEERS_WAKE_RELAY;
 const WAKE_RELAY = (WAKE_RELAY_ENV ?? "https://ntfy.sh").replace(/\/+$/, "");
-const WAKE_ON = /^[A-Za-z0-9.:\/_-]+$/.test(WAKE_RELAY)
+const WAKE_ON = /^[A-Za-z0-9.:/_-]+$/.test(WAKE_RELAY)
   && /^https:\/\/|^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(WAKE_RELAY);
 if (WAKE_RELAY !== "off" && !WAKE_ON) {
   console.error("[claude-peers broker] CLAUDE_PEERS_WAKE_RELAY must be https:// (or http:// on 127.0.0.1/localhost) and use only [A-Za-z0-9.:/_-]; wake relay disabled");
@@ -502,7 +502,7 @@ function wakeTopicFor(token: string): string | undefined {
   const row = db.query("SELECT wake_topic FROM desktop_tokens WHERE token = ?").get(token) as { wake_topic: string | null } | null;
   if (!row) return undefined;
   if (row.wake_topic) return row.wake_topic;
-  const topic = "cp-wake-" + Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => b.toString(16).padStart(2, "0")).join("");
+  const topic = `cp-wake-${Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => b.toString(16).padStart(2, "0")).join("")}`;
   db.run("UPDATE desktop_tokens SET wake_topic = ? WHERE token = ?", [topic, token]);
   return topic;
 }
@@ -916,7 +916,7 @@ const ACTS_AS: Record<string, "id" | "from_id"> = {
 // `bun cli.ts send` speaks for the human at the terminal, not for a peer.
 const OPERATOR_ID = "cli";
 
-function gate(req: Request, path: string): Response | null {
+function gate(req: Request): Response | null {
   if (!ALLOWED_HOSTS.has(req.headers.get("host") ?? "")) {
     return new Response("forbidden host", { status: 403 });
   }
@@ -952,7 +952,7 @@ Bun.serve<WatchData>({
     const url = new URL(req.url);
     const path = url.pathname;
 
-    const refused = gate(req, path);
+    const refused = gate(req);
     if (refused) return refused;
 
     if (req.method !== "POST") {
@@ -976,6 +976,7 @@ Bun.serve<WatchData>({
     }
 
     try {
+      // biome-ignore lint/suspicious/noExplicitAny: each route casts the body to its own request type
       const body = (await req.json()) as Record<string, any>;
       if (!actsAsCaller(req, path, body)) {
         return Response.json({ ok: false, error: `not authorized to act as ${String(body?.[ACTS_AS[path]!])}` }, { status: 403 });
@@ -1030,7 +1031,10 @@ Bun.serve<WatchData>({
   websocket: {
     open(ws) {
       let set = watchers.get(ws.data.peer);
-      if (!set) watchers.set(ws.data.peer, (set = new Set()));
+      if (!set) {
+        set = new Set();
+        watchers.set(ws.data.peer, set);
+      }
       set.add(ws);
       ws.send(JSON.stringify({ type: "watching", peer: ws.data.peer }));
     },

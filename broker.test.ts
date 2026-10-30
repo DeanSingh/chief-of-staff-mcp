@@ -1188,7 +1188,7 @@ describe("request gate", () => {
     const plain = { "content-type": "application/json" };
     for (const path of ["/register", "/list-peers", "/send-message", "/session-start", "/ack-messages"]) {
       expect((await raw(path, plain)).status).toBe(401);
-      expect((await raw(path, { ...plain, authorization: "Bearer " + "0".repeat(64) })).status).toBe(401);
+      expect((await raw(path, { ...plain, authorization: `Bearer ${"0".repeat(64)}` })).status).toBe(401);
     }
   });
 

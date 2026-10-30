@@ -667,7 +667,10 @@ const inboxes = new Map<PeerId, Inbox>();
 
 function inboxFor(peerId: PeerId): Inbox {
   let inbox = inboxes.get(peerId);
-  if (!inbox) inboxes.set(peerId, (inbox = { lastSeen: 0, preview: "" }));
+  if (!inbox) {
+    inbox = { lastSeen: 0, preview: "" };
+    inboxes.set(peerId, inbox);
+  }
   return inbox;
 }
 
@@ -819,7 +822,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   return appendPendingMessages(toolResult, name, effectivePeerId);
 });
 
-async function handleTool(name: string, args: Record<string, unknown> | undefined, effectivePeerId: PeerId | null, sessionId: string | undefined): Promise<any> {
+type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean };
+
+async function handleTool(name: string, args: Record<string, unknown> | undefined, effectivePeerId: PeerId | null, sessionId: string | undefined): Promise<ToolResult> {
   switch (name) {
     case "claim_session": {
       const label = ((args as { label?: string })?.label ?? "").trim();
@@ -1017,7 +1022,7 @@ Next: call set_summary (with your token) to tell other peers what you are workin
                 content: [{ type: "text" as const, text: `Re-registered and summary set: "${summary}" (new peer ID: ${myId})` }],
               };
             }
-          } catch (regErr) {
+          } catch {
             // fall through to error
           }
         }

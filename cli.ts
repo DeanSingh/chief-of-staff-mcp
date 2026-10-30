@@ -212,7 +212,7 @@ switch (cmd) {
         .split("\n")
         .filter((p) => p);
       for (const pid of pids) {
-        process.kill(parseInt(pid), "SIGTERM");
+        process.kill(parseInt(pid, 10), "SIGTERM");
       }
       console.log("Broker stopped.");
     } catch {
@@ -231,14 +231,17 @@ switch (cmd) {
     const flag = process.argv.indexOf("--settings");
     const path = flag > 0 ? process.argv[flag + 1]! : `${process.env.HOME}/.claude/settings.json`;
     const file = Bun.file(path);
-    const settings: any = (await file.exists()) ? await file.json() : {};
+    // Only the hooks we own are typed; everything else passes through untouched.
+    type Hook = { command?: unknown; [k: string]: unknown };
+    type Group = { hooks?: Hook[]; [k: string]: unknown };
+    const settings: { hooks?: Record<string, Group[]>; [k: string]: unknown } = (await file.exists()) ? await file.json() : {};
     const command = hookCommand(import.meta.dir);
 
     settings.hooks ??= {};
     for (const event of ["SessionStart", "UserPromptSubmit"]) {
-      const groups: any[] = (settings.hooks[event] ?? [])
-        .map((g: any) => ({ ...g, hooks: (g.hooks ?? []).filter((h: any) => !String(h.command ?? "").endsWith(MARK)) }))
-        .filter((g: any) => g.hooks.length > 0);
+      const groups: Group[] = (settings.hooks[event] ?? [])
+        .map((g) => ({ ...g, hooks: (g.hooks ?? []).filter((h) => !String(h.command ?? "").endsWith(MARK)) }))
+        .filter((g) => g.hooks.length > 0);
       groups.push({ hooks: [{ type: "command", command, timeout: 1 }] });
       settings.hooks[event] = groups;
     }
@@ -255,7 +258,7 @@ switch (cmd) {
     const tmp = `${real}.tmp-${process.pid}`;
     try {
       const mode = exists ? statSync(real).mode & 0o7777 : 0o644;
-      writeFileSync(tmp, JSON.stringify(settings, null, 2) + "\n", { mode, flag: "wx" });
+      writeFileSync(tmp, `${JSON.stringify(settings, null, 2)}\n`, { mode, flag: "wx" });
       chmodSync(tmp, mode);
       renameSync(tmp, real);
     } catch (e) {

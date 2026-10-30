@@ -39,8 +39,7 @@ class McpClient {
       const dec = new TextDecoder();
       for await (const chunk of proc.stdout as ReadableStream<Uint8Array>) {
         this.buf += dec.decode(chunk);
-        let nl;
-        while ((nl = this.buf.indexOf("\n")) >= 0) {
+        for (let nl = this.buf.indexOf("\n"); nl >= 0; nl = this.buf.indexOf("\n")) {
           const line = this.buf.slice(0, nl);
           this.buf = this.buf.slice(nl + 1);
           try {
@@ -52,7 +51,7 @@ class McpClient {
     })();
   }
   private write(msg: unknown) {
-    (this.proc.stdin as import("bun").FileSink).write(JSON.stringify(msg) + "\n");
+    (this.proc.stdin as import("bun").FileSink).write(`${JSON.stringify(msg)}\n`);
     (this.proc.stdin as import("bun").FileSink).flush();
   }
   request(method: string, params: unknown): Promise<any> {

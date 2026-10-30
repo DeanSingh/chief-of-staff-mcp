@@ -281,7 +281,7 @@ describe("wake Monitor output", () => {
             for (const [ms, ev] of events) {
               await Bun.sleep(ms - at);
               at = ms;
-              c.enqueue(enc.encode(JSON.stringify(ev) + "\n"));
+              c.enqueue(enc.encode(`${JSON.stringify(ev)}\n`));
             }
             await Bun.sleep(60_000); // hold the stream open, as ntfy does
           },
