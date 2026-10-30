@@ -142,7 +142,7 @@ bun cli.ts desktop-wake active <agent>     # one agent, by id or a unique part o
 bun cli.ts desktop-wake default <agent>    # that agent follows the global mode again
 ```
 
-`/desktop-wake …` runs the same command from Claude Code in this repo. An agent can also switch itself: ask it to "stay awake" or "go quiet" and it calls the `set_wake` tool. An agent's own setting wins over the global one. The mode is stored in the broker's database, so it survives restarts.
+`/desktop-wake …` runs the same command from Claude Code in this repo. An agent can also switch itself: ask it to "stay awake" or "go quiet" and it calls the `set_wake` tool. Turning its own wake on starts publishing to the relay for that agent's topic, so the relay sees when that agent gets mail (never the content). An agent's own setting wins over the global one. The mode is stored in the broker's database, so it survives restarts.
 
 Running agents pick up a switch within one heartbeat (15 s), on their next claude-peers call. Switching to passive also publishes `off` to the topic, which ends a running `Monitor` with a constant line telling the agent not to re-arm it. A broker started with `CLAUDE_PEERS_WAKE_RELAY` set and no stored mode starts active, as before.
 
