@@ -1,8 +1,11 @@
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { peerSecret, readSecret, secretPath, PEER_HEADER } from "./src/shared/auth.ts";
+import { join, dirname } from "node:path";
+import { peerSecret, readSecret, secretPath, PEER_HEADER } from "../src/shared/auth.ts";
+
+/** The repo root, where the entry files live. */
+const ROOT = dirname(import.meta.dir);
 
 // Real MCP servers (one CLI, one Desktop) over stdio against a real broker on
 // a private port: proves every route the servers use carries the install
@@ -37,7 +40,7 @@ class McpClient {
   private nextId = 1;
   private waiting = new Map<number, (v: any) => void>();
   constructor(env: Record<string, string | undefined>) {
-    const proc = Bun.spawn(["bun", `${import.meta.dir}/server.ts`], {
+    const proc = Bun.spawn(["bun", `${ROOT}/server.ts`], {
       env,
       stdin: "pipe",
       stdout: "pipe",
@@ -135,7 +138,7 @@ async function asPeer(path: string, id: string, body: Record<string, unknown>) {
 }
 
 beforeAll(async () => {
-  broker = Bun.spawn(["bun", `${import.meta.dir}/broker.ts`], { env: ENV, stdout: "ignore", stderr: "ignore" });
+  broker = Bun.spawn(["bun", `${ROOT}/broker.ts`], { env: ENV, stdout: "ignore", stderr: "ignore" });
   for (let i = 0; i < 50; i++) {
     try {
       if ((await fetch(`${HTTP}/health`)).ok) return;

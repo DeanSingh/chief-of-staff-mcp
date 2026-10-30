@@ -1,6 +1,10 @@
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
+import { dirname } from "node:path";
 import { statSync } from "node:fs";
-import { peerSecret, readSecret, secretPath, PEER_HEADER } from "./src/shared/auth.ts";
+import { peerSecret, readSecret, secretPath, PEER_HEADER } from "../src/shared/auth.ts";
+
+/** The repo root, where the entry files live. */
+const ROOT = dirname(import.meta.dir);
 
 // Spawn a real broker on a private port + temp DB and exercise the
 // /watch WebSocket feed end to end: subscribe, send, receive, and confirm the
@@ -75,7 +79,7 @@ async function restartBroker() {
   proc.kill();
   await proc.exited;
   await Bun.sleep(200); // Give port time to be released by OS
-  proc = Bun.spawn(["bun", `${import.meta.dir}/broker.ts`], {
+  proc = Bun.spawn(["bun", `${ROOT}/broker.ts`], {
     env: BROKER_ENV,
     stdout: "ignore",
     stderr: "ignore",
@@ -145,7 +149,7 @@ function connectWatch(
 }
 
 beforeAll(async () => {
-  proc = Bun.spawn(["bun", `${import.meta.dir}/broker.ts`], {
+  proc = Bun.spawn(["bun", `${ROOT}/broker.ts`], {
     env: BROKER_ENV,
     stdout: "ignore",
     stderr: "ignore",
@@ -231,7 +235,7 @@ describe("broker /watch WebSocket feed", () => {
   // `bun cli.ts watch` as a Monitor: a refusal must end it with the reason,
   // not loop silently reconnecting forever.
   function cliWatch(peerId: string, db: string) {
-    return Bun.spawn(["bun", `${import.meta.dir}/cli.ts`, "watch", peerId], {
+    return Bun.spawn(["bun", `${ROOT}/cli.ts`, "watch", peerId], {
       env: { ...process.env, CLAUDE_PEERS_PORT: String(PORT), CLAUDE_PEERS_DB: db },
       stdout: "pipe",
       stderr: "pipe",
@@ -727,7 +731,7 @@ describe("broker /watch WebSocket feed", () => {
 
     try {
       // Step 2: Spawn a broker against this seeded DB
-      migProc = Bun.spawn(["bun", `${import.meta.dir}/broker.ts`], {
+      migProc = Bun.spawn(["bun", `${ROOT}/broker.ts`], {
         env: { ...process.env, CLAUDE_PEERS_PORT: String(MIGRATION_TEST_PORT), CLAUDE_PEERS_DB: MIGRATION_TEST_DB },
         stdout: "ignore",
         stderr: "ignore",
@@ -774,7 +778,7 @@ describe("broker /watch WebSocket feed", () => {
       await Bun.sleep(200); // Give port time to be released by OS
 
       // Step 5b: Spawn second broker on same port
-      migProc = Bun.spawn(["bun", `${import.meta.dir}/broker.ts`], {
+      migProc = Bun.spawn(["bun", `${ROOT}/broker.ts`], {
         env: { ...process.env, CLAUDE_PEERS_PORT: String(MIGRATION_TEST_PORT), CLAUDE_PEERS_DB: MIGRATION_TEST_DB },
         stdout: "ignore",
         stderr: "ignore",
@@ -1276,7 +1280,7 @@ describe("wake relay", () => {
       const OFF_PORT = PORT + 200 + i;
       const OFF_HTTP = `http://127.0.0.1:${OFF_PORT}`;
       const OFF_DB = `${import.meta.dir}/.test-broker-off-${OFF_PORT}.db`;
-      const off = Bun.spawn(["bun", `${import.meta.dir}/broker.ts`], {
+      const off = Bun.spawn(["bun", `${ROOT}/broker.ts`], {
         env: { ...env, CLAUDE_PEERS_PORT: String(OFF_PORT), CLAUDE_PEERS_DB: OFF_DB },
         stdout: "ignore",
         stderr: "ignore",
@@ -1313,7 +1317,7 @@ describe("wake relay", () => {
     const ERR_PORT = PORT + 300;
     const ERR_HTTP = `http://127.0.0.1:${ERR_PORT}`;
     const ERR_DB = `${import.meta.dir}/.test-broker-err-${ERR_PORT}.db`;
-    const b = Bun.spawn(["bun", `${import.meta.dir}/broker.ts`], {
+    const b = Bun.spawn(["bun", `${ROOT}/broker.ts`], {
       env: { ...BROKER_ENV, CLAUDE_PEERS_PORT: String(ERR_PORT), CLAUDE_PEERS_DB: ERR_DB },
       stdout: "ignore",
       stderr: "pipe",

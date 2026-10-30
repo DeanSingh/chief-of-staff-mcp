@@ -2,7 +2,7 @@ import { test, expect, describe, afterAll } from "bun:test";
 import { chmodSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ensureSecret, peerSecret, authHeaders, secretPath, PEER_HEADER } from "./auth.ts";
+import { ensureSecret, peerSecret, authHeaders, secretPath, PEER_HEADER } from "../src/shared/auth.ts";
 
 const DIR = mkdtempSync(join(tmpdir(), "cp-auth-"));
 afterAll(() => rmSync(DIR, { recursive: true, force: true }));

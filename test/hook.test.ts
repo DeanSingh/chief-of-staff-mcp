@@ -1,12 +1,15 @@
 import { test, expect, describe, afterAll } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { DESKTOP_WAKE_MARK, desktopWakeCommand, hookCommand, isOurDesktopWakeCommand } from "./src/cli/install.ts";
-import { hostPid } from "./src/hook.ts";
-import { ensureSecret, secretPath } from "./src/shared/auth.ts";
+import { join, dirname } from "node:path";
+import { DESKTOP_WAKE_MARK, desktopWakeCommand, hookCommand, isOurDesktopWakeCommand } from "../src/cli/install.ts";
+import { hostPid } from "../src/hook.ts";
+import { ensureSecret, secretPath } from "../src/shared/auth.ts";
 
-const HOOK = `${import.meta.dir}/hook.ts`;
+/** The repo root, where the entry files live. */
+const ROOT = dirname(import.meta.dir);
+
+const HOOK = `${ROOT}/hook.ts`;
 
 // Captures what the hook posts. Stands in for the broker.
 const hits: Array<{ path: string; body: any; auth: string | null }> = [];

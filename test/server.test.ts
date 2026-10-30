@@ -1,11 +1,15 @@
 import { test, expect, describe } from "bun:test";
-import { BrokerError, isNotFound } from "./src/server/client.ts";
-import { pruneInboxes, unreadBanner } from "./src/server/delivery.ts";
-import { tightenLogFile, toolCallLogLine } from "./src/server/log.ts";
-import { SERVER_INSTRUCTIONS } from "./src/server/mcp.ts";
-import { cliRegisterBody, desktopRegisterBody, isAmbiguousSession, resolvableSession } from "./src/server/sessions.ts";
-import { SESSION_ID_REQUIRED_TOOLS, SESSION_PARAM, buildTools } from "./src/server/tools.ts";
-import { WAKE_OFF_LINE, peerListHeader, wakeCommand, wakeCopy, wakeInstructions } from "./src/server/wake.ts";
+import { dirname } from "node:path";
+import { BrokerError, isNotFound } from "../src/server/client.ts";
+import { pruneInboxes, unreadBanner } from "../src/server/delivery.ts";
+import { tightenLogFile, toolCallLogLine } from "../src/server/log.ts";
+import { SERVER_INSTRUCTIONS } from "../src/server/mcp.ts";
+import { cliRegisterBody, desktopRegisterBody, isAmbiguousSession, resolvableSession } from "../src/server/sessions.ts";
+import { SESSION_ID_REQUIRED_TOOLS, SESSION_PARAM, buildTools } from "../src/server/tools.ts";
+import { WAKE_OFF_LINE, peerListHeader, wakeCommand, wakeCopy, wakeInstructions } from "../src/server/wake.ts";
+
+/** The repo root, where the entry files live. */
+const ROOT = dirname(import.meta.dir);
 
 // Two independent transport constraints are pinned here, both learned the
 // hard way from Desktop/Cowork sessions:
@@ -241,8 +245,8 @@ describe("hardening: what the server leaks and how it delivers", () => {
   });
 
   test("peer text is never handed to a sampling request as a user turn", async () => {
-    for (const file of new Bun.Glob("src/server/*.ts").scanSync(import.meta.dir)) {
-      expect(await Bun.file(`${import.meta.dir}/${file}`).text()).not.toContain("createMessage");
+    for (const file of new Bun.Glob("src/server/*.ts").scanSync(ROOT)) {
+      expect(await Bun.file(`${ROOT}/${file}`).text()).not.toContain("createMessage");
     }
   });
 
