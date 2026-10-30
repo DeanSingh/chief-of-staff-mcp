@@ -19,7 +19,7 @@
     "typescript": "5.9.3"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.27.1"
+    "@modelcontextprotocol/sdk": "^1.32.2"
   },
   "repository": {
     "type": "git",
