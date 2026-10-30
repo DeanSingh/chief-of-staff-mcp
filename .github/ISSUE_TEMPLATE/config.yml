@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/DeanSingh/chief-of-staff-mcp/security/advisories/new
+    about: Please report vulnerabilities privately, not as an issue.

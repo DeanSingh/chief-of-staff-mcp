@@ -1,5 +1,7 @@
 # chief-of-staff-mcp
 
+[![CI](https://github.com/DeanSingh/chief-of-staff-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/DeanSingh/chief-of-staff-mcp/actions/workflows/ci.yml)
+
 A chief-of-staff layer for Claude Code agents: one coordinator triages incoming work, delegates it to the right session, and reports back up — built on a local peer mesh.
 
 > Forked from [louislva/claude-peers-mcp](https://github.com/louislva/claude-peers-mcp) by [Louis Arge](https://github.com/louislva), which provides the peer discovery and messaging substrate this builds on. See [Attribution](#attribution).
@@ -226,6 +228,8 @@ CI runs lint, typecheck and tests on Linux and macOS for every pull request.
 `broker.ts`, `server.ts`, `cli.ts` and `hook.ts` at the root are entry
 points that installs reference by path; the code is in `src/` (`broker/`,
 `server/`, `cli/`, `hook.ts`, `shared/`) and the tests are in `test/`.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the map and
+[CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 To skip the formatting-only commit in `git blame`:
 `git config blame.ignoreRevsFile .git-blame-ignore-revs`.
 
