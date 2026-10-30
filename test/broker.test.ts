@@ -1632,6 +1632,38 @@ describe("request gate", () => {
       w.ws.close();
     }
   });
+
+  // The route table: what an unlisted path, a bad body or a plain GET gets.
+  test("an unknown POST route is a 404 after the gate, never before it", async () => {
+    for (const path of ["/nope", "/constructor", "/__proto__", "/toString"]) {
+      expect((await raw(path, { "content-type": "application/json" })).status).toBe(401);
+      const res = await raw(path, auth());
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: "not found" });
+    }
+  });
+
+  test("a body that isn't JSON is a 500 with the parse error", async () => {
+    const res = await fetch(`${HTTP}/list-peers`, { method: "POST", headers: auth(), body: "{not json" });
+    expect(res.status).toBe(500);
+    expect(((await res.json()) as { error: string }).error).toBeTruthy();
+  });
+
+  test("GET /health reports the peer count; any other GET is a plain banner", async () => {
+    const health = await fetch(`${HTTP}/health`);
+    expect(health.status).toBe(200);
+    expect(await health.json()).toMatchObject({ status: "ok", peers: expect.any(Number) });
+    const other = await fetch(`${HTTP}/anything`);
+    expect(other.status).toBe(200);
+    expect(await other.text()).toBe("claude-peers broker");
+  });
+
+  test("a /watch upgrade attempt over plain GET is a 426 once the credentials pass", async () => {
+    const id = (await peer("watch426")).id;
+    const res = await fetch(`${HTTP}/watch/${id}`, { headers: watchHeaders(id) });
+    expect(res.status).toBe(426);
+    expect((await fetch(`${HTTP}/watch/`, { headers: watchHeaders("") })).status).toBe(400);
+  });
 });
 
 describe("/unread", () => {
