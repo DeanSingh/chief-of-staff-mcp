@@ -40,10 +40,12 @@ const DB_PATH = process.env.CLAUDE_PEERS_DB ?? `${process.env.HOME}/.claude-peer
 // into the shell command every agent's Monitor runs.
 const WAKE_RELAY_ENV = process.env.CLAUDE_PEERS_WAKE_RELAY;
 const WAKE_RELAY = (WAKE_RELAY_ENV ?? "https://ntfy.sh").replace(/\/+$/, "");
-const WAKE_ON = /^[A-Za-z0-9.:\/_-]+$/.test(WAKE_RELAY)
-  && /^https:\/\/|^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(WAKE_RELAY);
+const WAKE_ON =
+  /^[A-Za-z0-9.:/_-]+$/.test(WAKE_RELAY) && /^https:\/\/|^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(WAKE_RELAY);
 if (WAKE_RELAY !== "off" && !WAKE_ON) {
-  console.error("[claude-peers broker] CLAUDE_PEERS_WAKE_RELAY must be https:// (or http:// on 127.0.0.1/localhost) and use only [A-Za-z0-9.:/_-]; wake relay disabled");
+  console.error(
+    "[claude-peers broker] CLAUDE_PEERS_WAKE_RELAY must be https:// (or http:// on 127.0.0.1/localhost) and use only [A-Za-z0-9.:/_-]; wake relay disabled",
+  );
 }
 const WAKE_COALESCE_MS = Number(process.env.CLAUDE_PEERS_WAKE_COALESCE_MS) || 10_000;
 
@@ -58,7 +60,11 @@ db.run("PRAGMA journal_mode = WAL");
 db.run("PRAGMA busy_timeout = 3000");
 // The DB holds every peer's mail and session tokens: owner-only.
 for (const suffix of ["", "-wal", "-shm"]) {
-  try { chmodSync(DB_PATH + suffix, 0o600); } catch { /* not created yet */ }
+  try {
+    chmodSync(DB_PATH + suffix, 0o600);
+  } catch {
+    /* not created yet */
+  }
 }
 
 const SECRET = ensureSecret(secretPath(DB_PATH));
@@ -198,7 +204,9 @@ db.run(`
 `);
 
 function ownSummary(peerId: string): string | null {
-  const row = db.query("SELECT summary FROM peer_summaries WHERE peer_id = ?").get(peerId) as { summary: string } | null;
+  const row = db.query("SELECT summary FROM peer_summaries WHERE peer_id = ?").get(peerId) as {
+    summary: string;
+  } | null;
   return row?.summary ?? null;
 }
 
@@ -224,7 +232,9 @@ function pidStartTime(pid: number): string | null {
   // Fixed locale and zone: the broker inherits its environment from whichever
   // session auto-launched it, and a restart under another LANG/TZ must not make
   // every recorded value mismatch.
-  const out = Bun.spawnSync(["ps", "-o", "lstart=", "-p", String(pid)], { env: { ...process.env, LC_ALL: "C", TZ: "UTC" } });
+  const out = Bun.spawnSync(["ps", "-o", "lstart=", "-p", String(pid)], {
+    env: { ...process.env, LC_ALL: "C", TZ: "UTC" },
+  });
   return new TextDecoder().decode(out.stdout).trim() || null;
 }
 
@@ -240,7 +250,11 @@ function cleanStalePeers() {
   // several and respawns them on bridge reconnects — so reaping desktop peers
   // by pid deleted live sessions (and their undelivered messages) every time
   // a bridge process exited. Desktop peers are reaped by heartbeat below.
-  const peers = db.query("SELECT id, pid, peer_type FROM peers WHERE peer_type != 'desktop'").all() as { id: string; pid: number; peer_type: string }[];
+  const peers = db.query("SELECT id, pid, peer_type FROM peers WHERE peer_type != 'desktop'").all() as {
+    id: string;
+    pid: number;
+    peer_type: string;
+  }[];
   for (const peer of peers) {
     if (!isPidAlive(peer.pid)) {
       // Process is gone: drop the row so it stops showing up as live.
@@ -261,17 +275,31 @@ function cleanStalePeers() {
   db.run("DELETE FROM peers WHERE peer_type = 'desktop' AND last_seen < ?", [staleTimeout]);
 
   // TTL: delivered messages > 24h, undelivered > 72h (recipient never came back), summary cache > 7d
-  db.run("DELETE FROM messages WHERE delivered = 1 AND sent_at < ?", [new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()]);
-  db.run("DELETE FROM messages WHERE delivered = 0 AND sent_at < ?", [new Date(Date.now() - 72 * 60 * 60 * 1000).toISOString()]);
-  db.run("DELETE FROM desktop_tokens WHERE updated_at < ?", [new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()]);
-  db.run("DELETE FROM process_sessions WHERE updated_at < ?", [new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()]);
+  db.run("DELETE FROM messages WHERE delivered = 1 AND sent_at < ?", [
+    new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+  ]);
+  db.run("DELETE FROM messages WHERE delivered = 0 AND sent_at < ?", [
+    new Date(Date.now() - 72 * 60 * 60 * 1000).toISOString(),
+  ]);
+  db.run("DELETE FROM desktop_tokens WHERE updated_at < ?", [
+    new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
+  ]);
+  db.run("DELETE FROM process_sessions WHERE updated_at < ?", [
+    new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
+  ]);
   // Same 30-day TTL as desktop_tokens above. Safe only because handleHeartbeat
   // refreshes peer_sessions.updated_at on every heartbeat (see touchPeerSessionByPeerId)
   // — otherwise a session alive longer than the TTL would have its mapping
   // swept out from under it and mint a new id on its next reconnect.
-  db.run("DELETE FROM peer_sessions WHERE updated_at < ?", [new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()]);
-  db.run("DELETE FROM summary_cache WHERE updated_at < ?", [new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()]);
-  db.run("DELETE FROM peer_summaries WHERE updated_at < ?", [new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()]);
+  db.run("DELETE FROM peer_sessions WHERE updated_at < ?", [
+    new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
+  ]);
+  db.run("DELETE FROM summary_cache WHERE updated_at < ?", [
+    new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(),
+  ]);
+  db.run("DELETE FROM peer_summaries WHERE updated_at < ?", [
+    new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
+  ]);
 }
 
 cleanStalePeers();
@@ -316,7 +344,8 @@ const deletePeer = db.prepare(`
 // What other peers may see of a peer. Never SELECT * here: session_token is
 // a desktop session's bearer identity. Older desktop rows also carry the
 // token as their cwd (servers registered with cwd = token), so mask it there.
-const PUBLIC_CWD = "CASE WHEN session_token IS NOT NULL AND instr(cwd, session_token) > 0 THEN replace(cwd, session_token, '(desktop session)') ELSE cwd END";
+const PUBLIC_CWD =
+  "CASE WHEN session_token IS NOT NULL AND instr(cwd, session_token) > 0 THEN replace(cwd, session_token, '(desktop session)') ELSE cwd END";
 const PUBLIC_PEER_COLUMNS = `id, pid, ${PUBLIC_CWD} AS cwd, git_root, tty, summary, peer_type, registered_at, last_seen`;
 
 const selectAllPeers = db.prepare(`
@@ -397,19 +426,33 @@ function getCachedSummary(cwd: string, git_root: string | null): string | null {
 // given — records the key -> id mapping so future registrations resolve by
 // key without needing this fallback again. Returns null when no pid match
 // exists, so the caller falls through to minting a fresh peer.
-function claimPeerByPid(pid: number, body: RegisterRequest, now: string, cliKey: string | null): { id: string; restored_summary?: string } | null {
-  const existing = (db.query("SELECT id, summary, pid, pid_started FROM peers WHERE pid = ? AND peer_type != 'desktop'")
-    .all(pid) as { id: string; summary: string; pid: number; pid_started: string | null }[]).find(isSameProcess);
+function claimPeerByPid(
+  pid: number,
+  body: RegisterRequest,
+  now: string,
+  cliKey: string | null,
+): { id: string; restored_summary?: string } | null {
+  const existing = (
+    db.query("SELECT id, summary, pid, pid_started FROM peers WHERE pid = ? AND peer_type != 'desktop'").all(pid) as {
+      id: string;
+      summary: string;
+      pid: number;
+      pid_started: string | null;
+    }[]
+  ).find(isSameProcess);
   if (!existing) return null;
   db.run(
     "UPDATE peers SET cwd = ?, git_root = ?, tty = ?, last_seen = ?, summary = CASE WHEN ? = '' THEN summary ELSE ? END WHERE id = ?",
     [body.cwd, body.git_root, body.tty, now, body.summary ?? "", body.summary ?? "", existing.id],
   );
   if (cliKey) {
-    db.run("INSERT OR REPLACE INTO peer_sessions (session_key, peer_id, peer_type, updated_at) VALUES (?, ?, 'cli', ?)", [cliKey, existing.id, now]);
+    db.run(
+      "INSERT OR REPLACE INTO peer_sessions (session_key, peer_id, peer_type, updated_at) VALUES (?, ?, 'cli', ?)",
+      [cliKey, existing.id, now],
+    );
   }
   if (body.summary) cacheSummary(body.cwd, body.git_root, body.summary);
-  return { id: existing.id, restored_summary: body.summary ? undefined : (existing.summary || undefined) };
+  return { id: existing.id, restored_summary: body.summary ? undefined : existing.summary || undefined };
 }
 
 function handleRegister(body: RegisterRequest): RegisterResponse {
@@ -446,7 +489,9 @@ const effectiveWakeMode = (override: string | null): WakeMode => (isWakeMode(ove
 /** <relay>/<topic> for a token whose wake mode is active, minting the topic on first use. */
 function activeWakeUrl(token: string): string | undefined {
   if (!WAKE_ON) return undefined;
-  const row = db.query("SELECT wake_mode FROM desktop_tokens WHERE token = ?").get(token) as { wake_mode: string | null } | null;
+  const row = db.query("SELECT wake_mode FROM desktop_tokens WHERE token = ?").get(token) as {
+    wake_mode: string | null;
+  } | null;
   if (!row || effectiveWakeMode(row.wake_mode) !== "active") return undefined;
   const topic = wakeTopicFor(token);
   return topic ? `${WAKE_RELAY}/${topic}` : undefined;
@@ -454,26 +499,43 @@ function activeWakeUrl(token: string): string | undefined {
 
 /** Topics whose wake mode is active right now, so a switch can tell which ones just went passive. */
 function activeTopics(): Set<string> {
-  const rows = db.query("SELECT wake_topic, wake_mode FROM desktop_tokens WHERE wake_topic IS NOT NULL").all() as { wake_topic: string; wake_mode: string | null }[];
+  const rows = db.query("SELECT wake_topic, wake_mode FROM desktop_tokens WHERE wake_topic IS NOT NULL").all() as {
+    wake_topic: string;
+    wake_mode: string | null;
+  }[];
   return new Set(rows.filter((r) => effectiveWakeMode(r.wake_mode) === "active").map((r) => r.wake_topic));
 }
 
-function handleWakeMode(body: { mode?: string; peer_id?: string; clear_overrides?: boolean }): { ok: boolean; error?: string; wake_url?: string } {
+function handleWakeMode(body: { mode?: string; peer_id?: string; clear_overrides?: boolean }): {
+  ok: boolean;
+  error?: string;
+  wake_url?: string;
+} {
   const perPeer = typeof body.peer_id === "string";
   if (!isWakeMode(body.mode) && !(perPeer && body.mode === "default")) {
-    return { ok: false, error: `mode must be active or passive${perPeer ? " (or default, to follow the global mode)" : ""}` };
+    return {
+      ok: false,
+      error: `mode must be active or passive${perPeer ? " (or default, to follow the global mode)" : ""}`,
+    };
   }
   if (body.mode === "active" && !WAKE_ON) {
     return { ok: false, error: "the wake relay is disabled (CLAUDE_PEERS_WAKE_RELAY=off or invalid)" };
   }
   const token = perPeer
-    ? (db.query("SELECT token FROM desktop_tokens WHERE peer_id = ? ORDER BY updated_at DESC").get(body.peer_id!) as { token: string } | null)?.token
+    ? (
+        db.query("SELECT token FROM desktop_tokens WHERE peer_id = ? ORDER BY updated_at DESC").get(body.peer_id!) as {
+          token: string;
+        } | null
+      )?.token
     : undefined;
   if (perPeer && !token) return { ok: false, error: `${body.peer_id} is not a desktop session` };
 
   const before = activeTopics();
   if (perPeer) {
-    db.run("UPDATE desktop_tokens SET wake_mode = ? WHERE peer_id = ?", [body.mode === "default" ? null : body.mode!, body.peer_id!]);
+    db.run("UPDATE desktop_tokens SET wake_mode = ? WHERE peer_id = ?", [
+      body.mode === "default" ? null : body.mode!,
+      body.peer_id!,
+    ]);
   } else {
     db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('desktop_wake', ?)", [body.mode!]);
     if (body.clear_overrides) db.run("UPDATE desktop_tokens SET wake_mode = NULL");
@@ -485,24 +547,37 @@ function handleWakeMode(body: { mode?: string; peer_id?: string; clear_overrides
   return { ok: true, wake_url: token ? activeWakeUrl(token) : undefined };
 }
 
-function handleWakeStatus(): { global: WakeMode; relay: string | null; peers: { id: string; summary: string; mode: WakeMode; own_setting: boolean }[] } {
-  const rows = db.query(`
+function handleWakeStatus(): {
+  global: WakeMode;
+  relay: string | null;
+  peers: { id: string; summary: string; mode: WakeMode; own_setting: boolean }[];
+} {
+  const rows = db
+    .query(`
     SELECT p.id, p.summary, t.wake_mode FROM peers p JOIN desktop_tokens t ON t.peer_id = p.id
     WHERE p.peer_type = 'desktop' ORDER BY p.summary
-  `).all() as { id: string; summary: string; wake_mode: string | null }[];
+  `)
+    .all() as { id: string; summary: string; wake_mode: string | null }[];
   return {
     global: globalWakeMode(),
     relay: WAKE_ON ? WAKE_RELAY : null,
-    peers: rows.map((r) => ({ id: r.id, summary: r.summary, mode: effectiveWakeMode(r.wake_mode), own_setting: isWakeMode(r.wake_mode) })),
+    peers: rows.map((r) => ({
+      id: r.id,
+      summary: r.summary,
+      mode: effectiveWakeMode(r.wake_mode),
+      own_setting: isWakeMode(r.wake_mode),
+    })),
   };
 }
 
 /** The token's wake topic, minted on first use (including tokens claimed before topics existed). */
 function wakeTopicFor(token: string): string | undefined {
-  const row = db.query("SELECT wake_topic FROM desktop_tokens WHERE token = ?").get(token) as { wake_topic: string | null } | null;
+  const row = db.query("SELECT wake_topic FROM desktop_tokens WHERE token = ?").get(token) as {
+    wake_topic: string | null;
+  } | null;
   if (!row) return undefined;
   if (row.wake_topic) return row.wake_topic;
-  const topic = "cp-wake-" + Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => b.toString(16).padStart(2, "0")).join("");
+  const topic = `cp-wake-${Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => b.toString(16).padStart(2, "0")).join("")}`;
   db.run("UPDATE desktop_tokens SET wake_topic = ? WHERE token = ?", [topic, token]);
   return topic;
 }
@@ -518,7 +593,14 @@ function publishWake(topic: string): void {
   if (w && now - w.last < WAKE_COALESCE_MS) {
     if (!w.trailing) {
       w.trailing = true;
-      setTimeout(() => { w.trailing = false; w.last = Date.now(); postWake(topic); }, w.last + WAKE_COALESCE_MS - now);
+      setTimeout(
+        () => {
+          w.trailing = false;
+          w.last = Date.now();
+          postWake(topic);
+        },
+        w.last + WAKE_COALESCE_MS - now,
+      );
     }
     return;
   }
@@ -560,10 +642,23 @@ function registerPeer(body: RegisterRequest): RegisterResponse {
     // Row was reaped (session idled past the heartbeat window) but the token
     // is known: resurrect the peer under its ORIGINAL id so addresses other
     // agents hold stay valid and queued mail is still addressed correctly.
-    const mapped = db.query("SELECT peer_id FROM desktop_tokens WHERE token = ?").get(token) as { peer_id: string } | null;
+    const mapped = db.query("SELECT peer_id FROM desktop_tokens WHERE token = ?").get(token) as {
+      peer_id: string;
+    } | null;
     if (mapped) {
       const restored = body.summary ? undefined : (ownSummary(mapped.peer_id) ?? undefined);
-      insertPeer.run(mapped.peer_id, body.pid, body.cwd, body.git_root, body.tty, body.summary || restored || "", peerType, now, now, token);
+      insertPeer.run(
+        mapped.peer_id,
+        body.pid,
+        body.cwd,
+        body.git_root,
+        body.tty,
+        body.summary || restored || "",
+        peerType,
+        now,
+        now,
+        token,
+      );
       db.run("UPDATE desktop_tokens SET updated_at = ? WHERE token = ?", [now, token]);
       db.run("UPDATE peer_sessions SET updated_at = ? WHERE session_key = ?", [now, token]);
       return { id: mapped.peer_id, restored_summary: restored };
@@ -583,7 +678,12 @@ function registerPeer(body: RegisterRequest): RegisterResponse {
     // only way to assert peer_sessions is actually read today is a
     // cross-type test that would break the moment the CLI-only lookup
     // (see the cliKey branch below) gets hardened to also check peer_type.
-    db.run("INSERT OR REPLACE INTO peer_sessions (session_key, peer_id, peer_type, updated_at) VALUES (?, ?, ?, ?)", [token, id, "desktop", now]);
+    db.run("INSERT OR REPLACE INTO peer_sessions (session_key, peer_id, peer_type, updated_at) VALUES (?, ?, ?, ?)", [
+      token,
+      id,
+      "desktop",
+      now,
+    ]);
   }
 
   // CLI identity. Prefer Claude Code's session id: it survives process death,
@@ -592,11 +692,16 @@ function registerPeer(body: RegisterRequest): RegisterResponse {
   // Desktop sessions share one VM PID, so PID-based matching would conflate
   // other active sessions; they are keyed by session_token above instead.
   if (cliKey) {
-    const mapped = db.query("SELECT peer_id FROM peer_sessions WHERE session_key = ?")
-      .get(cliKey) as { peer_id: string } | null;
+    const mapped = db.query("SELECT peer_id FROM peer_sessions WHERE session_key = ?").get(cliKey) as {
+      peer_id: string;
+    } | null;
     if (mapped) {
-      const live = db.query("SELECT id, summary, pid, pid_started FROM peers WHERE id = ?")
-        .get(mapped.peer_id) as { id: string; summary: string; pid: number; pid_started: string | null } | null;
+      const live = db.query("SELECT id, summary, pid, pid_started FROM peers WHERE id = ?").get(mapped.peer_id) as {
+        id: string;
+        summary: string;
+        pid: number;
+        pid_started: string | null;
+      } | null;
       if (live && live.pid !== body.pid && isPidAlive(live.pid) && isSameProcess(live)) {
         // The same session is open in another terminal that is still running:
         // that process owns the id. Keep (or mint) this process's own peer and
@@ -620,11 +725,22 @@ function registerPeer(body: RegisterRequest): RegisterResponse {
           summaryToInsert = ownSummary(mapped.peer_id) ?? "";
           if (summaryToInsert) resurrectedSummary = summaryToInsert;
         }
-        insertPeer.run(mapped.peer_id, body.pid, body.cwd, body.git_root, body.tty, summaryToInsert, peerType, now, now, null);
+        insertPeer.run(
+          mapped.peer_id,
+          body.pid,
+          body.cwd,
+          body.git_root,
+          body.tty,
+          summaryToInsert,
+          peerType,
+          now,
+          now,
+          null,
+        );
       }
       db.run("UPDATE peer_sessions SET updated_at = ? WHERE session_key = ?", [now, cliKey]);
       if (body.summary) cacheSummary(body.cwd, body.git_root, body.summary);
-      const restored = live ? (!body.summary ? (live.summary || undefined) : undefined) : resurrectedSummary;
+      const restored = live ? (!body.summary ? live.summary || undefined : undefined) : resurrectedSummary;
       return { id: mapped.peer_id, restored_summary: restored };
     }
 
@@ -650,7 +766,15 @@ function registerPeer(body: RegisterRequest): RegisterResponse {
   return mintPeer(body, now, cliKey, peerType, isCli, id, token);
 }
 
-function mintPeer(body: RegisterRequest, now: string, cliKey: string | null, peerType: string, isCli: boolean, id = generateId(), token: string | null = null): RegisterResponse {
+function mintPeer(
+  body: RegisterRequest,
+  now: string,
+  cliKey: string | null,
+  peerType: string,
+  isCli: boolean,
+  id = generateId(),
+  token: string | null = null,
+): RegisterResponse {
   // A brand-new session starts blank. Only a caller with no session key (an
   // older Claude Code) inherits the workspace's cached summary: pid matching
   // is its only way back after a restart. With a key, a new id means a new
@@ -668,7 +792,10 @@ function mintPeer(body: RegisterRequest, now: string, cliKey: string | null, pee
   // Only reached when a genuinely new peer is being minted. Record its durable
   // key so the next registration under the same session reclaims this id.
   if (cliKey) {
-    db.run("INSERT OR REPLACE INTO peer_sessions (session_key, peer_id, peer_type, updated_at) VALUES (?, ?, 'cli', ?)", [cliKey, id, now]);
+    db.run(
+      "INSERT OR REPLACE INTO peer_sessions (session_key, peer_id, peer_type, updated_at) VALUES (?, ?, 'cli', ?)",
+      [cliKey, id, now],
+    );
   }
 
   insertPeer.run(id, body.pid, body.cwd, body.git_root, body.tty, summary, peerType, now, now, token);
@@ -688,13 +815,20 @@ function mintPeer(body: RegisterRequest, now: string, cliKey: string | null, pee
 function liveSessionKey(pid: number): string | null {
   const started = pidStartTime(pid);
   if (!started) return null;
-  const row = db.query("SELECT session_key FROM process_sessions WHERE pid = ? AND pid_started = ?").get(pid, started) as { session_key: string } | null;
+  const row = db
+    .query("SELECT session_key FROM process_sessions WHERE pid = ? AND pid_started = ?")
+    .get(pid, started) as { session_key: string } | null;
   return row?.session_key ?? null;
 }
 
 const sessionStart = db.transaction((body: SessionStartRequest, now: string): SessionStartResponse => {
-  const live = (db.query("SELECT id, pid, pid_started FROM peers WHERE pid = ? AND peer_type != 'desktop'")
-    .all(body.pid) as { id: string; pid: number; pid_started: string | null }[]).find(isSameProcess);
+  const live = (
+    db.query("SELECT id, pid, pid_started FROM peers WHERE pid = ? AND peer_type != 'desktop'").all(body.pid) as {
+      id: string;
+      pid: number;
+      pid_started: string | null;
+    }[]
+  ).find(isSameProcess);
   if (!live) return { ok: false, reason: "no_live_peer" };
 
   // From now on this process registers under the live session, not the key
@@ -703,14 +837,23 @@ const sessionStart = db.transaction((body: SessionStartRequest, now: string): Se
   const recordLiveSession = () => {
     const started = pidStartTime(body.pid);
     if (started) {
-      db.run("INSERT OR REPLACE INTO process_sessions (pid, pid_started, session_key, updated_at) VALUES (?, ?, ?, ?)", [body.pid, started, body.session_key, now]);
+      db.run(
+        "INSERT OR REPLACE INTO process_sessions (pid, pid_started, session_key, updated_at) VALUES (?, ?, ?, ?)",
+        [body.pid, started, body.session_key, now],
+      );
     }
   };
 
-  const mapped = db.query("SELECT peer_id FROM peer_sessions WHERE session_key = ?").get(body.session_key) as { peer_id: string } | null;
+  const mapped = db.query("SELECT peer_id FROM peer_sessions WHERE session_key = ?").get(body.session_key) as {
+    peer_id: string;
+  } | null;
   if (!mapped) {
     recordLiveSession();
-    db.run("INSERT INTO peer_sessions (session_key, peer_id, peer_type, updated_at) VALUES (?, ?, 'cli', ?)", [body.session_key, live.id, now]);
+    db.run("INSERT INTO peer_sessions (session_key, peer_id, peer_type, updated_at) VALUES (?, ?, 'cli', ?)", [
+      body.session_key,
+      live.id,
+      now,
+    ]);
     return { ok: true, peer_id: live.id, action: "mapped" };
   }
   if (mapped.peer_id === live.id) {
@@ -721,8 +864,12 @@ const sessionStart = db.transaction((body: SessionStartRequest, now: string): Se
 
   // The same conversation is open in another terminal that is still running:
   // that process owns the id. Leave both alone.
-  const owner = db.query("SELECT pid, pid_started FROM peers WHERE id = ?").get(mapped.peer_id) as { pid: number; pid_started: string | null } | null;
-  if (owner && owner.pid !== live.pid && isPidAlive(owner.pid) && isSameProcess(owner)) return { ok: false, reason: "conflict" };
+  const owner = db.query("SELECT pid, pid_started FROM peers WHERE id = ?").get(mapped.peer_id) as {
+    pid: number;
+    pid_started: string | null;
+  } | null;
+  if (owner && owner.pid !== live.pid && isPidAlive(owner.pid) && isSameProcess(owner))
+    return { ok: false, reason: "conflict" };
   recordLiveSession();
 
   // Move the live row onto the resumed session's id. Only the row moves: the
@@ -753,10 +900,17 @@ function handleSessionStart(body: SessionStartRequest): SessionStartResponse {
 /** Unread mail for the CLI peer a Claude Code process owns: the UserPromptSubmit nudge. */
 function handleUnread(body: { pid: number }): { count: number } {
   if (!Number.isInteger(body?.pid)) return { count: 0 };
-  const live = (db.query("SELECT id, pid, pid_started FROM peers WHERE pid = ? AND peer_type != 'desktop'")
-    .all(body.pid) as { id: string; pid: number; pid_started: string | null }[]).find(isSameProcess);
+  const live = (
+    db.query("SELECT id, pid, pid_started FROM peers WHERE pid = ? AND peer_type != 'desktop'").all(body.pid) as {
+      id: string;
+      pid: number;
+      pid_started: string | null;
+    }[]
+  ).find(isSameProcess);
   if (!live) return { count: 0 };
-  const row = db.query("SELECT COUNT(*) AS n FROM messages WHERE to_id = ? AND delivered = 0").get(live.id) as { n: number };
+  const row = db.query("SELECT COUNT(*) AS n FROM messages WHERE to_id = ? AND delivered = 0").get(live.id) as {
+    n: number;
+  };
   return { count: row.n };
 }
 
@@ -773,12 +927,19 @@ function handleHeartbeat(body: HeartbeatRequest): { ok: boolean; error?: string;
   touchPeerSessionByPeerId.run(now, body.id);
   if (!found) return { ok: false, error: `Peer ${body.id} not found` };
   // A desktop session learns about wake mode switches here, within one heartbeat.
-  const t = db.query("SELECT token FROM desktop_tokens WHERE peer_id = ? ORDER BY updated_at DESC").get(body.id) as { token: string } | null;
+  const t = db.query("SELECT token FROM desktop_tokens WHERE peer_id = ? ORDER BY updated_at DESC").get(body.id) as {
+    token: string;
+  } | null;
   return { ok: true, wake_url: t ? activeWakeUrl(t.token) : undefined };
 }
 
 function handleSetSummary(body: SetSummaryRequest): { ok: boolean; error?: string } {
-  const peer = db.query("SELECT id, cwd, git_root, peer_type FROM peers WHERE id = ?").get(body.id) as { id: string; cwd: string; git_root: string | null; peer_type: string } | null;
+  const peer = db.query("SELECT id, cwd, git_root, peer_type FROM peers WHERE id = ?").get(body.id) as {
+    id: string;
+    cwd: string;
+    git_root: string | null;
+    peer_type: string;
+  } | null;
   if (!peer) {
     return { ok: false, error: `Peer ${body.id} not found — re-register via /register` };
   }
@@ -844,14 +1005,29 @@ function notifyWatchers(to_id: string, frame: unknown): number {
   const payload = JSON.stringify(frame);
   let n = 0;
   for (const ws of set) {
-    try { ws.send(payload); n++; } catch { /* dead socket; close handler cleans up */ }
+    try {
+      ws.send(payload);
+      n++;
+    } catch {
+      /* dead socket; close handler cleans up */
+    }
   }
   return n;
 }
 
-function handleSendMessage(body: SendMessageRequest): { ok: boolean; error?: string; woke?: number; target_last_seen?: string; target_type?: string } {
+function handleSendMessage(body: SendMessageRequest): {
+  ok: boolean;
+  error?: string;
+  woke?: number;
+  target_last_seen?: string;
+  target_type?: string;
+} {
   // Verify target exists
-  const target = db.query("SELECT id, last_seen, peer_type FROM peers WHERE id = ?").get(body.to_id) as { id: string; last_seen: string; peer_type: string } | null;
+  const target = db.query("SELECT id, last_seen, peer_type FROM peers WHERE id = ?").get(body.to_id) as {
+    id: string;
+    last_seen: string;
+    peer_type: string;
+  } | null;
   if (!target) {
     return { ok: false, error: `Peer ${body.to_id} not found (stale or expired ID — call list_peers and re-send)` };
   }
@@ -859,7 +1035,9 @@ function handleSendMessage(body: SendMessageRequest): { ok: boolean; error?: str
   insertMessage.run(body.from_id, body.to_id, body.text, new Date().toISOString());
   const woke = notifyWatchers(body.to_id, { type: "wake" });
   if (WAKE_ON && target.peer_type === "desktop") {
-    const t = db.query("SELECT wake_topic, wake_mode FROM desktop_tokens WHERE peer_id = ? AND wake_topic IS NOT NULL").get(body.to_id) as { wake_topic: string; wake_mode: string | null } | null;
+    const t = db
+      .query("SELECT wake_topic, wake_mode FROM desktop_tokens WHERE peer_id = ? AND wake_topic IS NOT NULL")
+      .get(body.to_id) as { wake_topic: string; wake_mode: string | null } | null;
     if (t && effectiveWakeMode(t.wake_mode) === "active") publishWake(t.wake_topic);
   }
   return { ok: true, woke, target_last_seen: target.last_seen, target_type: target.peer_type };
@@ -916,7 +1094,7 @@ const ACTS_AS: Record<string, "id" | "from_id"> = {
 // `bun cli.ts send` speaks for the human at the terminal, not for a peer.
 const OPERATOR_ID = "cli";
 
-function gate(req: Request, path: string): Response | null {
+function gate(req: Request): Response | null {
   if (!ALLOWED_HOSTS.has(req.headers.get("host") ?? "")) {
     return new Response("forbidden host", { status: 403 });
   }
@@ -952,7 +1130,7 @@ Bun.serve<WatchData>({
     const url = new URL(req.url);
     const path = url.pathname;
 
-    const refused = gate(req, path);
+    const refused = gate(req);
     if (refused) return refused;
 
     if (req.method !== "POST") {
@@ -976,9 +1154,13 @@ Bun.serve<WatchData>({
     }
 
     try {
+      // biome-ignore lint/suspicious/noExplicitAny: each route casts the body to its own request type
       const body = (await req.json()) as Record<string, any>;
       if (!actsAsCaller(req, path, body)) {
-        return Response.json({ ok: false, error: `not authorized to act as ${String(body?.[ACTS_AS[path]!])}` }, { status: 403 });
+        return Response.json(
+          { ok: false, error: `not authorized to act as ${String(body?.[ACTS_AS[path]!])}` },
+          { status: 403 },
+        );
       }
 
       switch (path) {
@@ -1030,7 +1212,10 @@ Bun.serve<WatchData>({
   websocket: {
     open(ws) {
       let set = watchers.get(ws.data.peer);
-      if (!set) watchers.set(ws.data.peer, (set = new Set()));
+      if (!set) {
+        set = new Set();
+        watchers.set(ws.data.peer, set);
+      }
       set.add(ws);
       ws.send(JSON.stringify({ type: "watching", peer: ws.data.peer }));
     },
@@ -1039,7 +1224,9 @@ Bun.serve<WatchData>({
       set?.delete(ws);
       if (set && set.size === 0) watchers.delete(ws.data.peer);
     },
-    message() { /* watchers are receive-only */ },
+    message() {
+      /* watchers are receive-only */
+    },
   },
 });
 

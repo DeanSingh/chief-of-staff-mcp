@@ -44,7 +44,7 @@ export function ensureSecret(path: string): string {
   try {
     const hex = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("hex");
     // wx: never overwrite a secret another broker start already wrote.
-    writeFileSync(path, hex + "\n", { mode: 0o600, flag: "wx" });
+    writeFileSync(path, `${hex}\n`, { mode: 0o600, flag: "wx" });
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
   }

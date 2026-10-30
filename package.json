@@ -9,9 +9,13 @@
   "scripts": {
     "broker": "bun broker.ts",
     "server": "bun server.ts",
-    "test": "bun test"
+    "test": "bun test",
+    "lint": "biome ci .",
+    "typecheck": "tsc --noEmit",
+    "format": "biome format --write ."
   },
   "devDependencies": {
+    "@biomejs/biome": "2.6.4",
     "@types/bun": "latest"
   },
   "peerDependencies": {

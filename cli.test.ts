@@ -13,7 +13,10 @@ let n = 0;
 async function install(initial?: unknown) {
   const path = join(DIR, `settings-${n++}.json`);
   if (initial !== undefined) await Bun.write(path, JSON.stringify(initial));
-  const proc = Bun.spawn(["bun", `${import.meta.dir}/cli.ts`, "install-hooks", "--settings", path], { stdout: "pipe", stderr: "pipe" });
+  const proc = Bun.spawn(["bun", `${import.meta.dir}/cli.ts`, "install-hooks", "--settings", path], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
   expect(await proc.exited).toBe(0);
   return { path, read: async () => Bun.file(path).json() };
 }
@@ -29,7 +32,9 @@ describe("install-hooks", () => {
 
   test("also registers the unread nudge for UserPromptSubmit, once", async () => {
     const first = await install();
-    const again = Bun.spawn(["bun", `${import.meta.dir}/cli.ts`, "install-hooks", "--settings", first.path], { stdout: "pipe" });
+    const again = Bun.spawn(["bun", `${import.meta.dir}/cli.ts`, "install-hooks", "--settings", first.path], {
+      stdout: "pipe",
+    });
     await again.exited;
     const s = await first.read();
     expect(s.hooks.UserPromptSubmit).toEqual([{ hooks: [{ type: "command", command: OURS, timeout: 1 }] }]);
@@ -37,19 +42,23 @@ describe("install-hooks", () => {
 
   test("running twice leaves exactly one entry", async () => {
     const first = await install();
-    const proc = Bun.spawn(["bun", `${import.meta.dir}/cli.ts`, "install-hooks", "--settings", first.path], { stdout: "pipe" });
+    const proc = Bun.spawn(["bun", `${import.meta.dir}/cli.ts`, "install-hooks", "--settings", first.path], {
+      stdout: "pipe",
+    });
     await proc.exited;
     expect(commands(await first.read()).filter((c) => c === OURS)).toHaveLength(1);
   });
 
   test("preserves unrelated hooks and settings", async () => {
-    const s = await (await install({
-      model: "opus",
-      hooks: {
-        Stop: [{ hooks: [{ type: "command", command: "say done" }] }],
-        SessionStart: [{ matcher: "startup", hooks: [{ type: "command", command: "echo hi" }] }],
-      },
-    })).read();
+    const s = await (
+      await install({
+        model: "opus",
+        hooks: {
+          Stop: [{ hooks: [{ type: "command", command: "say done" }] }],
+          SessionStart: [{ matcher: "startup", hooks: [{ type: "command", command: "echo hi" }] }],
+        },
+      })
+    ).read();
     expect(s.model).toBe("opus");
     expect(s.hooks.Stop).toEqual([{ hooks: [{ type: "command", command: "say done" }] }]);
     expect(s.hooks.SessionStart[0]).toEqual({ matcher: "startup", hooks: [{ type: "command", command: "echo hi" }] });
@@ -57,9 +66,15 @@ describe("install-hooks", () => {
   });
 
   test("replaces a stale entry pointing at an old repo path", async () => {
-    const s = await (await install({
-      hooks: { SessionStart: [{ hooks: [{ type: "command", command: `bun "/old/place/hook.ts" # claude-peers`, timeout: 1 }] }] },
-    })).read();
+    const s = await (
+      await install({
+        hooks: {
+          SessionStart: [
+            { hooks: [{ type: "command", command: `bun "/old/place/hook.ts" # claude-peers`, timeout: 1 }] },
+          ],
+        },
+      })
+    ).read();
     expect(commands(s)).toEqual([OURS]);
   });
 
@@ -67,11 +82,15 @@ describe("install-hooks", () => {
     const dir = mkdtempSync(join(tmpdir(), "cp-cmd-"));
     try {
       const path = join(dir, "settings.json");
-      const run = () => Bun.spawn(["bun", `${import.meta.dir}/cli.ts`, "install-hooks", "--settings", path], { stdout: "pipe", stderr: "pipe" }).exited;
+      const run = () =>
+        Bun.spawn(["bun", `${import.meta.dir}/cli.ts`, "install-hooks", "--settings", path], {
+          stdout: "pipe",
+          stderr: "pipe",
+        }).exited;
       expect(await run()).toBe(0);
       const cmd = await Bun.file(join(dir, "commands", "desktop-wake.md")).text();
       expect(cmd).toContain(`Run \`bun '${import.meta.dir}/cli.ts' desktop-wake $ARGUMENTS\``);
-      expect(cmd).toContain(`allowed-tools: Bash(bun '${import.meta.dir}/cli.ts' desktop-wake:*)`);
+      expect(cmd).toContain(`allowed-tools: ${JSON.stringify(`Bash(bun '${import.meta.dir}/cli.ts' desktop-wake:*)`)}`);
       expect(await run()).toBe(0); // re-running rewrites ours
       expect(await Bun.file(join(dir, "commands", "desktop-wake.md")).text()).toBe(cmd);
 
@@ -79,6 +98,10 @@ describe("install-hooks", () => {
       await Bun.write(join(dir, "commands", "desktop-wake.md"), "mine");
       expect(await run()).toBe(0);
       expect(await Bun.file(join(dir, "commands", "desktop-wake.md")).text()).toBe("mine");
+      // Mentioning claude-peers doesn't make a file ours.
+      await Bun.write(join(dir, "commands", "desktop-wake.md"), "mine # claude-peers");
+      expect(await run()).toBe(0);
+      expect(await Bun.file(join(dir, "commands", "desktop-wake.md")).text()).toBe("mine # claude-peers");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -88,7 +111,10 @@ describe("install-hooks", () => {
     const path = join(DIR, `atomic-${n++}.json`);
     await Bun.write(path, JSON.stringify({ model: "opus" }));
     const before = statSync(path).ino;
-    const proc = Bun.spawn(["bun", `${import.meta.dir}/cli.ts`, "install-hooks", "--settings", path], { stdout: "pipe", stderr: "pipe" });
+    const proc = Bun.spawn(["bun", `${import.meta.dir}/cli.ts`, "install-hooks", "--settings", path], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
     expect(await proc.exited).toBe(0);
     // A new inode means the file was swapped in whole: a crash mid-write
     // leaves the old settings intact instead of a truncated file.
@@ -102,7 +128,10 @@ describe("install-hooks", () => {
     const link = join(DIR, `link-${n++}.json`);
     await Bun.write(real, JSON.stringify({ model: "opus" }));
     symlinkSync(real, link);
-    const proc = Bun.spawn(["bun", `${import.meta.dir}/cli.ts`, "install-hooks", "--settings", link], { stdout: "pipe", stderr: "pipe" });
+    const proc = Bun.spawn(["bun", `${import.meta.dir}/cli.ts`, "install-hooks", "--settings", link], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
     expect(await proc.exited).toBe(0);
     expect(lstatSync(link).isSymbolicLink()).toBe(true);
     expect(readlinkSync(link)).toBe(real);
@@ -113,7 +142,10 @@ describe("install-hooks", () => {
     const path = join(DIR, `mode-${n++}.json`);
     await Bun.write(path, JSON.stringify({ env: { TOKEN: "x" } }));
     chmodSync(path, 0o600);
-    const proc = Bun.spawn(["bun", `${import.meta.dir}/cli.ts`, "install-hooks", "--settings", path], { stdout: "pipe", stderr: "pipe" });
+    const proc = Bun.spawn(["bun", `${import.meta.dir}/cli.ts`, "install-hooks", "--settings", path], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
     expect(await proc.exited).toBe(0);
     expect(statSync(path).mode & 0o777).toBe(0o600);
   });
@@ -123,14 +155,20 @@ describe("broker commands", () => {
   test("send carries the install secret", async () => {
     const seen: Array<string | null> = [];
     const stub = Bun.serve({
-      port: 0, hostname: "127.0.0.1",
-      fetch(req) { seen.push(req.headers.get("authorization")); return Response.json({ ok: true }); },
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch(req) {
+        seen.push(req.headers.get("authorization"));
+        return Response.json({ ok: true });
+      },
     });
     try {
       const db = join(DIR, "send.db");
       const secret = ensureSecret(secretPath(db));
       const proc = Bun.spawn(["bun", `${import.meta.dir}/cli.ts`, "send", "abc12345", "hello"], {
-        env: { ...process.env, CLAUDE_PEERS_PORT: String(stub.port), CLAUDE_PEERS_DB: db }, stdout: "pipe", stderr: "pipe",
+        env: { ...process.env, CLAUDE_PEERS_PORT: String(stub.port), CLAUDE_PEERS_DB: db },
+        stdout: "pipe",
+        stderr: "pipe",
       });
       expect(await proc.exited).toBe(0);
       expect(seen).toEqual([`Bearer ${secret}`]);

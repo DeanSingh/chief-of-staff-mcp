@@ -14,11 +14,10 @@
  *   bun cli.ts desktop-wake    — Show or switch Desktop sessions' wake mode (active | passive)
  */
 
-import { chmodSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { authHeaders, peerSecret, readSecret, secretPath, PEER_HEADER } from "./shared/auth.ts";
-import { hookCommand } from "./hook.ts";
-import { mkdirSync } from "node:fs";
+import { chmodSync, mkdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { authHeaders, peerSecret, readSecret, secretPath, PEER_HEADER } from "./shared/auth.ts";
+import { desktopWakeCommand, hookCommand, isOurDesktopWakeCommand } from "./hook.ts";
 
 const BROKER_PORT = parseInt(process.env.CLAUDE_PEERS_PORT ?? "7899", 10);
 const BROKER_URL = `http://127.0.0.1:${BROKER_PORT}`;
@@ -39,21 +38,6 @@ async function brokerFetch<T>(path: string, body?: unknown): Promise<T> {
     throw new Error(`${res.status}: ${await res.text()}`);
   }
   return res.json() as Promise<T>;
-}
-
-/** The /desktop-wake slash command file, running the cli.ts in `dir`. */
-function desktopWakeCommand(dir: string): string {
-  const run = `bun '${`${dir}/cli.ts`.replace(/'/g, `'\\''`)}' desktop-wake`;
-  return `---
-description: Show or switch Claude Desktop agents' wake mode (active wakes them on new peer mail; passive costs nothing while idle)
-argument-hint: "[status | active | passive | default] [agent id or name] [--all]"
-allowed-tools: Bash(${run}:*)
----
-<!-- # claude-peers: written by \`bun cli.ts install-hooks\`; re-run it after moving the repo. -->
-
-Run \`${run} $ARGUMENTS\` and show the user its output. Do not run anything else.
-If the command fails, show the error as-is.
-`;
 }
 
 const cmd = process.argv[2];
@@ -180,9 +164,25 @@ switch (cmd) {
 
     let backoff = 1000;
     while (true) {
+      // A WebSocket client never sees why an upgrade failed, so ask over plain
+      // HTTP first: a refusal won't change by retrying, while 426 means the
+      // credentials passed and only the upgrade is missing.
+      const refused = await fetch(`${BROKER_URL}/watch/${encodeURIComponent(peerId)}`, {
+        headers,
+        signal: AbortSignal.timeout(3000),
+      }).then(
+        (res) => (res.status === 401 || res.status === 403 ? res.text() : null),
+        () => null, // broker down: the reconnect loop waits for it
+      );
+      if (refused !== null) {
+        console.error(`[claude-peers] Broker refused to watch ${peerId}: ${refused}`);
+        process.exit(1);
+      }
       await new Promise<void>((resolve) => {
         const ws = new WebSocket(wsUrl, { headers });
-        ws.onopen = () => { backoff = 1000; };
+        ws.onopen = () => {
+          backoff = 1000;
+        };
         ws.onmessage = (ev) => {
           try {
             if ((JSON.parse(String(ev.data)) as { type: string }).type !== "wake") return; // "watching" handshake etc.
@@ -191,7 +191,9 @@ switch (cmd) {
             // ignore malformed frame
           }
         };
-        ws.onerror = () => { /* onclose follows */ };
+        ws.onerror = () => {
+          /* onclose follows */
+        };
         ws.onclose = () => resolve();
       });
       console.error(`[claude-peers] Feed closed; reconnecting in ${backoff / 1000}s`);
@@ -214,7 +216,7 @@ switch (cmd) {
         .split("\n")
         .filter((p) => p);
       for (const pid of pids) {
-        process.kill(parseInt(pid), "SIGTERM");
+        process.kill(parseInt(pid, 10), "SIGTERM");
       }
       console.log("Broker stopped.");
     } catch {
@@ -233,14 +235,19 @@ switch (cmd) {
     const flag = process.argv.indexOf("--settings");
     const path = flag > 0 ? process.argv[flag + 1]! : `${process.env.HOME}/.claude/settings.json`;
     const file = Bun.file(path);
-    const settings: any = (await file.exists()) ? await file.json() : {};
+    // Only the hooks we own are typed; everything else passes through untouched.
+    type Hook = { command?: unknown; [k: string]: unknown };
+    type Group = { hooks?: Hook[]; [k: string]: unknown };
+    const settings: { hooks?: Record<string, Group[]>; [k: string]: unknown } = (await file.exists())
+      ? await file.json()
+      : {};
     const command = hookCommand(import.meta.dir);
 
     settings.hooks ??= {};
     for (const event of ["SessionStart", "UserPromptSubmit"]) {
-      const groups: any[] = (settings.hooks[event] ?? [])
-        .map((g: any) => ({ ...g, hooks: (g.hooks ?? []).filter((h: any) => !String(h.command ?? "").endsWith(MARK)) }))
-        .filter((g: any) => g.hooks.length > 0);
+      const groups: Group[] = (settings.hooks[event] ?? [])
+        .map((g) => ({ ...g, hooks: (g.hooks ?? []).filter((h) => !String(h.command ?? "").endsWith(MARK)) }))
+        .filter((g) => g.hooks.length > 0);
       groups.push({ hooks: [{ type: "command", command, timeout: 1 }] });
       settings.hooks[event] = groups;
     }
@@ -257,11 +264,13 @@ switch (cmd) {
     const tmp = `${real}.tmp-${process.pid}`;
     try {
       const mode = exists ? statSync(real).mode & 0o7777 : 0o644;
-      writeFileSync(tmp, JSON.stringify(settings, null, 2) + "\n", { mode, flag: "wx" });
+      writeFileSync(tmp, `${JSON.stringify(settings, null, 2)}\n`, { mode, flag: "wx" });
       chmodSync(tmp, mode);
       renameSync(tmp, real);
     } catch (e) {
-      try { unlinkSync(tmp); } catch {}
+      try {
+        unlinkSync(tmp);
+      } catch {}
       throw e;
     }
     console.log(`Installed SessionStart and UserPromptSubmit hooks in ${path}:\n  ${command}`);
@@ -271,11 +280,16 @@ switch (cmd) {
     // file of the same name that isn't ours is left alone.
     const cmdPath = `${dirname(path)}/commands/desktop-wake.md`;
     const cmdFile = Bun.file(cmdPath);
-    if ((await cmdFile.exists()) && !(await cmdFile.text()).includes(MARK)) {
+    const wakeCommand = desktopWakeCommand(import.meta.dir);
+    if (!wakeCommand) {
+      console.log(
+        `Skipped ${cmdPath}: this checkout's path has a line break or backtick. Move the repo to use /desktop-wake.`,
+      );
+    } else if ((await cmdFile.exists()) && !isOurDesktopWakeCommand(await cmdFile.text())) {
       console.log(`Skipped ${cmdPath}: it exists and isn't from claude-peers.`);
     } else {
       mkdirSync(dirname(cmdPath), { recursive: true });
-      await Bun.write(cmdPath, desktopWakeCommand(import.meta.dir));
+      await Bun.write(cmdPath, wakeCommand);
       console.log(`Installed /desktop-wake in ${cmdPath}`);
     }
     break;
@@ -285,7 +299,11 @@ switch (cmd) {
     // Active: Desktop sessions arm a Monitor that wakes them within seconds of
     // a message, at one turn per session per 30-minute re-arm. Passive: pull
     // only, no idle cost. An agent's own setting wins over the global one.
-    type Status = { global: string; relay: string | null; peers: { id: string; summary: string; mode: string; own_setting: boolean }[] };
+    type Status = {
+      global: string;
+      relay: string | null;
+      peers: { id: string; summary: string; mode: string; own_setting: boolean }[];
+    };
     const args = process.argv.slice(3);
     const all = args.includes("--all");
     const [mode, ...rest] = args.filter((a) => a !== "--all");
@@ -293,10 +311,14 @@ switch (cmd) {
     const show = (st: Status) => {
       console.log(`Global: ${st.global}${st.relay ? ` (relay ${st.relay})` : " (relay disabled)"}`);
       for (const p of st.peers) {
-        console.log(`  ${p.id}  ${(p.mode + (p.own_setting ? "*" : "")).padEnd(8)} ${p.summary.slice(0, 70) || "(no summary)"}`);
+        console.log(
+          `  ${p.id}  ${(p.mode + (p.own_setting ? "*" : "")).padEnd(8)} ${p.summary.slice(0, 70) || "(no summary)"}`,
+        );
       }
-      if (st.peers.some((p) => p.own_setting)) console.log("  * = the agent's own setting, which wins over the global one");
-      if (st.peers.some((p) => p.mode === "active")) console.log("Active agents re-arm their Monitor every 30 min, one turn each, even when idle.");
+      if (st.peers.some((p) => p.own_setting))
+        console.log("  * = the agent's own setting, which wins over the global one");
+      if (st.peers.some((p) => p.mode === "active"))
+        console.log("Active agents re-arm their Monitor every 30 min, one turn each, even when idle.");
     };
     try {
       if (!mode || mode === "status") {
@@ -304,18 +326,24 @@ switch (cmd) {
         break;
       }
       if (!["active", "passive", "default"].includes(mode) || (mode === "default" && !target)) {
-        console.error("Usage: bun cli.ts desktop-wake [status | active | passive] [agent id or name] [--all]\n       bun cli.ts desktop-wake default <agent>   (the agent follows the global mode again)\n--all also clears every agent's own setting.");
+        console.error(
+          "Usage: bun cli.ts desktop-wake [status | active | passive] [agent id or name] [--all]\n       bun cli.ts desktop-wake default <agent>   (the agent follows the global mode again)\n--all also clears every agent's own setting.",
+        );
         process.exit(1);
       }
       let peer_id: string | undefined;
       if (target) {
         const st = await brokerFetch<Status>("/wake-status", {});
         const exact = st.peers.find((p) => p.id === target);
-        const matches = exact ? [exact] : st.peers.filter((p) => p.summary.toLowerCase().includes(target.toLowerCase()));
+        const matches = exact
+          ? [exact]
+          : st.peers.filter((p) => p.summary.toLowerCase().includes(target.toLowerCase()));
         if (matches.length !== 1) {
-          console.error(matches.length
-            ? `"${target}" matches ${matches.length} Desktop sessions; pass an id:\n${matches.map((p) => `  ${p.id}  ${p.summary.slice(0, 70)}`).join("\n")}`
-            : `No Desktop session matches "${target}".`);
+          console.error(
+            matches.length
+              ? `"${target}" matches ${matches.length} Desktop sessions; pass an id:\n${matches.map((p) => `  ${p.id}  ${p.summary.slice(0, 70)}`).join("\n")}`
+              : `No Desktop session matches "${target}".`,
+          );
           process.exit(1);
         }
         peer_id = matches[0]!.id;

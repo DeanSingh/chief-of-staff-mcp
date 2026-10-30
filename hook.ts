@@ -32,6 +32,42 @@ export function hookCommand(dir: string): string {
   return `bun '${`${dir}/hook.ts`.replace(/'/g, `'\\''`)}' # claude-peers`;
 }
 
+/** The line that marks ~/.claude/commands/desktop-wake.md as install-hooks' own. */
+export const DESKTOP_WAKE_MARK =
+  "<!-- # claude-peers: written by `bun cli.ts install-hooks`; re-run it after moving the repo. -->";
+
+/**
+ * The /desktop-wake slash command file, running the cli.ts in `dir`, or null
+ * when `dir` holds a line break or backtick: the path is quoted into the
+ * Markdown body, where either would garble the instruction.
+ * Frontmatter values are JSON-quoted, which YAML reads as plain strings, so
+ * no path can add a key. A ")" in the path would end the Bash(...) rule
+ * early, so then the allowed-tools line is left out and Claude Code asks
+ * before running the command instead.
+ */
+export function desktopWakeCommand(dir: string): string | null {
+  if (/[\r\n`]/.test(dir)) return null;
+  const run = `bun '${`${dir}/cli.ts`.replace(/'/g, `'\\''`)}' desktop-wake`;
+  const frontmatter = [
+    `description: ${JSON.stringify("Show or switch Claude Desktop agents' wake mode (active wakes them on new peer mail; passive costs nothing while idle)")}`,
+    `argument-hint: ${JSON.stringify("[status | active | passive | default] [agent id or name] [--all]")}`,
+    ...(run.includes(")") ? [] : [`allowed-tools: ${JSON.stringify(`Bash(${run}:*)`)}`]),
+  ];
+  return `---
+${frontmatter.join("\n")}
+---
+${DESKTOP_WAKE_MARK}
+
+Run \`${run} $ARGUMENTS\` and show the user its output. Do not run anything else.
+If the command fails, show the error as-is.
+`;
+}
+
+/** True when `text` is a /desktop-wake file install-hooks wrote, so re-running may replace it. */
+export function isOurDesktopWakeCommand(text: string): boolean {
+  return text.split("\n").includes(DESKTOP_WAKE_MARK);
+}
+
 const HOST_COMM = process.env.CLAUDE_PEERS_HOST_COMM ?? "claude";
 
 /**

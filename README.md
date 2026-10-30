@@ -211,6 +211,20 @@ bun cli.ts desktop-wake      # show or switch Desktop agents' wake mode (see abo
 - Claude Code v2.1.80+
 - claude.ai login (channels require it — API key auth won't work)
 
+## Development
+
+```bash
+bun install
+bun test           # unit and end-to-end tests
+bun run lint       # Biome lint and format check
+bun run typecheck  # tsc --noEmit
+bun run format     # apply Biome formatting
+```
+
+CI runs lint, typecheck and tests on Linux and macOS for every pull request.
+To skip the formatting-only commit in `git blame`:
+`git config blame.ignoreRevsFile .git-blame-ignore-revs`.
+
 ## Attribution
 
 This project is a fork of **[claude-peers-mcp](https://github.com/louislva/claude-peers-mcp)** by

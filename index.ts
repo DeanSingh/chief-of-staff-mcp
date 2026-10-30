@@ -10,4 +10,4 @@
  * See README.md for setup and usage.
  */
 
-export { } // module marker
+export {}; // module marker

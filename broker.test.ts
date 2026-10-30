@@ -18,7 +18,8 @@ const relayHits: Array<{ path: string; body: string }> = [];
 let relayHang = false;
 let relayStatus = 200;
 const relay = Bun.serve({
-  port: 0, hostname: "127.0.0.1",
+  port: 0,
+  hostname: "127.0.0.1",
   async fetch(req) {
     relayHits.push({ path: new URL(req.url).pathname, body: await req.text() });
     if (relayHang) return new Promise<Response>(() => {});
@@ -26,16 +27,26 @@ const relay = Bun.serve({
   },
 });
 const BROKER_ENV = {
-  ...process.env, CLAUDE_PEERS_PORT: String(PORT), CLAUDE_PEERS_DB: DB, LC_ALL: "fr_FR.UTF-8", TZ: "Asia/Tokyo",
-  CLAUDE_PEERS_WAKE_RELAY: `http://127.0.0.1:${relay.port}`, CLAUDE_PEERS_WAKE_COALESCE_MS: "1000",
+  ...process.env,
+  CLAUDE_PEERS_PORT: String(PORT),
+  CLAUDE_PEERS_DB: DB,
+  LC_ALL: "fr_FR.UTF-8",
+  TZ: "Asia/Tokyo",
+  CLAUDE_PEERS_WAKE_RELAY: `http://127.0.0.1:${relay.port}`,
+  CLAUDE_PEERS_WAKE_COALESCE_MS: "1000",
 };
 
 // Every POST carries the install secret, and peer-scoped routes carry the
 // credential for the id they act as, the way server.ts sends them. Tests that
 // probe the gate itself use raw fetch.
 const SUBJECT: Record<string, string> = {
-  "/send-message": "from_id", "/heartbeat": "id", "/set-summary": "id", "/poll-messages": "id",
-  "/peek-messages": "id", "/ack-messages": "id", "/unregister": "id",
+  "/send-message": "from_id",
+  "/heartbeat": "id",
+  "/set-summary": "id",
+  "/poll-messages": "id",
+  "/peek-messages": "id",
+  "/ack-messages": "id",
+  "/unregister": "id",
 };
 function headersFor(db: string, path: string, body: unknown): Record<string, string> {
   const h: Record<string, string> = { "content-type": "application/json" };
@@ -48,7 +59,11 @@ function headersFor(db: string, path: string, body: unknown): Record<string, str
 }
 
 async function postTo<T>(http: string, db: string, path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${http}${path}`, { method: "POST", headers: headersFor(db, path, body), body: JSON.stringify(body) });
+  const res = await fetch(`${http}${path}`, {
+    method: "POST",
+    headers: headersFor(db, path, body),
+    body: JSON.stringify(body),
+  });
   return res.json() as Promise<T>;
 }
 const post = <T>(path: string, body: unknown) => postTo<T>(HTTP, DB, path, body);
@@ -62,7 +77,8 @@ async function restartBroker() {
   await Bun.sleep(200); // Give port time to be released by OS
   proc = Bun.spawn(["bun", `${import.meta.dir}/broker.ts`], {
     env: BROKER_ENV,
-    stdout: "ignore", stderr: "ignore",
+    stdout: "ignore",
+    stderr: "ignore",
   });
   for (let i = 0; i < 50; i++) {
     // If the new process already died (e.g. EADDRINUSE because the OS hadn't
@@ -71,7 +87,9 @@ async function restartBroker() {
     if (proc.exitCode !== null) {
       throw new Error("broker failed to bind on restart (port not released?)");
     }
-    try { if ((await fetch(`${HTTP}/health`)).ok) return; } catch {}
+    try {
+      if ((await fetch(`${HTTP}/health`)).ok) return;
+    } catch {}
     await Bun.sleep(100);
   }
   throw new Error("broker did not restart");
@@ -85,7 +103,12 @@ let pidCursor = 0;
 
 async function register(summary: string, peer_type: "cli" | "desktop"): Promise<string> {
   const r = await post<{ id: string }>("/register", {
-    pid: LIVE_PIDS[pidCursor++ % LIVE_PIDS.length], cwd: `/tmp/${summary}`, git_root: null, tty: null, summary, peer_type,
+    pid: LIVE_PIDS[pidCursor++ % LIVE_PIDS.length],
+    cwd: `/tmp/${summary}`,
+    git_root: null,
+    tty: null,
+    summary,
+    peer_type,
   });
   return r.id;
 }
@@ -97,7 +120,10 @@ function watchHeaders(peerId: string): Record<string, string> {
   return { authorization: `Bearer ${secret}`, [PEER_HEADER]: peerSecret(secret, peerId) };
 }
 
-function connectWatch(peerId: string, headers = watchHeaders(peerId)): Promise<{ ws: WebSocket; frames: unknown[]; next: () => Promise<unknown> }> {
+function connectWatch(
+  peerId: string,
+  headers = watchHeaders(peerId),
+): Promise<{ ws: WebSocket; frames: unknown[]; next: () => Promise<unknown> }> {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(`${WS}/watch/${peerId}`, { headers });
     const frames: unknown[] = [];
@@ -105,23 +131,29 @@ function connectWatch(peerId: string, headers = watchHeaders(peerId)): Promise<{
     ws.onmessage = (ev) => {
       const f = JSON.parse(String(ev.data));
       const w = waiters.shift();
-      if (w) w(f); else frames.push(f);
+      if (w) w(f);
+      else frames.push(f);
     };
     ws.onerror = (e) => reject(e);
-    ws.onopen = () => resolve({
-      ws, frames,
-      next: () => frames.length ? Promise.resolve(frames.shift()) : new Promise((r) => waiters.push(r)),
-    });
+    ws.onopen = () =>
+      resolve({
+        ws,
+        frames,
+        next: () => (frames.length ? Promise.resolve(frames.shift()) : new Promise((r) => waiters.push(r))),
+      });
   });
 }
 
 beforeAll(async () => {
   proc = Bun.spawn(["bun", `${import.meta.dir}/broker.ts`], {
     env: BROKER_ENV,
-    stdout: "ignore", stderr: "ignore",
+    stdout: "ignore",
+    stderr: "ignore",
   });
   for (let i = 0; i < 50; i++) {
-    try { if ((await fetch(`${HTTP}/health`)).ok) return; } catch {}
+    try {
+      if ((await fetch(`${HTTP}/health`)).ok) return;
+    } catch {}
     await Bun.sleep(100);
   }
   throw new Error("broker did not start");
@@ -131,7 +163,9 @@ afterAll(async () => {
   proc.kill();
   relay.stop(true);
   for (const suffix of ["", "-wal", "-shm", ".secret"]) {
-    try { await Bun.file(DB + suffix).delete(); } catch {}
+    try {
+      await Bun.file(DB + suffix).delete();
+    } catch {}
   }
 });
 
@@ -144,7 +178,9 @@ describe("broker /watch WebSocket feed", () => {
     expect(await w.next()).toEqual({ type: "watching", peer: finance });
 
     const send = await post<{ ok: boolean; woke: number }>("/send-message", {
-      from_id: cos, to_id: finance, text: "pull Q3 burn",
+      from_id: cos,
+      to_id: finance,
+      text: "pull Q3 burn",
     });
     expect(send).toMatchObject({ ok: true, woke: 1, target_type: "desktop" });
 
@@ -152,7 +188,9 @@ describe("broker /watch WebSocket feed", () => {
     expect(await w.next()).toEqual({ type: "wake" });
 
     // Wake is not delivery: message is still undelivered for check_messages.
-    const peek = await post<{ messages: Array<{ text: string; delivered: number }> }>("/peek-messages", { id: finance });
+    const peek = await post<{ messages: Array<{ text: string; delivered: number }> }>("/peek-messages", {
+      id: finance,
+    });
     expect(peek.messages).toHaveLength(1);
     expect(peek.messages[0]!.delivered).toBe(0);
     expect(peek.messages[0]!.text).toBe("pull Q3 burn");
@@ -166,8 +204,10 @@ describe("broker /watch WebSocket feed", () => {
     const res = await fetch(`${HTTP}/watch/${peerId}`, {
       headers: {
         ...headers,
-        connection: "Upgrade", upgrade: "websocket",
-        "sec-websocket-version": "13", "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==",
+        connection: "Upgrade",
+        upgrade: "websocket",
+        "sec-websocket-version": "13",
+        "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==",
       },
     });
     return res.status;
@@ -186,6 +226,47 @@ describe("broker /watch WebSocket feed", () => {
     expect(await upgrade(victim, { authorization })).toBe(403);
     // Another peer's valid credential doesn't open this peer's feed.
     expect(await upgrade(victim, { authorization, [PEER_HEADER]: watchHeaders(other)[PEER_HEADER]! })).toBe(403);
+  });
+
+  // `bun cli.ts watch` as a Monitor: a refusal must end it with the reason,
+  // not loop silently reconnecting forever.
+  function cliWatch(peerId: string, db: string) {
+    return Bun.spawn(["bun", `${import.meta.dir}/cli.ts`, "watch", peerId], {
+      env: { ...process.env, CLAUDE_PEERS_PORT: String(PORT), CLAUDE_PEERS_DB: db },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+  }
+
+  test("cli watch exits with the reason when the broker refuses its credentials", async () => {
+    const victim = await register("victim", "cli");
+    const otherDb = `${DB}-other`;
+    await Bun.write(secretPath(otherDb), "not-this-brokers-secret\n");
+    try {
+      const watch = cliWatch(victim, otherDb);
+      const timer = setTimeout(() => watch.kill(), 3000);
+      expect(await watch.exited).toBe(1);
+      clearTimeout(timer);
+      expect(await new Response(watch.stderr).text()).toContain("missing or wrong broker secret");
+    } finally {
+      await Bun.file(secretPath(otherDb)).delete();
+    }
+  }, 10_000);
+
+  test("cli watch with the right credentials stays up and prints a wake line", async () => {
+    const target = await register("watched", "cli");
+    const sender = await register("sender", "cli");
+    const watch = cliWatch(target, DB);
+    try {
+      await Bun.sleep(500); // preflight + subscribe
+      expect(watch.exitCode).toBeNull();
+      await post("/send-message", { from_id: sender, to_id: target, text: "hello" });
+      const reader = (watch.stdout as ReadableStream<Uint8Array>).getReader();
+      const { value } = await reader.read();
+      expect(new TextDecoder().decode(value)).toBe("[claude-peers] new peer message: call check_messages to read it\n");
+    } finally {
+      watch.kill();
+    }
   });
 
   test("an uncredentialed watcher never sees message text", async () => {
@@ -217,9 +298,16 @@ describe("broker /watch WebSocket feed", () => {
   });
 
   test("desktop peers keyed by session_token keep their id across server processes", async () => {
-    const reg = (pid: number, summary: string) => post<{ id: string; restored_summary?: string }>("/register", {
-      pid, cwd: "cs_tok1", git_root: null, tty: null, summary, peer_type: "desktop", session_token: "cs_tok1",
-    });
+    const reg = (pid: number, summary: string) =>
+      post<{ id: string; restored_summary?: string }>("/register", {
+        pid,
+        cwd: "cs_tok1",
+        git_root: null,
+        tty: null,
+        summary,
+        peer_type: "desktop",
+        session_token: "cs_tok1",
+      });
     const first = await reg(LIVE_PIDS[0]!, "Finance agent");
     // A different MCP server process (different pid) re-registers the same token
     // with an empty summary — same id, and the summary the session set survives.
@@ -229,15 +317,26 @@ describe("broker /watch WebSocket feed", () => {
     // Same token with a new summary updates in place, still same id.
     const third = await reg(LIVE_PIDS[0]!, "Finance agent — closing Q3");
     expect(third.id).toBe(first.id);
-    const peers = await post<Array<{ id: string; summary: string }>>("/list-peers", { scope: "machine", cwd: "/", git_root: null });
+    const peers = await post<Array<{ id: string; summary: string }>>("/list-peers", {
+      scope: "machine",
+      cwd: "/",
+      git_root: null,
+    });
     expect(peers.filter((p) => p.id === first.id)).toHaveLength(1);
     expect(peers.find((p) => p.id === first.id)!.summary).toBe("Finance agent — closing Q3");
   });
 
   test("a reaped desktop peer resurrects under its original id with mail intact", async () => {
-    const reg = () => post<{ id: string }>("/register", {
-      pid: LIVE_PIDS[0]!, cwd: "cs_resur", git_root: null, tty: null, summary: "PM agent", peer_type: "desktop", session_token: "cs_resur",
-    });
+    const reg = () =>
+      post<{ id: string }>("/register", {
+        pid: LIVE_PIDS[0]!,
+        cwd: "cs_resur",
+        git_root: null,
+        tty: null,
+        summary: "PM agent",
+        peer_type: "desktop",
+        session_token: "cs_resur",
+      });
     const first = await reg();
     const sender = await register("Sender", "cli");
     await post("/send-message", { from_id: sender, to_id: first.id, text: "while you were out" });
@@ -252,35 +351,62 @@ describe("broker /watch WebSocket feed", () => {
   });
 
   test("heartbeat for a reaped peer says not found, so its server can re-register it", async () => {
-    const reg = () => post<{ id: string }>("/register", {
-      pid: LIVE_PIDS[0]!, cwd: "cs_beat", git_root: null, tty: null, summary: "", peer_type: "desktop", session_token: "cs_beat",
-    });
+    const reg = () =>
+      post<{ id: string }>("/register", {
+        pid: LIVE_PIDS[0]!,
+        cwd: "cs_beat",
+        git_root: null,
+        tty: null,
+        summary: "",
+        peer_type: "desktop",
+        session_token: "cs_beat",
+      });
     const first = await reg();
-    const live = await fetch(`${HTTP}/heartbeat`, { method: "POST", headers: headersFor(DB, "/heartbeat", { id: first.id }), body: JSON.stringify({ id: first.id }) });
+    const live = await fetch(`${HTTP}/heartbeat`, {
+      method: "POST",
+      headers: headersFor(DB, "/heartbeat", { id: first.id }),
+      body: JSON.stringify({ id: first.id }),
+    });
     expect(live.status).toBe(200);
     expect(await live.json()).toMatchObject({ ok: true });
 
     await post("/unregister", { id: first.id }); // as cleanStalePeers does
-    const reaped = await fetch(`${HTTP}/heartbeat`, { method: "POST", headers: headersFor(DB, "/heartbeat", { id: first.id }), body: JSON.stringify({ id: first.id }) });
+    const reaped = await fetch(`${HTTP}/heartbeat`, {
+      method: "POST",
+      headers: headersFor(DB, "/heartbeat", { id: first.id }),
+      body: JSON.stringify({ id: first.id }),
+    });
     expect(reaped.status).toBe(404);
     expect(await reaped.json()).toMatchObject({ ok: false, error: expect.stringContaining("not found") });
     expect((await reg()).id).toBe(first.id);
   });
 
   test("cli re-register with the same pid keeps the same id", async () => {
-    const reg = (summary: string) => post<{ id: string }>("/register", {
-      pid: LIVE_PIDS[1]!, cwd: "/tmp/cli-stable", git_root: null, tty: "ttys099", summary, peer_type: "cli",
-    });
+    const reg = (summary: string) =>
+      post<{ id: string }>("/register", {
+        pid: LIVE_PIDS[1]!,
+        cwd: "/tmp/cli-stable",
+        git_root: null,
+        tty: "ttys099",
+        summary,
+        peer_type: "cli",
+      });
     const a = await reg("QA agent");
     const b = await reg(""); // MCP server respawned by /mcp reconnect
     expect(b.id).toBe(a.id);
   });
 
   test("cli peers keyed by session_key keep their id across pid changes", async () => {
-    const reg = (pid: number, summary: string) => post<{ id: string; restored_summary?: string }>("/register", {
-      pid, cwd: "/tmp/cli-sess", git_root: null, tty: "ttys100", summary,
-      peer_type: "cli", session_key: "sess-aaaa-1111",
-    });
+    const reg = (pid: number, summary: string) =>
+      post<{ id: string; restored_summary?: string }>("/register", {
+        pid,
+        cwd: "/tmp/cli-sess",
+        git_root: null,
+        tty: "ttys100",
+        summary,
+        peer_type: "cli",
+        session_key: "sess-aaaa-1111",
+      });
     const doomed = Bun.spawn(["sleep", "30"]);
     const first = await reg(doomed.pid, "CA1");
     doomed.kill();
@@ -302,8 +428,12 @@ describe("broker /watch WebSocket feed", () => {
       // Simulates every existing session at the moment this fix lands: a
       // peers row keyed on pid alone, no peer_sessions mapping at all.
       const before = await post<{ id: string }>("/register", {
-        pid, cwd: "/tmp/upgrade-cli", git_root: null, tty: null,
-        summary: "Pre-upgrade agent", peer_type: "cli",
+        pid,
+        cwd: "/tmp/upgrade-cli",
+        git_root: null,
+        tty: null,
+        summary: "Pre-upgrade agent",
+        peer_type: "cli",
       });
       const sender = await register("Sender", "cli");
       await post("/send-message", { from_id: sender, to_id: before.id, text: "queued before upgrade" });
@@ -311,8 +441,13 @@ describe("broker /watch WebSocket feed", () => {
       // The upgraded server reconnects: SAME pid, but now sends a session_key
       // for the first time. It must adopt the existing peer, not mint a new one.
       const after = await post<{ id: string }>("/register", {
-        pid, cwd: "/tmp/upgrade-cli", git_root: null, tty: null,
-        summary: "", peer_type: "cli", session_key: "sess-upgrade-adopt-1",
+        pid,
+        cwd: "/tmp/upgrade-cli",
+        git_root: null,
+        tty: null,
+        summary: "",
+        peer_type: "cli",
+        session_key: "sess-upgrade-adopt-1",
       });
 
       expect(after.id).toBe(before.id);
@@ -329,8 +464,13 @@ describe("broker /watch WebSocket feed", () => {
       doomed.kill();
       await doomed.exited;
       const later = await post<{ id: string }>("/register", {
-        pid: restarted.pid, cwd: "/tmp/upgrade-cli", git_root: null, tty: null,
-        summary: "", peer_type: "cli", session_key: "sess-upgrade-adopt-1",
+        pid: restarted.pid,
+        cwd: "/tmp/upgrade-cli",
+        git_root: null,
+        tty: null,
+        summary: "",
+        peer_type: "cli",
+        session_key: "sess-upgrade-adopt-1",
       });
       expect(later.id).toBe(before.id);
     } finally {
@@ -342,10 +482,16 @@ describe("broker /watch WebSocket feed", () => {
   });
 
   test("a reaped cli peer resurrects under its original id with its cached summary restored", async () => {
-    const reg = (summary: string) => post<{ id: string; restored_summary?: string }>("/register", {
-      pid: LIVE_PIDS[0]!, cwd: "/tmp/cli-resur", git_root: null, tty: "ttys102", summary,
-      peer_type: "cli", session_key: "sess-resur-1",
-    });
+    const reg = (summary: string) =>
+      post<{ id: string; restored_summary?: string }>("/register", {
+        pid: LIVE_PIDS[0]!,
+        cwd: "/tmp/cli-resur",
+        git_root: null,
+        tty: "ttys102",
+        summary,
+        peer_type: "cli",
+        session_key: "sess-resur-1",
+      });
     const first = await reg("Ops agent");
     // Simulate heartbeat expiry: the peers row is deleted (as cleanStalePeers
     // does), but peer_sessions and the workspace summary cache remain.
@@ -355,7 +501,11 @@ describe("broker /watch WebSocket feed", () => {
     const back = await reg("");
     expect(back.id).toBe(first.id);
     expect(back.restored_summary).toBe("Ops agent");
-    const peers = await post<Array<{ id: string; summary: string }>>("/list-peers", { scope: "machine", cwd: "/", git_root: null });
+    const peers = await post<Array<{ id: string; summary: string }>>("/list-peers", {
+      scope: "machine",
+      cwd: "/",
+      git_root: null,
+    });
     expect(peers.find((p) => p.id === first.id)!.summary).toBe("Ops agent");
   });
 
@@ -364,8 +514,13 @@ describe("broker /watch WebSocket feed", () => {
     const deadPid = doomed.pid;
 
     const victim = await post<{ id: string }>("/register", {
-      pid: deadPid, cwd: "/tmp/dead-cli", git_root: null, tty: null,
-      summary: "About to die", peer_type: "cli", session_key: "sess-dead-9999",
+      pid: deadPid,
+      cwd: "/tmp/dead-cli",
+      git_root: null,
+      tty: null,
+      summary: "About to die",
+      peer_type: "cli",
+      session_key: "sess-dead-9999",
     });
     const sender = await register("Sender", "cli");
     await post("/send-message", { from_id: sender, to_id: victim.id, text: "answer you missed" });
@@ -385,8 +540,13 @@ describe("broker /watch WebSocket feed", () => {
 
     // Session registers and is alive.
     const before = await post<{ id: string }>("/register", {
-      pid: deadPid, cwd: "/tmp/restart", git_root: null, tty: "ttys200",
-      summary: "CA1", peer_type: "cli", session_key: KEY,
+      pid: deadPid,
+      cwd: "/tmp/restart",
+      git_root: null,
+      tty: "ttys200",
+      summary: "CA1",
+      peer_type: "cli",
+      session_key: KEY,
     });
 
     // Someone answers it WHILE IT IS STILL ALIVE. This is the only case there
@@ -407,8 +567,13 @@ describe("broker /watch WebSocket feed", () => {
 
     // It comes back: same session_key, brand new pid.
     const after = await post<{ id: string }>("/register", {
-      pid: LIVE_PIDS[0]!, cwd: "/tmp/restart", git_root: null, tty: "ttys201",
-      summary: "", peer_type: "cli", session_key: KEY,
+      pid: LIVE_PIDS[0]!,
+      cwd: "/tmp/restart",
+      git_root: null,
+      tty: "ttys201",
+      summary: "",
+      peer_type: "cli",
+      session_key: KEY,
     });
 
     expect(after.id).toBe(before.id);
@@ -423,8 +588,13 @@ describe("broker /watch WebSocket feed", () => {
     const KEY = "sess-listreap-7777";
 
     const before = await post<{ id: string }>("/register", {
-      pid: deadPid, cwd: "/tmp/listreap", git_root: null, tty: null,
-      summary: "Reaped by listing", peer_type: "cli", session_key: KEY,
+      pid: deadPid,
+      cwd: "/tmp/listreap",
+      git_root: null,
+      tty: null,
+      summary: "Reaped by listing",
+      peer_type: "cli",
+      session_key: KEY,
     });
     doomed.kill();
     await doomed.exited;
@@ -434,8 +604,13 @@ describe("broker /watch WebSocket feed", () => {
 
     // The listing must not have cost the session its identity.
     const after = await post<{ id: string }>("/register", {
-      pid: LIVE_PIDS[0]!, cwd: "/tmp/listreap", git_root: null, tty: null,
-      summary: "", peer_type: "cli", session_key: KEY,
+      pid: LIVE_PIDS[0]!,
+      cwd: "/tmp/listreap",
+      git_root: null,
+      tty: null,
+      summary: "",
+      peer_type: "cli",
+      session_key: KEY,
     });
     expect(after.id).toBe(before.id);
   });
@@ -461,15 +636,28 @@ describe("broker /watch WebSocket feed", () => {
     const { Database } = await import("bun:sqlite");
     const readDb = new Database(DB, { readonly: true });
     const updatedAt = (key: string) =>
-      new Date((readDb.query("SELECT updated_at FROM peer_sessions WHERE session_key = ?").get(key) as { updated_at: string }).updated_at).getTime();
+      new Date(
+        (readDb.query("SELECT updated_at FROM peer_sessions WHERE session_key = ?").get(key) as { updated_at: string })
+          .updated_at,
+      ).getTime();
     try {
       const reg = await post<{ id: string }>("/register", {
-        pid: busyProc.pid, cwd: "/tmp/heartbeat-refresh", git_root: null, tty: null,
-        summary: "Heartbeating agent", peer_type: "cli", session_key: KEY,
+        pid: busyProc.pid,
+        cwd: "/tmp/heartbeat-refresh",
+        git_root: null,
+        tty: null,
+        summary: "Heartbeating agent",
+        peer_type: "cli",
+        session_key: KEY,
       });
       const idle = await post<{ id: string }>("/register", {
-        pid: idleProc.pid, cwd: "/tmp/heartbeat-idle", git_root: null, tty: null,
-        summary: "Idle agent", peer_type: "cli", session_key: IDLE_KEY,
+        pid: idleProc.pid,
+        cwd: "/tmp/heartbeat-idle",
+        git_root: null,
+        tty: null,
+        summary: "Idle agent",
+        peer_type: "cli",
+        session_key: IDLE_KEY,
       });
       expect(idle.id).not.toBe(reg.id);
 
@@ -496,8 +684,10 @@ describe("broker /watch WebSocket feed", () => {
     const res = await fetch(`${HTTP}/watch/anyone`, {
       headers: {
         origin: "http://evil.example",
-        connection: "Upgrade", upgrade: "websocket",
-        "sec-websocket-version": "13", "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==",
+        connection: "Upgrade",
+        upgrade: "websocket",
+        "sec-websocket-version": "13",
+        "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==",
       },
     });
     expect(res.status).toBe(403);
@@ -510,7 +700,8 @@ describe("broker /watch WebSocket feed", () => {
     const MIGRATION_TEST_DB = `${import.meta.dir}/.test-broker-migration-${MIGRATION_TEST_PORT}.db`;
     const MIGRATION_TEST_HTTP = `http://127.0.0.1:${MIGRATION_TEST_PORT}`;
 
-    const migrationPost = <T>(path: string, body: unknown) => postTo<T>(MIGRATION_TEST_HTTP, MIGRATION_TEST_DB, path, body);
+    const migrationPost = <T>(path: string, body: unknown) =>
+      postTo<T>(MIGRATION_TEST_HTTP, MIGRATION_TEST_DB, path, body);
 
     // Step 1: Seed a temp DB with a desktop_tokens row (no peer_sessions table yet)
     const { Database } = await import("bun:sqlite");
@@ -523,10 +714,13 @@ describe("broker /watch WebSocket feed", () => {
       )
     `);
     const seedTime = new Date().toISOString();
-    seedDb.run(`
+    seedDb.run(
+      `
       INSERT INTO desktop_tokens (token, peer_id, updated_at)
       VALUES (?, ?, ?)
-    `, ["mig_test_token", "mig_peer_xyz", seedTime]);
+    `,
+      ["mig_test_token", "mig_peer_xyz", seedTime],
+    );
     seedDb.close();
 
     let migProc: ReturnType<typeof Bun.spawn> | null = null;
@@ -535,13 +729,19 @@ describe("broker /watch WebSocket feed", () => {
       // Step 2: Spawn a broker against this seeded DB
       migProc = Bun.spawn(["bun", `${import.meta.dir}/broker.ts`], {
         env: { ...process.env, CLAUDE_PEERS_PORT: String(MIGRATION_TEST_PORT), CLAUDE_PEERS_DB: MIGRATION_TEST_DB },
-        stdout: "ignore", stderr: "ignore",
+        stdout: "ignore",
+        stderr: "ignore",
       });
 
       // Step 3: Wait for startup
       let started = false;
       for (let i = 0; i < 50; i++) {
-        try { if ((await fetch(`${MIGRATION_TEST_HTTP}/health`)).ok) { started = true; break; } } catch {}
+        try {
+          if ((await fetch(`${MIGRATION_TEST_HTTP}/health`)).ok) {
+            started = true;
+            break;
+          }
+        } catch {}
         await Bun.sleep(100);
       }
       if (!started) throw new Error("Migration broker did not start");
@@ -558,8 +758,13 @@ describe("broker /watch WebSocket feed", () => {
       // call also exercises the CLI resurrection branch of handleRegister
       // (mapped session_key, no live peer row).
       const reg1 = await migrationPost<{ id: string }>("/register", {
-        pid: process.pid, cwd: "/tmp/mig", git_root: null, tty: null,
-        summary: "", peer_type: "cli", session_key: "mig_test_token",
+        pid: process.pid,
+        cwd: "/tmp/mig",
+        git_root: null,
+        tty: null,
+        summary: "",
+        peer_type: "cli",
+        session_key: "mig_test_token",
       });
       expect(reg1.id).toBe("mig_peer_xyz");
 
@@ -571,13 +776,19 @@ describe("broker /watch WebSocket feed", () => {
       // Step 5b: Spawn second broker on same port
       migProc = Bun.spawn(["bun", `${import.meta.dir}/broker.ts`], {
         env: { ...process.env, CLAUDE_PEERS_PORT: String(MIGRATION_TEST_PORT), CLAUDE_PEERS_DB: MIGRATION_TEST_DB },
-        stdout: "ignore", stderr: "ignore",
+        stdout: "ignore",
+        stderr: "ignore",
       });
 
       // Step 6: Wait for restart
       let restarted = false;
       for (let i = 0; i < 50; i++) {
-        try { if ((await fetch(`${MIGRATION_TEST_HTTP}/health`)).ok) { restarted = true; break; } } catch {}
+        try {
+          if ((await fetch(`${MIGRATION_TEST_HTTP}/health`)).ok) {
+            restarted = true;
+            break;
+          }
+        } catch {}
         await Bun.sleep(100);
       }
       if (!restarted) throw new Error("Migration broker (restart) did not start");
@@ -591,21 +802,31 @@ describe("broker /watch WebSocket feed", () => {
       // holds the right mapping after a second migration run, not a second
       // pass through the resurrection branch.
       const reg2 = await migrationPost<{ id: string }>("/register", {
-        pid: process.pid, cwd: "/tmp/mig", git_root: null, tty: null,
-        summary: "", peer_type: "cli", session_key: "mig_test_token",
+        pid: process.pid,
+        cwd: "/tmp/mig",
+        git_root: null,
+        tty: null,
+        summary: "",
+        peer_type: "cli",
+        session_key: "mig_test_token",
       });
       expect(reg2.id).toBe("mig_peer_xyz");
-
     } finally {
       // Cleanup - guaranteed to run even if assertions fail
       if (migProc) {
-        try { migProc.kill(); } catch {}
-        try { await migProc.exited; } catch {} // Wait for process to actually exit
+        try {
+          migProc.kill();
+        } catch {}
+        try {
+          await migProc.exited;
+        } catch {} // Wait for process to actually exit
       }
       // Delete temp files - only after process is truly gone
       for (const suffix of ["", "-wal", "-shm", ".secret"]) {
         const filePath = MIGRATION_TEST_DB + suffix;
-        try { await Bun.file(filePath).delete(); } catch {} // Missing file is OK
+        try {
+          await Bun.file(filePath).delete();
+        } catch {} // Missing file is OK
       }
     }
   });
@@ -617,14 +838,32 @@ describe("broker /watch WebSocket feed", () => {
 describe("/session-start", () => {
   type SSRes = { ok: boolean; peer_id?: string; action?: string; reason?: string };
   const sleepers: ReturnType<typeof Bun.spawn>[] = [];
-  const livePid = () => { const p = Bun.spawn(["sleep", "30"]); sleepers.push(p); return p.pid; };
-  const regCli = (pid: number, session_key: string, summary = "") => post<{ id: string }>("/register", {
-    pid, cwd: "/tmp/ss", git_root: null, tty: null, summary, peer_type: "cli", session_key,
-  }).then((r) => r.id);
+  const livePid = () => {
+    const p = Bun.spawn(["sleep", "30"]);
+    sleepers.push(p);
+    return p.pid;
+  };
+  const regCli = (pid: number, session_key: string, summary = "") =>
+    post<{ id: string }>("/register", {
+      pid,
+      cwd: "/tmp/ss",
+      git_root: null,
+      tty: null,
+      summary,
+      peer_type: "cli",
+      session_key,
+    }).then((r) => r.id);
   const ss = (body: unknown) => post<SSRes>("/session-start", body);
-  const machine = () => post<Array<{ id: string; pid: number }>>("/list-peers", { scope: "machine", cwd: "/", git_root: null });
+  const machine = () =>
+    post<Array<{ id: string; pid: number }>>("/list-peers", { scope: "machine", cwd: "/", git_root: null });
 
-  afterAll(() => { for (const p of sleepers) { try { p.kill(); } catch {} } });
+  afterAll(() => {
+    for (const p of sleepers) {
+      try {
+        p.kill();
+      } catch {}
+    }
+  });
 
   test("no live peer: no rows created", async () => {
     const before = (await machine()).length;
@@ -647,8 +886,11 @@ describe("/session-start", () => {
   test("same key is a noop", async () => {
     const pid = livePid();
     const id = await regCli(pid, "ss-noop");
-    expect(await ss({ session_key: "ss-noop", pid: pid, source: "startup" }))
-      .toEqual({ ok: true, peer_id: id, action: "noop" });
+    expect(await ss({ session_key: "ss-noop", pid: pid, source: "startup" })).toEqual({
+      ok: true,
+      peer_id: id,
+      action: "noop",
+    });
   });
 
   test("resume rekeys the live process onto the session's original id", async () => {
@@ -713,8 +955,10 @@ describe("/session-start", () => {
     const idA = await regCli(livePid(), "ss-orig-c");
     const pidB = livePid();
     const idB = await regCli(pidB, "ss-launch-c");
-    expect(await ss({ session_key: "ss-orig-c", pid: pidB, source: "resume" }))
-      .toEqual({ ok: false, reason: "conflict" });
+    expect(await ss({ session_key: "ss-orig-c", pid: pidB, source: "resume" })).toEqual({
+      ok: false,
+      reason: "conflict",
+    });
     const ids = (await machine()).map((p) => p.id);
     expect(ids).toContain(idA);
     expect(ids).toContain(idB);
@@ -725,8 +969,10 @@ describe("/session-start", () => {
     const idA = await regCli(procA.pid, "ss-orig-c2");
     const pidB = livePid();
     const idB = await regCli(pidB, "ss-launch-c2");
-    expect(await ss({ session_key: "ss-orig-c2", pid: pidB, source: "resume" }))
-      .toEqual({ ok: false, reason: "conflict" });
+    expect(await ss({ session_key: "ss-orig-c2", pid: pidB, source: "resume" })).toEqual({
+      ok: false,
+      reason: "conflict",
+    });
     // Once A is gone, B re-registering under its own launch key must still be
     // B. Had the refused call been recorded, B would now resolve to A's id.
     procA.kill();
@@ -739,10 +985,18 @@ describe("/session-start", () => {
   test("desktop rows are never matched", async () => {
     const pid = livePid();
     await post("/register", {
-      pid, cwd: "cs_ss_desktop", git_root: null, tty: null, summary: "", peer_type: "desktop", session_token: "cs_ss_desktop",
+      pid,
+      cwd: "cs_ss_desktop",
+      git_root: null,
+      tty: null,
+      summary: "",
+      peer_type: "desktop",
+      session_token: "cs_ss_desktop",
     });
-    expect(await ss({ session_key: "ss-desk", pid: pid, source: "startup" }))
-      .toEqual({ ok: false, reason: "no_live_peer" });
+    expect(await ss({ session_key: "ss-desk", pid: pid, source: "startup" })).toEqual({
+      ok: false,
+      reason: "no_live_peer",
+    });
   });
 
   test("malformed body → bad_request", async () => {
@@ -753,12 +1007,20 @@ describe("/session-start", () => {
   // new process someone else's identity. Rows record the process start time.
   const { Database } = require("bun:sqlite");
   const setStarted = (id: string, v: string | null) => {
-    const d = new Database(DB); d.run("UPDATE peers SET pid_started = ? WHERE id = ?", [v, id]); d.close();
+    const d = new Database(DB);
+    d.run("UPDATE peers SET pid_started = ? WHERE id = ?", [v, id]);
+    d.close();
   };
   // Recorded in the C locale and UTC whatever the broker's own environment is
-// (it inherits whichever session auto-launched it), or a broker restart under
-// another LANG/TZ would make every stored value mismatch.
-const startedOf = (pid: number) => new TextDecoder().decode(Bun.spawnSync(["ps", "-o", "lstart=", "-p", String(pid)], { env: { ...process.env, LC_ALL: "C", TZ: "UTC" } }).stdout).trim();
+  // (it inherits whichever session auto-launched it), or a broker restart under
+  // another LANG/TZ would make every stored value mismatch.
+  const startedOf = (pid: number) =>
+    new TextDecoder()
+      .decode(
+        Bun.spawnSync(["ps", "-o", "lstart=", "-p", String(pid)], { env: { ...process.env, LC_ALL: "C", TZ: "UTC" } })
+          .stdout,
+      )
+      .trim();
 
   test("CLI rows record the process start time", async () => {
     const pid = livePid();
@@ -771,9 +1033,23 @@ const startedOf = (pid: number) => new TextDecoder().decode(Bun.spawnSync(["ps",
 
   test("register does not adopt a pid-matched row left by a reused pid", async () => {
     const pid = livePid();
-    const old = await post<{ id: string }>("/register", { pid, cwd: "/tmp/reuse", git_root: null, tty: null, summary: "", peer_type: "cli" });
+    const old = await post<{ id: string }>("/register", {
+      pid,
+      cwd: "/tmp/reuse",
+      git_root: null,
+      tty: null,
+      summary: "",
+      peer_type: "cli",
+    });
     setStarted(old.id, "Mon Jan  1 00:00:00 2001");
-    const again = await post<{ id: string }>("/register", { pid, cwd: "/tmp/reuse", git_root: null, tty: null, summary: "", peer_type: "cli" });
+    const again = await post<{ id: string }>("/register", {
+      pid,
+      cwd: "/tmp/reuse",
+      git_root: null,
+      tty: null,
+      summary: "",
+      peer_type: "cli",
+    });
     expect(again.id).not.toBe(old.id);
   });
 
@@ -781,16 +1057,21 @@ const startedOf = (pid: number) => new TextDecoder().decode(Bun.spawnSync(["ps",
     const pid = livePid();
     const id = await regCli(pid, "ss-reuse");
     setStarted(id, "Mon Jan  1 00:00:00 2001");
-    expect(await ss({ session_key: "ss-reuse-new", pid: pid, source: "resume" }))
-      .toEqual({ ok: false, reason: "no_live_peer" });
+    expect(await ss({ session_key: "ss-reuse-new", pid: pid, source: "resume" })).toEqual({
+      ok: false,
+      reason: "no_live_peer",
+    });
   });
 
   test("rows with no recorded start time (pre-upgrade) still match", async () => {
     const pid = livePid();
     const id = await regCli(pid, "ss-legacy");
     setStarted(id, null);
-    expect(await ss({ session_key: "ss-legacy-new", pid: pid, source: "clear" }))
-      .toEqual({ ok: true, peer_id: id, action: "mapped" });
+    expect(await ss({ session_key: "ss-legacy-new", pid: pid, source: "clear" })).toEqual({
+      ok: true,
+      peer_id: id,
+      action: "mapped",
+    });
   });
 
   test("an owner whose pid is alive but reused is not a conflict", async () => {
@@ -798,8 +1079,11 @@ const startedOf = (pid: number) => new TextDecoder().decode(Bun.spawnSync(["ps",
     setStarted(idA, "Mon Jan  1 00:00:00 2001");
     const pidB = livePid();
     await regCli(pidB, "ss-launch-u");
-    expect(await ss({ session_key: "ss-orig-u", pid: pidB, source: "resume" }))
-      .toEqual({ ok: true, peer_id: idA, action: "rekeyed" });
+    expect(await ss({ session_key: "ss-orig-u", pid: pidB, source: "resume" })).toEqual({
+      ok: true,
+      peer_id: idA,
+      action: "rekeyed",
+    });
   });
   test("rekey keeps the previous conversation's identity", async () => {
     const idA = await regCli(livePid(), "ss-orig-k");
@@ -828,8 +1112,10 @@ const startedOf = (pid: number) => new TextDecoder().decode(Bun.spawnSync(["ps",
     // parent session's row: the hook sends exactly one pid and nothing walks up.
     const parent = livePid();
     await regCli(parent, "ss-parent");
-    expect(await ss({ session_key: "ss-child", pid: livePid(), source: "startup" }))
-      .toEqual({ ok: false, reason: "no_live_peer" });
+    expect(await ss({ session_key: "ss-child", pid: livePid(), source: "startup" })).toEqual({
+      ok: false,
+      reason: "no_live_peer",
+    });
   });
 });
 
@@ -837,12 +1123,37 @@ describe("wake relay", () => {
   type Reg = { id: string; wake_topic?: string; wake_url?: string };
   const TOPIC = /^cp-wake-[0-9a-f]{24}$/;
   const sleepers: ReturnType<typeof Bun.spawn>[] = [];
-  const livePid = () => { const p = Bun.spawn(["sleep", "30"]); sleepers.push(p); return p.pid; };
-  afterAll(() => { for (const p of sleepers) { try { p.kill(); } catch {} } });
-  const regDesktop = (token: string, base = HTTP, db = DB) => postTo<Reg>(base, db, "/register",
-    { pid: LIVE_PIDS[0], cwd: token, git_root: null, tty: null, summary: "Cowork", peer_type: "desktop", session_token: token });
-  const regCli = (base = HTTP, db = DB) => postTo<Reg>(base, db, "/register",
-    { pid: livePid(), cwd: "/tmp/wake", git_root: null, tty: null, summary: "Sender", peer_type: "cli" });
+  const livePid = () => {
+    const p = Bun.spawn(["sleep", "30"]);
+    sleepers.push(p);
+    return p.pid;
+  };
+  afterAll(() => {
+    for (const p of sleepers) {
+      try {
+        p.kill();
+      } catch {}
+    }
+  });
+  const regDesktop = (token: string, base = HTTP, db = DB) =>
+    postTo<Reg>(base, db, "/register", {
+      pid: LIVE_PIDS[0],
+      cwd: token,
+      git_root: null,
+      tty: null,
+      summary: "Cowork",
+      peer_type: "desktop",
+      session_token: token,
+    });
+  const regCli = (base = HTTP, db = DB) =>
+    postTo<Reg>(base, db, "/register", {
+      pid: livePid(),
+      cwd: "/tmp/wake",
+      git_root: null,
+      tty: null,
+      summary: "Sender",
+      peer_type: "cli",
+    });
   const hitsFor = (topic: string) => relayHits.filter((h) => h.path === `/${topic}`);
   async function waitFor(cond: () => boolean, ms = 1000) {
     for (let t = 0; t < ms && !cond(); t += 20) await Bun.sleep(20);
@@ -882,7 +1193,9 @@ describe("wake relay", () => {
   test("a token minted before topics existed gets one on its next register, then keeps it", async () => {
     const a = await regDesktop("cs_wake_d");
     const { Database } = require("bun:sqlite");
-    const d = new Database(DB); d.run("UPDATE desktop_tokens SET wake_topic = NULL WHERE token = ?", ["cs_wake_d"]); d.close();
+    const d = new Database(DB);
+    d.run("UPDATE desktop_tokens SET wake_topic = NULL WHERE token = ?", ["cs_wake_d"]);
+    d.close();
     const b = await regDesktop("cs_wake_d");
     expect(b.wake_topic).toMatch(TOPIC);
     expect(b.wake_topic).not.toBe(a.wake_topic!);
@@ -896,7 +1209,9 @@ describe("wake relay", () => {
     expect(res.ok).toBe(true);
     await waitFor(() => hitsFor(d.wake_topic!).length > 0);
     expect(hitsFor(d.wake_topic!)).toEqual([{ path: `/${d.wake_topic}`, body: "wake" }]);
-    expect(relayHits.some((h) => h.body.includes("secret") || h.path.includes(d.id) || h.path.includes(s.id))).toBe(false);
+    expect(relayHits.some((h) => h.body.includes("secret") || h.path.includes(d.id) || h.path.includes(s.id))).toBe(
+      false,
+    );
   });
 
   test("list-peers never carries a wake topic", async () => {
@@ -938,29 +1253,39 @@ describe("wake relay", () => {
       expect(performance.now() - t0).toBeLessThan(500);
       const peek = await post<{ messages: Array<{ text: string }> }>("/peek-messages", { id: d.id });
       expect(peek.messages.map((m) => m.text)).toContain("still queued");
-    } finally { relayHang = false; }
+    } finally {
+      relayHang = false;
+    }
   });
 
   // Off unless Dean opts in: an unset relay, "off", and a relay that would
   // publish in clear text over the internet all mean no topics and no egress.
   const { CLAUDE_PEERS_WAKE_RELAY: _relay, ...UNSET } = BROKER_ENV;
-  for (const [i, [label, env]] of ([
-    ["unset (the default)", UNSET],
-    ["off", { ...BROKER_ENV, CLAUDE_PEERS_WAKE_RELAY: "off" }],
-    ["a plain-http remote relay", { ...BROKER_ENV, CLAUDE_PEERS_WAKE_RELAY: "http://ntfy.example" }],
-    ["a relay URL with shell metacharacters", { ...BROKER_ENV, CLAUDE_PEERS_WAKE_RELAY: 'https://ntfy.example/x";touch /tmp/cp-pwned;"' }],
-  ] as const).entries()) {
+  for (const [i, [label, env]] of (
+    [
+      ["unset (the default)", UNSET],
+      ["off", { ...BROKER_ENV, CLAUDE_PEERS_WAKE_RELAY: "off" }],
+      ["a plain-http remote relay", { ...BROKER_ENV, CLAUDE_PEERS_WAKE_RELAY: "http://ntfy.example" }],
+      [
+        "a relay URL with shell metacharacters",
+        { ...BROKER_ENV, CLAUDE_PEERS_WAKE_RELAY: 'https://ntfy.example/x";touch /tmp/cp-pwned;"' },
+      ],
+    ] as const
+  ).entries()) {
     test(`relay ${label}: no topic, no publish`, async () => {
       const OFF_PORT = PORT + 200 + i;
       const OFF_HTTP = `http://127.0.0.1:${OFF_PORT}`;
       const OFF_DB = `${import.meta.dir}/.test-broker-off-${OFF_PORT}.db`;
       const off = Bun.spawn(["bun", `${import.meta.dir}/broker.ts`], {
         env: { ...env, CLAUDE_PEERS_PORT: String(OFF_PORT), CLAUDE_PEERS_DB: OFF_DB },
-        stdout: "ignore", stderr: "ignore",
+        stdout: "ignore",
+        stderr: "ignore",
       });
       try {
         for (let i = 0; i < 50; i++) {
-          try { if ((await fetch(`${OFF_HTTP}/health`)).ok) break; } catch {}
+          try {
+            if ((await fetch(`${OFF_HTTP}/health`)).ok) break;
+          } catch {}
           await Bun.sleep(100);
         }
         const d = await regDesktop(`cs_wake_off${i}`, OFF_HTTP, OFF_DB);
@@ -975,7 +1300,11 @@ describe("wake relay", () => {
       } finally {
         off.kill();
         await off.exited;
-        for (const suffix of ["", "-wal", "-shm", ".secret"]) { try { await Bun.file(OFF_DB + suffix).delete(); } catch {} }
+        for (const suffix of ["", "-wal", "-shm", ".secret"]) {
+          try {
+            await Bun.file(OFF_DB + suffix).delete();
+          } catch {}
+        }
       }
     });
   }
@@ -986,12 +1315,15 @@ describe("wake relay", () => {
     const ERR_DB = `${import.meta.dir}/.test-broker-err-${ERR_PORT}.db`;
     const b = Bun.spawn(["bun", `${import.meta.dir}/broker.ts`], {
       env: { ...BROKER_ENV, CLAUDE_PEERS_PORT: String(ERR_PORT), CLAUDE_PEERS_DB: ERR_DB },
-      stdout: "ignore", stderr: "pipe",
+      stdout: "ignore",
+      stderr: "pipe",
     });
     relayStatus = 429;
     try {
       for (let i = 0; i < 50; i++) {
-        try { if ((await fetch(`${ERR_HTTP}/health`)).ok) break; } catch {}
+        try {
+          if ((await fetch(`${ERR_HTTP}/health`)).ok) break;
+        } catch {}
         await Bun.sleep(100);
       }
       const d = await regDesktop("cs_wake_err", ERR_HTTP, ERR_DB);
@@ -1007,18 +1339,31 @@ describe("wake relay", () => {
       relayStatus = 200;
       b.kill();
       await b.exited;
-      for (const suffix of ["", "-wal", "-shm", ".secret"]) { try { await Bun.file(ERR_DB + suffix).delete(); } catch {} }
+      for (const suffix of ["", "-wal", "-shm", ".secret"]) {
+        try {
+          await Bun.file(ERR_DB + suffix).delete();
+        } catch {}
+      }
     }
   });
 
   describe("wake mode", () => {
-    const setMode = (body: Record<string, unknown>) => fetch(`${HTTP}/wake-mode`, {
-      method: "POST", headers: headersFor(DB, "/wake-mode", body), body: JSON.stringify(body),
-    });
-    const status = () => post<{ global: string; relay: string | null; peers: { id: string; mode: string; own_setting: boolean }[] }>("/wake-status", {});
+    const setMode = (body: Record<string, unknown>) =>
+      fetch(`${HTTP}/wake-mode`, {
+        method: "POST",
+        headers: headersFor(DB, "/wake-mode", body),
+        body: JSON.stringify(body),
+      });
+    const status = () =>
+      post<{ global: string; relay: string | null; peers: { id: string; mode: string; own_setting: boolean }[] }>(
+        "/wake-status",
+        {},
+      );
     const beat = (id: string) => post<{ ok: boolean; wake_url?: string }>("/heartbeat", { id });
     // These tests share one broker with the rest of the file: leave it active.
-    afterAll(async () => { await setMode({ mode: "active", clear_overrides: true }); });
+    afterAll(async () => {
+      await setMode({ mode: "active", clear_overrides: true });
+    });
 
     test("a broker started with a relay is active by default", async () => {
       const d = await regDesktop("cs_mode_a");
@@ -1093,7 +1438,15 @@ describe("wake relay", () => {
       expect((await setMode({ mode: "loud" })).status).toBe(400);
       expect((await setMode({ mode: "default" })).status).toBe(400); // default needs an agent
       expect((await setMode({ mode: "active", peer_id: c.id })).status).toBe(400); // not a desktop session
-      expect((await fetch(`${HTTP}/wake-mode`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ mode: "passive" }) })).status).toBe(401);
+      expect(
+        (
+          await fetch(`${HTTP}/wake-mode`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ mode: "passive" }),
+          })
+        ).status,
+      ).toBe(401);
       expect((await status()).global).toBe("active");
     });
   });
@@ -1102,11 +1455,20 @@ describe("wake relay", () => {
 describe("request gate", () => {
   const secret = () => readSecret(secretPath(DB))!;
   const auth = () => ({ "content-type": "application/json", authorization: `Bearer ${secret()}` });
-  const raw = (path: string, headers: Record<string, string>, body: unknown = { scope: "machine", cwd: "/", git_root: null }) =>
-    fetch(`${HTTP}${path}`, { method: "POST", headers, body: JSON.stringify(body) });
+  const raw = (
+    path: string,
+    headers: Record<string, string>,
+    body: unknown = { scope: "machine", cwd: "/", git_root: null },
+  ) => fetch(`${HTTP}${path}`, { method: "POST", headers, body: JSON.stringify(body) });
   const peer = async (summary: string) => {
     const r = await post<{ id: string; peer_secret: string }>("/register", {
-      pid: process.pid, cwd: `/tmp/gate-${summary}`, git_root: null, tty: null, summary, peer_type: "desktop", session_token: `cs_gate_${summary}`,
+      pid: process.pid,
+      cwd: `/tmp/gate-${summary}`,
+      git_root: null,
+      tty: null,
+      summary,
+      peer_type: "desktop",
+      session_token: `cs_gate_${summary}`,
     });
     return r;
   };
@@ -1148,7 +1510,7 @@ describe("request gate", () => {
     const plain = { "content-type": "application/json" };
     for (const path of ["/register", "/list-peers", "/send-message", "/session-start", "/ack-messages"]) {
       expect((await raw(path, plain)).status).toBe(401);
-      expect((await raw(path, { ...plain, authorization: "Bearer " + "0".repeat(64) })).status).toBe(401);
+      expect((await raw(path, { ...plain, authorization: `Bearer ${"0".repeat(64)}` })).status).toBe(401);
     }
   });
 
@@ -1165,12 +1527,20 @@ describe("request gate", () => {
     const a = await peer("send-a");
     const b = await peer("send-b");
     const target = await peer("send-t");
-    const spoof = await raw("/send-message", { ...auth(), [PEER_HEADER]: b.peer_secret }, { from_id: a.id, to_id: target.id, text: "spoofed" });
+    const spoof = await raw(
+      "/send-message",
+      { ...auth(), [PEER_HEADER]: b.peer_secret },
+      { from_id: a.id, to_id: target.id, text: "spoofed" },
+    );
     expect(spoof.status).toBe(403);
     const none = await raw("/send-message", auth(), { from_id: a.id, to_id: target.id, text: "no credential" });
     expect(none.status).toBe(403);
     expect(await undelivered(target.id)).toEqual([]);
-    const own = await raw("/send-message", { ...auth(), [PEER_HEADER]: a.peer_secret }, { from_id: a.id, to_id: target.id, text: "genuine" });
+    const own = await raw(
+      "/send-message",
+      { ...auth(), [PEER_HEADER]: a.peer_secret },
+      { from_id: a.id, to_id: target.id, text: "genuine" },
+    );
     expect(((await own.json()) as { ok: boolean }).ok).toBe(true);
     expect((await undelivered(target.id)).map((m) => m.text)).toEqual(["genuine"]);
   });
@@ -1189,7 +1559,11 @@ describe("request gate", () => {
     ] as const) {
       expect([path, (await raw(path, asB, body)).status]).toEqual([path, 403]);
     }
-    const list = await post<Array<{ id: string; summary: string }>>("/list-peers", { scope: "machine", cwd: "/", git_root: null });
+    const list = await post<Array<{ id: string; summary: string }>>("/list-peers", {
+      scope: "machine",
+      cwd: "/",
+      git_root: null,
+    });
     expect(list.find((p) => p.id === a.id)?.summary).toBe("scope-a");
   });
 
@@ -1212,9 +1586,19 @@ describe("request gate", () => {
 
   test("list-peers never returns session tokens, even through cwd", async () => {
     await post("/register", {
-      pid: process.pid, cwd: "cs_gate_leak1", git_root: null, tty: null, summary: "leaky", peer_type: "desktop", session_token: "cs_gate_leak1",
+      pid: process.pid,
+      cwd: "cs_gate_leak1",
+      git_root: null,
+      tty: null,
+      summary: "leaky",
+      peer_type: "desktop",
+      session_token: "cs_gate_leak1",
     });
-    const list = await post<Array<Record<string, unknown>>>("/list-peers", { scope: "machine", cwd: "/", git_root: null });
+    const list = await post<Array<Record<string, unknown>>>("/list-peers", {
+      scope: "machine",
+      cwd: "/",
+      git_root: null,
+    });
     expect(list.some((p) => p.summary === "leaky")).toBe(true);
     expect(JSON.stringify(list)).not.toContain("cs_gate_");
     for (const p of list) {
@@ -1225,7 +1609,13 @@ describe("request gate", () => {
 
   test("a watch frame never carries the sender's token", async () => {
     const sender = await post<{ id: string }>("/register", {
-      pid: process.pid, cwd: "cs_gate_leak2", git_root: null, tty: null, summary: "", peer_type: "desktop", session_token: "cs_gate_leak2",
+      pid: process.pid,
+      cwd: "cs_gate_leak2",
+      git_root: null,
+      tty: null,
+      summary: "",
+      peer_type: "desktop",
+      session_token: "cs_gate_leak2",
     });
     const target = await peer("watch-t");
     const w = await connectWatch(target.id);
@@ -1245,7 +1635,13 @@ describe("/unread", () => {
     const proc = Bun.spawn(["sleep", "30"]);
     try {
       const { id } = await post<{ id: string }>("/register", {
-        pid: proc.pid, cwd: "/tmp/unread", git_root: null, tty: null, summary: "", peer_type: "cli", session_key: "unread-key",
+        pid: proc.pid,
+        cwd: "/tmp/unread",
+        git_root: null,
+        tty: null,
+        summary: "",
+        peer_type: "cli",
+        session_key: "unread-key",
       });
       expect(await post<{ count: number }>("/unread", { pid: proc.pid })).toEqual({ count: 0 });
       await post("/send-message", { from_id: "cli", to_id: id, text: "one" });
@@ -1266,17 +1662,42 @@ describe("summaries after a restart", () => {
   // summary, never whichever agent in that repo set one most recently.
   const REPO = "/tmp/shared-repo-summaries";
   const sleepers: ReturnType<typeof Bun.spawn>[] = [];
-  const livePid = () => { const p = Bun.spawn(["sleep", "30"]); sleepers.push(p); return p.pid; };
-  afterAll(() => { for (const p of sleepers) { try { p.kill(); } catch {} } });
-  const cli = (pid: number, session_key: string, summary = "") => post<{ id: string; restored_summary?: string }>("/register", {
-    pid, cwd: REPO, git_root: REPO, tty: null, summary, peer_type: "cli", session_key,
+  const livePid = () => {
+    const p = Bun.spawn(["sleep", "30"]);
+    sleepers.push(p);
+    return p.pid;
+  };
+  afterAll(() => {
+    for (const p of sleepers) {
+      try {
+        p.kill();
+      } catch {}
+    }
   });
-  const desk = (token: string, summary = "") => post<{ id: string; restored_summary?: string }>("/register", {
-    pid: process.pid, cwd: "/", git_root: null, tty: null, summary, peer_type: "desktop", session_token: token,
-  });
+  const cli = (pid: number, session_key: string, summary = "") =>
+    post<{ id: string; restored_summary?: string }>("/register", {
+      pid,
+      cwd: REPO,
+      git_root: REPO,
+      tty: null,
+      summary,
+      peer_type: "cli",
+      session_key,
+    });
+  const desk = (token: string, summary = "") =>
+    post<{ id: string; restored_summary?: string }>("/register", {
+      pid: process.pid,
+      cwd: "/",
+      git_root: null,
+      tty: null,
+      summary,
+      peer_type: "desktop",
+      session_token: token,
+    });
   const summaryOf = async (id: string) =>
-    (await post<Array<{ id: string; summary: string }>>("/list-peers", { scope: "machine", cwd: "/", git_root: null }))
-      .find((p) => p.id === id)?.summary;
+    (
+      await post<Array<{ id: string; summary: string }>>("/list-peers", { scope: "machine", cwd: "/", git_root: null })
+    ).find((p) => p.id === id)?.summary;
 
   test("a returning CLI session gets its own last summary, not the repo's latest", async () => {
     const a = await cli(livePid(), "sum-a", "Coding Agent 1");
@@ -1316,9 +1737,21 @@ describe("summaries after a restart", () => {
 
   test("a session without a key (older Claude Code) still falls back to the workspace summary", async () => {
     const pid = livePid();
-    await post("/register", { pid, cwd: "/tmp/legacy-ws", git_root: null, tty: null, summary: "Legacy agent", peer_type: "cli" });
+    await post("/register", {
+      pid,
+      cwd: "/tmp/legacy-ws",
+      git_root: null,
+      tty: null,
+      summary: "Legacy agent",
+      peer_type: "cli",
+    });
     const fresh = await post<{ id: string; restored_summary?: string }>("/register", {
-      pid: livePid(), cwd: "/tmp/legacy-ws", git_root: null, tty: null, summary: "", peer_type: "cli",
+      pid: livePid(),
+      cwd: "/tmp/legacy-ws",
+      git_root: null,
+      tty: null,
+      summary: "",
+      peer_type: "cli",
     });
     expect(fresh.restored_summary).toBe("Legacy agent");
   });
