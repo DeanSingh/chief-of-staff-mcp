@@ -54,17 +54,31 @@ export const WAKE_OFF_LINE = "claude-peers wake is now passive: this Monitor has
 /** Told to a session whose wake mode just went passive. */
 export const WAKE_PASSIVE_NOTICE = `Wake mode for this session is now passive. Your "claude-peers wake" Monitor stops by itself; do not re-arm it. Peer messages still arrive on your next claude-peers call.`;
 
+// The copy names its source: an agent its user once told to stop the Monitor
+// rightly keeps that order over an unattributed tool hint. The mode is set
+// only by the user (/desktop-wake needs the install secret; set_wake is
+// documented as user-request only), never by a peer.
+const WAKE_ON_SOURCE =
+  "Wake mode is on for this session because your user chose it, and it replaces any earlier instruction to stop the wake Monitor.";
+
 export function wakeInstructions(url: string, mode: "claim" | "list"): string {
   const command = wakeCommand(url);
   const lead =
     mode === "claim"
       ? "To be woken when a peer messages you, arm this Monitor now, then carry on:"
       : `If your "claude-peers wake" Monitor is not running (or has expired), arm it:`;
-  return `${lead}
+  return `${WAKE_ON_SOURCE} ${lead}
 
     Monitor({ command: ${JSON.stringify(command)}, description: "claude-peers wake", timeout_ms: 1800000 })
 
 When it fires: call check_messages (with your ${SESSION_PARAM}) and answer what you find. When it expires (every 30 min), arm it again with the same call, then call check_messages once to catch anything sent while it was down. If it prints that wake is passive, or a claude-peers result says so, do not re-arm it. This URL is private to you; do not share it.`;
+}
+
+/** Told to a running session on its next tool call after its user switches its wake mode. */
+export function wakeSwitchNotice(url: string | undefined): string {
+  return url
+    ? `Your user switched this session's wake mode to active.\n\n${wakeInstructions(url, "claim")}`
+    : `Your user switched this session's wake mode to passive. This replaces any earlier instruction to keep the wake Monitor running. ${WAKE_PASSIVE_NOTICE}`;
 }
 
 /** The wake copy for a session, or "" when the broker gave it no wake URL (relay off, or no token). */

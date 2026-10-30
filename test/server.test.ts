@@ -6,7 +6,14 @@ import { tightenLogFile, toolCallLogLine } from "../src/server/log.ts";
 import { SERVER_INSTRUCTIONS } from "../src/server/mcp.ts";
 import { cliRegisterBody, desktopRegisterBody, isAmbiguousSession, resolvableSession } from "../src/server/sessions.ts";
 import { SESSION_ID_REQUIRED_TOOLS, SESSION_PARAM, buildTools } from "../src/server/tools.ts";
-import { WAKE_OFF_LINE, peerListHeader, wakeCommand, wakeCopy, wakeInstructions } from "../src/server/wake.ts";
+import {
+  WAKE_OFF_LINE,
+  peerListHeader,
+  wakeCommand,
+  wakeCopy,
+  wakeInstructions,
+  wakeSwitchNotice,
+} from "../src/server/wake.ts";
 
 /** The repo root, where the entry files live. */
 const ROOT = dirname(import.meta.dir);
@@ -144,10 +151,29 @@ describe("wake instructions", () => {
   });
 
   test("claim_session copy says arm now; list_peers copy only if not already running", async () => {
-    expect(wakeInstructions(URL_A, "claim")).toStartWith("To be woken when a peer messages you, arm this Monitor now");
+    expect(wakeInstructions(URL_A, "claim")).toContain("To be woken when a peer messages you, arm this Monitor now");
     const list = wakeInstructions(URL_A, "list");
-    expect(list).toStartWith(`If your "claude-peers wake" Monitor is not running (or has expired), arm it:`);
+    expect(list).toContain(`If your "claude-peers wake" Monitor is not running (or has expired), arm it:`);
     expect(list).not.toContain("arm this Monitor now");
+  });
+
+  // An agent told by its user to stop the Monitor keeps that order over an
+  // unattributed tool hint, so the copy says whose setting this is.
+  test("arm copy says the user chose wake mode and that it replaces an earlier stop order", async () => {
+    for (const text of [wakeInstructions(URL_A, "claim"), wakeInstructions(URL_A, "list")]) {
+      expect(text).toStartWith("Wake mode is on for this session because your user chose it");
+      expect(text).toContain("replaces any earlier instruction to stop the wake Monitor");
+    }
+  });
+
+  test("a mode switch notice says the user switched it, both ways", async () => {
+    const on = wakeSwitchNotice(URL_A);
+    expect(on).toStartWith("Your user switched this session's wake mode to active.");
+    expect(on).toContain(`Monitor({ command: ${JSON.stringify(RAW)}`);
+    const off = wakeSwitchNotice(undefined);
+    expect(off).toStartWith("Your user switched this session's wake mode to passive.");
+    expect(off).toContain("replaces any earlier instruction to keep the wake Monitor running");
+    expect(off).not.toContain("Monitor(");
   });
 
   test('no copy contains "persistent"', async () => {
