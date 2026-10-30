@@ -59,7 +59,22 @@ class McpClient {
     const r = await this.request("tools/call", { name, arguments: args });
     return (r.result?.content ?? []).map((c: { text: string }) => c.text).join("\n");
   }
+  async checkMessagesDescription(): Promise<string> {
+    const r = await this.request("tools/list", {});
+    return r.result.tools.find((t: { name: string }) => t.name === "check_messages").description;
+  }
   stop() { this.proc.kill(); }
+}
+
+// A desktop peer registered straight with the broker, before any server knows it.
+async function registerDesktop(token: string): Promise<string> {
+  const secret = readSecret(secretPath(DB))!;
+  const res = await fetch(`${HTTP}/register`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${secret}` },
+    body: JSON.stringify({ pid: process.pid, cwd: "/tmp/e2e", git_root: null, tty: null, summary: "", peer_type: "desktop", session_token: token }),
+  });
+  return ((await res.json()) as { id: string }).id;
 }
 
 // A third peer driven directly, the way the broker tests do.
@@ -118,6 +133,42 @@ describe("servers against a hardened broker", () => {
       expect(await cli.call("list_peers", { scope: "machine" })).not.toContain(token!);
     } finally {
       cli.stop();
+      desk.stop();
+    }
+  }, 30_000);
+
+  // Issue #6: one shared server, mail queued for a session before the server
+  // knew it, at a lower id than mail it has already seen for another session.
+  test("each desktop session keeps its own cursor and preview", async () => {
+    const desk = new McpClient({ ...ENV, CLAUDE_PEERS_PEER_TYPE: "desktop" });
+    try {
+      await desk.init();
+      const claimed = await desk.call("claim_session", { label: "e2e A" });
+      const tokenA = claimed.match(/cs_[0-9a-f]{12}/)![0];
+      const idA = claimed.match(/Your peer ID is (\w+)/)![1]!;
+
+      const tokenB = "cs_bbbbbbbbbbbb";
+      const idB = await registerDesktop(tokenB);
+      const sender = await registerDesktop("cs_cccccccccccc");
+      await asPeer("/send-message", sender, { from_id: sender, to_id: idB, text: "early mail for B" });
+      await asPeer("/send-message", sender, { from_id: sender, to_id: idA, text: "private note for A" });
+      await Bun.sleep(1500); // a poll cycle sees A's mail
+
+      // The shared tool list says mail is waiting but shows none of it.
+      const banner = await desk.checkMessagesDescription();
+      expect(banner).toMatch(/waiting/i);
+      expect(banner).not.toContain("private note for A");
+
+      // B's first tool call puts it on this server; its older mail still arrives.
+      await desk.call("set_summary", { summary: "e2e B", peer_session: tokenB });
+      await Bun.sleep(1500);
+      expect(await desk.call("set_summary", { summary: "e2e B", peer_session: tokenB })).toContain("early mail for B");
+
+      // B's piggyback didn't clear A's banner; A's check_messages clears the last one.
+      expect(await desk.checkMessagesDescription()).toMatch(/waiting/i);
+      expect(await desk.call("check_messages", { peer_session: tokenA })).toContain("private note for A");
+      expect(await desk.checkMessagesDescription()).not.toMatch(/waiting/i);
+    } finally {
       desk.stop();
     }
   }, 30_000);
