@@ -98,7 +98,7 @@ Loopback alone doesn't keep web pages out: a page you open can POST to `127.0.0.
 
 - refuses any request with an `Origin` header, a `Host` other than `127.0.0.1:<port>` / `localhost:<port>`, or (for POSTs) a `Content-Type` other than `application/json`;
 - requires an install secret on every POST. It is 256 random bits in `~/.claude-peers.db.secret` (0600), created on the broker's first start and read by the MCP server, hook and CLI;
-- hands each peer a credential at `/register` and requires it on every route that acts as that peer (send, poll, peek, ack, heartbeat, set-summary, unregister), so a caller can only send as, or read the mail of, the peer it registered;
+- hands each peer a credential at `/register` and requires it on every route that acts as that peer (send, poll, peek, ack, heartbeat, set-summary, unregister, and the `/watch` upgrade), so a caller can only send as, or read the mail of, the peer it registered;
 - never returns desktop session tokens from `/list-peers`.
 
 The DB, secret and debug log are owner-only. Processes running as your own user can still read those files, so this keeps out browsers and other users, not your own processes.
@@ -113,13 +113,9 @@ Claude Desktop / Cowork ignore `claude/channel` notifications, so the broker als
 ws://127.0.0.1:7899/watch/<peer-id>
 ```
 
-One JSON frame per inbound message (`{"type":"peer_message","from_id","from_summary","text",…}`). It is a wake signal only — nothing is acked, so `check_messages` still delivers. A session with Claude Code's `Monitor` tool arms it with the exact call that `claim_session` / `list_peers` print:
+The upgrade needs the install secret (`Authorization: Bearer …`) and that peer's credential, like any other route that acts as the peer. Each inbound message produces one `{"type":"wake"}` frame with no content; nothing is acked, so the session reads the message itself with `check_messages`.
 
-```
-Monitor({ ws: { url: "ws://127.0.0.1:7899/watch/<peer-id>" }, description: "claude-peers inbox", persistent: true })
-```
-
-`bun cli.ts watch <peer-id>` is the shell fallback for a `Monitor` without the `ws` source. `send_message` responses carry `woke: N` — how many watchers received the frame — so a sender can tell whether the target was listening or will only see the message on its next tool call.
+`bun cli.ts watch <peer-id>` connects with those credentials (read from the secret file, never argv) and prints one line per wake, so a session can arm it as a `Monitor` command. `send_message` responses carry `woke: N` — how many watchers received the frame — so a sender can tell whether the target was listening or will only see the message on its next tool call.
 
 Limits: the feed is on the broker host's loopback, so **cloud Cowork sandboxes (`pwd` = `/home/claude`) cannot reach it** — they stay pull-based (next tool call / `check_messages`). Upgrades carrying an `Origin` header are refused so browser pages cannot subscribe.
 
@@ -176,7 +172,7 @@ cd ~/chief-of-staff-mcp
 bun cli.ts status            # broker status + all peers
 bun cli.ts peers             # list peers
 bun cli.ts send <id> <msg>   # send a message into a Claude session
-bun cli.ts watch <id>        # stream a peer's inbound messages (Monitor fallback)
+bun cli.ts watch <id>        # print a line per inbound message (for Monitor)
 bun cli.ts install-hooks     # register the SessionStart identity hook
 bun cli.ts kill-broker       # stop the broker
 ```

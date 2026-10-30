@@ -354,8 +354,11 @@ const markDelivered = db.prepare(`
 function generateId(): string {
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
   let id = "";
-  for (let i = 0; i < 8; i++) {
-    id += chars[Math.floor(Math.random() * chars.length)];
+  while (id.length < 8) {
+    for (const b of crypto.getRandomValues(new Uint8Array(16))) {
+      // 252 = 7 * 36: dropping 252-255 keeps every char equally likely.
+      if (b < 252 && id.length < 8) id += chars[b % chars.length];
+    }
   }
   return id;
 }
@@ -741,9 +744,10 @@ function handleListPeers(body: ListPeersRequest): Peer[] {
 
 // --- WebSocket watchers ---
 // A peer (or a harness Monitor on its behalf) opens ws://host/watch/<peer-id>
-// and receives one JSON frame per inbound message. Frames are a wake signal
-// only: nothing is acked here, so the message stays in the DB until the peer
-// reads it via check_messages / poll.
+// with that peer's credentials and receives one {"type":"wake"} frame per
+// inbound message. Frames carry no content and ack nothing: the message stays
+// in the DB until the peer reads it via check_messages / poll, which is
+// credentialed on its own.
 type WatchData = { peer: string };
 type WatchSocket = import("bun").ServerWebSocket<WatchData>;
 const watchers = new Map<string, Set<WatchSocket>>();
@@ -766,18 +770,8 @@ function handleSendMessage(body: SendMessageRequest): { ok: boolean; error?: str
     return { ok: false, error: `Peer ${body.to_id} not found (stale or expired ID — call list_peers and re-send)` };
   }
 
-  const sent_at = new Date().toISOString();
-  const res = insertMessage.run(body.from_id, body.to_id, body.text, sent_at);
-  const sender = db.query(`SELECT summary, ${PUBLIC_CWD} AS cwd FROM peers WHERE id = ?`).get(body.from_id) as { summary: string; cwd: string } | null;
-  const woke = notifyWatchers(body.to_id, {
-    type: "peer_message",
-    id: Number(res.lastInsertRowid),
-    from_id: body.from_id,
-    from_summary: sender?.summary ?? "",
-    from_cwd: sender?.cwd ?? "",
-    sent_at,
-    text: body.text,
-  });
+  insertMessage.run(body.from_id, body.to_id, body.text, new Date().toISOString());
+  const woke = notifyWatchers(body.to_id, { type: "wake" });
   if (WAKE_ON && target.peer_type === "desktop") {
     const t = db.query("SELECT wake_topic FROM desktop_tokens WHERE peer_id = ? AND wake_topic IS NOT NULL").get(body.to_id) as { wake_topic: string } | null;
     if (t) publishWake(t.wake_topic);
@@ -819,7 +813,7 @@ function handleUnregister(body: { id: string }): void {
 // opens can POST here (a text/plain "simple request" needs no CORS
 // preflight), and a DNS-rebinding page can read the answers too. Clients of
 // this broker are local processes, so refuse anything that looks like a
-// browser, and require the install secret on every POST.
+// browser, and require the install secret on every POST and /watch upgrade.
 const ALLOWED_HOSTS = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`]);
 
 // The body field naming the peer a route acts as. Those routes also need that
@@ -849,11 +843,11 @@ function gate(req: Request, path: string): Response | null {
   if (!(req.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json")) {
     return new Response("content-type must be application/json", { status: 415 });
   }
-  const bearer = req.headers.get("authorization")?.replace(/^Bearer /, "");
-  if (!secretsEqual(bearer, SECRET)) {
-    return Response.json({ ok: false, error: "missing or wrong broker secret" }, { status: 401 });
-  }
-  return null;
+  return hasSecret(req) ? null : Response.json({ ok: false, error: "missing or wrong broker secret" }, { status: 401 });
+}
+
+function hasSecret(req: Request): boolean {
+  return secretsEqual(req.headers.get("authorization")?.replace(/^Bearer /, ""), SECRET);
 }
 
 function actsAsCaller(req: Request, path: string, body: Record<string, unknown>): boolean {
@@ -878,9 +872,14 @@ Bun.serve<WatchData>({
     if (req.method !== "POST") {
       if (path.startsWith("/watch/")) {
         // Origin was already refused above, so a web page can't hijack a
-        // peer's message feed cross-site.
+        // peer's message feed cross-site. A local process needs the same
+        // credentials it would need to read that peer's mail.
         const peer = decodeURIComponent(path.slice("/watch/".length));
         if (!peer) return new Response("missing peer id", { status: 400 });
+        if (!hasSecret(req)) return new Response("missing or wrong broker secret", { status: 401 });
+        if (!secretsEqual(req.headers.get(PEER_HEADER), peerSecret(SECRET, peer))) {
+          return new Response(`not authorized to watch ${peer}`, { status: 403 });
+        }
         if (server.upgrade(req, { data: { peer } })) return;
         return new Response("websocket upgrade required", { status: 426 });
       }

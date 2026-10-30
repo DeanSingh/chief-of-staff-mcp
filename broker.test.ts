@@ -90,9 +90,16 @@ async function register(summary: string, peer_type: "cli" | "desktop"): Promise<
   return r.id;
 }
 
-function connectWatch(peerId: string): Promise<{ ws: WebSocket; frames: unknown[]; next: () => Promise<unknown> }> {
+// Upgrades with the install secret and the peer's credential, the way
+// `bun cli.ts watch` does.
+function watchHeaders(peerId: string): Record<string, string> {
+  const secret = readSecret(secretPath(DB))!;
+  return { authorization: `Bearer ${secret}`, [PEER_HEADER]: peerSecret(secret, peerId) };
+}
+
+function connectWatch(peerId: string, headers = watchHeaders(peerId)): Promise<{ ws: WebSocket; frames: unknown[]; next: () => Promise<unknown> }> {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`${WS}/watch/${peerId}`);
+    const ws = new WebSocket(`${WS}/watch/${peerId}`, { headers });
     const frames: unknown[] = [];
     const waiters: Array<(f: unknown) => void> = [];
     ws.onmessage = (ev) => {
@@ -141,19 +148,59 @@ describe("broker /watch WebSocket feed", () => {
     });
     expect(send).toMatchObject({ ok: true, woke: 1, target_type: "desktop" });
 
-    const frame = (await w.next()) as Record<string, unknown>;
-    expect(frame).toMatchObject({
-      type: "peer_message", from_id: cos, from_summary: "Chief of staff", text: "pull Q3 burn",
-    });
-    expect(typeof frame.id).toBe("number");
+    // The frame is only a wake: no text, sender or id.
+    expect(await w.next()).toEqual({ type: "wake" });
 
     // Wake is not delivery: message is still undelivered for check_messages.
-    const peek = await post<{ messages: Array<{ id: number; delivered: number }> }>("/peek-messages", { id: finance });
+    const peek = await post<{ messages: Array<{ text: string; delivered: number }> }>("/peek-messages", { id: finance });
     expect(peek.messages).toHaveLength(1);
     expect(peek.messages[0]!.delivered).toBe(0);
-    expect(peek.messages[0]!.id).toBe(frame.id as number);
+    expect(peek.messages[0]!.text).toBe("pull Q3 burn");
 
     w.ws.close();
+  });
+
+  // An id is not a secret: it shows up in transcripts, peer messages and argv.
+  // Knowing one must not be enough to subscribe to that peer's feed.
+  async function upgrade(peerId: string, headers: Record<string, string>): Promise<number> {
+    const res = await fetch(`${HTTP}/watch/${peerId}`, {
+      headers: {
+        ...headers,
+        connection: "Upgrade", upgrade: "websocket",
+        "sec-websocket-version": "13", "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==",
+      },
+    });
+    return res.status;
+  }
+
+  test("refuses an upgrade without the install secret", async () => {
+    const victim = await register("victim", "cli");
+    expect(await upgrade(victim, {})).toBe(401);
+    expect(await upgrade(victim, { ...watchHeaders(victim), authorization: "Bearer wrong" })).toBe(401);
+  });
+
+  test("refuses an upgrade without the watched peer's own credential", async () => {
+    const victim = await register("victim", "cli");
+    const other = await register("other", "cli");
+    const authorization = watchHeaders(victim).authorization!;
+    expect(await upgrade(victim, { authorization })).toBe(403);
+    // Another peer's valid credential doesn't open this peer's feed.
+    expect(await upgrade(victim, { authorization, [PEER_HEADER]: watchHeaders(other)[PEER_HEADER]! })).toBe(403);
+  });
+
+  test("an uncredentialed watcher never sees message text", async () => {
+    const victim = await register("victim", "cli");
+    const sender = await register("sender", "cli");
+    const frames: string[] = [];
+    const ws = new WebSocket(`${WS}/watch/${victim}`);
+    ws.onmessage = (ev) => frames.push(String(ev.data));
+    ws.onerror = () => {};
+    await Bun.sleep(200); // refused, or (if the gate were open) subscribed
+    await post("/send-message", { from_id: sender, to_id: victim, text: "secret plans" });
+    await Bun.sleep(100);
+    ws.close();
+    expect(frames.join("")).not.toContain("secret plans");
+    expect(frames).toHaveLength(0);
   });
 
   test("woke=0 when nobody is watching; watcher gets nothing for other peers", async () => {
@@ -1073,7 +1120,7 @@ describe("request gate", () => {
     }
   });
 
-  test("a watch frame never carries the sender's token as from_cwd", async () => {
+  test("a watch frame never carries the sender's token", async () => {
     const sender = await post<{ id: string }>("/register", {
       pid: process.pid, cwd: "cs_gate_leak2", git_root: null, tty: null, summary: "", peer_type: "desktop", session_token: "cs_gate_leak2",
     });
