@@ -4,7 +4,7 @@ Thanks for helping. Bug reports, fixes and focused features are welcome.
 
 ## Setup
 
-You need [Bun](https://bun.sh) 1.3 or later.
+You need [Bun](https://bun.sh) 1.4 or later (CI runs 1.4.4).
 
 ```bash
 git clone https://github.com/DeanSingh/chief-of-staff-mcp.git
