@@ -40,3 +40,6 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 .test-broker-*
 .test-broker-*.db-wal
 .test-broker-*.db-shm
+
+# Local planning notes (not published)
+docs/superpowers/
