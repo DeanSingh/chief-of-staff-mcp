@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DESKTOP_WAKE_MARK, desktopWakeCommand, hostPid, hookCommand, isOurDesktopWakeCommand } from "./hook.ts";
-import { ensureSecret, secretPath } from "./shared/auth.ts";
+import { ensureSecret, secretPath } from "./src/shared/auth.ts";
 
 const HOOK = `${import.meta.dir}/hook.ts`;
 

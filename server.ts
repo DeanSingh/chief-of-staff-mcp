@@ -14,12 +14,12 @@
  */
 
 import { appendFileSync, chmodSync } from "node:fs";
-import { authHeaders } from "./shared/auth.ts";
+import { authHeaders } from "./src/shared/auth.ts";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import type { PeerId, Peer, RegisterResponse, PollMessagesResponse, Message } from "./shared/types.ts";
-import { generateSummary, getGitBranch, getRecentFiles } from "./shared/summarize.ts";
+import type { PeerId, Peer, RegisterResponse, PollMessagesResponse, Message } from "./src/shared/types.ts";
+import { generateSummary, getGitBranch, getRecentFiles } from "./src/shared/summarize.ts";
 
 // --- Configuration ---
 

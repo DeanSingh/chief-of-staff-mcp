@@ -38,14 +38,14 @@ updates `.mcp.json`, every `CLAUDE.md` reference, and provides a migration path 
   peer can't be sent to at all until it re-registers. Undelivered mail is
   never deleted on reap; the pre-existing 72h TTL is the only bound.
 - `server.ts` — MCP stdio server, one per Claude Code instance. Connects to broker, exposes tools, pushes channel notifications.
-- `shared/auth.ts` — Broker access control. Every POST carries the install secret
+- `src/shared/auth.ts` — Broker access control. Every POST carries the install secret
   (`<db>.secret`, 0600, created by the broker); routes that act as a peer also carry
   that peer's credential from `/register`. The broker also refuses browser-shaped
   requests (any `Origin`, a foreign `Host`, non-JSON bodies). See README "Access control".
 - `hook.ts` — Claude Code hook: SessionStart re-keys a resumed session's identity;
   UserPromptSubmit prints the unread-mail nudge. Installed by `bun cli.ts install-hooks`.
-- `shared/types.ts` — Shared TypeScript types for broker API.
-- `shared/summarize.ts` — Auto-summary generation via gpt-5.4-nano.
+- `src/shared/types.ts` — Shared TypeScript types for broker API.
+- `src/shared/summarize.ts` — Auto-summary generation via gpt-5.4-nano.
 - `cli.ts` — CLI utility for inspecting broker state.
 
 ## Running

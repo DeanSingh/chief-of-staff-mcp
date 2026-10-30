@@ -2,7 +2,7 @@ import { test, expect, describe, afterAll } from "bun:test";
 import { mkdtempSync, rmSync, statSync, lstatSync, symlinkSync, readdirSync, readlinkSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ensureSecret, secretPath } from "./shared/auth.ts";
+import { ensureSecret, secretPath } from "./src/shared/auth.ts";
 
 const DIR = mkdtempSync(join(tmpdir(), "cp-install-hooks-"));
 afterAll(() => rmSync(DIR, { recursive: true, force: true }));

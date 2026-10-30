@@ -19,7 +19,7 @@
  * UserPromptSubmit prints only the nudge.
  */
 
-import { authHeaders, readSecret } from "./shared/auth.ts";
+import { authHeaders, readSecret } from "./src/shared/auth.ts";
 
 const BROKER_PORT = parseInt(process.env.CLAUDE_PEERS_PORT ?? "7899", 10);
 

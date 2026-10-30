@@ -2,7 +2,7 @@ import { test, expect, describe, beforeAll, afterAll } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { peerSecret, readSecret, secretPath, PEER_HEADER } from "./shared/auth.ts";
+import { peerSecret, readSecret, secretPath, PEER_HEADER } from "./src/shared/auth.ts";
 
 // Real MCP servers (one CLI, one Desktop) over stdio against a real broker on
 // a private port: proves every route the servers use carries the install

@@ -1,6 +1,6 @@
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
 import { statSync } from "node:fs";
-import { peerSecret, readSecret, secretPath, PEER_HEADER } from "./shared/auth.ts";
+import { peerSecret, readSecret, secretPath, PEER_HEADER } from "./src/shared/auth.ts";
 
 // Spawn a real broker on a private port + temp DB and exercise the
 // /watch WebSocket feed end to end: subscribe, send, receive, and confirm the

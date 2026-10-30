@@ -11,7 +11,7 @@
 
 import { Database } from "bun:sqlite";
 import { chmodSync } from "node:fs";
-import { ensureSecret, peerSecret, secretPath, secretsEqual, PEER_HEADER } from "./shared/auth.ts";
+import { ensureSecret, peerSecret, secretPath, secretsEqual, PEER_HEADER } from "./src/shared/auth.ts";
 import type {
   RegisterRequest,
   RegisterResponse,
@@ -26,7 +26,7 @@ import type {
   SessionStartResponse,
   Peer,
   Message,
-} from "./shared/types.ts";
+} from "./src/shared/types.ts";
 
 const PORT = parseInt(process.env.CLAUDE_PEERS_PORT ?? "7899", 10);
 const DB_PATH = process.env.CLAUDE_PEERS_DB ?? `${process.env.HOME}/.claude-peers.db`;

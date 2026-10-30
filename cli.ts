@@ -16,7 +16,7 @@
 
 import { chmodSync, mkdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { authHeaders, peerSecret, readSecret, secretPath, PEER_HEADER } from "./shared/auth.ts";
+import { authHeaders, peerSecret, readSecret, secretPath, PEER_HEADER } from "./src/shared/auth.ts";
 import { desktopWakeCommand, hookCommand, isOurDesktopWakeCommand } from "./hook.ts";
 
 const BROKER_PORT = parseInt(process.env.CLAUDE_PEERS_PORT ?? "7899", 10);
