@@ -8,6 +8,9 @@
     "enabled": true,
     "rules": {
       "preset": "recommended",
+      "complexity": {
+        "noExcessiveCognitiveComplexity": "error"
+      },
       "style": {
         "noNonNullAssertion": "off"
       }
@@ -16,7 +19,12 @@
   "overrides": [
     {
       "includes": ["**/*.test.ts"],
-      "linter": { "rules": { "suspicious": { "noExplicitAny": "off" } } }
+      "linter": {
+        "rules": {
+          "complexity": { "noExcessiveCognitiveComplexity": "off" },
+          "suspicious": { "noExplicitAny": "off" }
+        }
+      }
     }
   ],
   "assist": { "enabled": false }

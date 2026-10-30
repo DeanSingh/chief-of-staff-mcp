@@ -83,6 +83,7 @@ export function registerHandlers(): void {
     return { tools: dynamicTools };
   });
 
+  // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: session resolution before dispatch; splitting it is its own change
   mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     log(toolCallLogLine(req.params.name, req.params.arguments));
     const { name, arguments: args } = req.params;
@@ -145,6 +146,7 @@ export function registerHandlers(): void {
 
 type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean };
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: one case per tool
 async function handleTool(
   name: string,
   args: Record<string, unknown> | undefined,

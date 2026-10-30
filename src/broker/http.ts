@@ -86,6 +86,7 @@ export function startServer() {
   return Bun.serve<WatchData>({
     port: PORT,
     hostname: "127.0.0.1",
+    // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: the route table, one branch per route
     async fetch(req, server) {
       const url = new URL(req.url);
       const path = url.pathname;

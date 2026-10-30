@@ -44,6 +44,7 @@ function activeTopics(): Set<string> {
   return new Set(rows.filter((r) => effectiveWakeMode(r.wake_mode) === "active").map((r) => r.wake_topic));
 }
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: argument validation and the off notices for every session a switch affects
 export function handleWakeMode(body: { mode?: string; peer_id?: string; clear_overrides?: boolean }): {
   ok: boolean;
   error?: string;

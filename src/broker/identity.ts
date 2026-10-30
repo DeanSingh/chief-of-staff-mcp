@@ -113,6 +113,7 @@ export function handleRegister(body: RegisterRequest): RegisterResponse {
   return { ...res, peer_secret: peerSecret(SECRET, res.id) };
 }
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: identity precedence (token, session key, pid, new id) reads top to bottom; splitting it is its own change
 function registerPeer(body: RegisterRequest): RegisterResponse {
   const now = new Date().toISOString();
 

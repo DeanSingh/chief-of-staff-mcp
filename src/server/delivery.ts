@@ -108,6 +108,7 @@ export async function ackMessages(peerId: PeerId, messages: Message[]): Promise<
 
 // --- Polling loop for inbound messages ---
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: one poll: sender lookup, every push channel, then the preview
 async function pollForPeer(peerId: PeerId) {
   const inbox = inboxFor(peerId);
   try {

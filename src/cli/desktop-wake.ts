@@ -5,6 +5,7 @@
 import { brokerFetch } from "./client.ts";
 
 /** `desktop-wake`: show or switch Desktop sessions' wake mode. */
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: argument parsing and the agent lookup for one command
 export async function desktopWake(): Promise<void> {
   // Active: Desktop sessions arm a Monitor that wakes them within seconds of
   // a message, at one turn per session per 30-minute re-arm. Passive: pull
