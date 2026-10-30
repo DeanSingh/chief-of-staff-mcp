@@ -212,6 +212,33 @@ describe("desktop sessions after a reap", () => {
   }, 30_000);
 });
 
+describe("cli sessions after a reap", () => {
+  // Issue #5, CLI side: the heartbeat's 404 triggers the re-register, with no
+  // list-peers round trip on every beat.
+  test("a reaped cli session is re-registered by the next heartbeat", async () => {
+    const cli = new McpClient({
+      ...ENV, CLAUDE_PEERS_PEER_TYPE: "cli", CLAUDE_PEERS_NAME: "e2e cli reaped",
+      CLAUDE_CODE_SESSION_ID: `e2e-reaped-${PORT}`, CLAUDE_PEERS_HEARTBEAT_MS: "1000",
+    });
+    try {
+      await cli.init();
+      const id = (await cli.call("list_peers", { scope: "machine" })).match(/Your peer ID: (\w+)/)![1]!;
+      const sender = await registerDesktop("cs_eeeeeeeeeeee");
+
+      await asPeer("/unregister", id, { id });
+      expect((await asPeer("/send-message", sender, { from_id: sender, to_id: id, text: "x" })).ok).toBe(false);
+
+      await Bun.sleep(2500); // two heartbeats
+      // peer_sessions hands the same id back, so the old address works again.
+      const sent = await asPeer("/send-message", sender, { from_id: sender, to_id: id, text: "cli is back" });
+      expect(sent.ok).toBe(true);
+      expect(await cli.call("check_messages", {})).toContain("cli is back");
+    } finally {
+      cli.stop();
+    }
+  }, 30_000);
+});
+
 describe("desktop wake mode", () => {
   const setMode = async (body: Record<string, unknown>) => {
     const secret = readSecret(secretPath(DB))!;

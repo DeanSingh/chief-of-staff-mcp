@@ -188,6 +188,46 @@ describe("broker /watch WebSocket feed", () => {
     expect(await upgrade(victim, { authorization, [PEER_HEADER]: watchHeaders(other)[PEER_HEADER]! })).toBe(403);
   });
 
+  // `bun cli.ts watch` as a Monitor: a refusal must end it with the reason,
+  // not loop silently reconnecting forever.
+  function cliWatch(peerId: string, db: string) {
+    return Bun.spawn(["bun", `${import.meta.dir}/cli.ts`, "watch", peerId], {
+      env: { ...process.env, CLAUDE_PEERS_PORT: String(PORT), CLAUDE_PEERS_DB: db },
+      stdout: "pipe", stderr: "pipe",
+    });
+  }
+
+  test("cli watch exits with the reason when the broker refuses its credentials", async () => {
+    const victim = await register("victim", "cli");
+    const otherDb = `${DB}-other`;
+    await Bun.write(secretPath(otherDb), "not-this-brokers-secret\n");
+    try {
+      const watch = cliWatch(victim, otherDb);
+      const timer = setTimeout(() => watch.kill(), 3000);
+      expect(await watch.exited).toBe(1);
+      clearTimeout(timer);
+      expect(await new Response(watch.stderr).text()).toContain("missing or wrong broker secret");
+    } finally {
+      await Bun.file(secretPath(otherDb)).delete();
+    }
+  }, 10_000);
+
+  test("cli watch with the right credentials stays up and prints a wake line", async () => {
+    const target = await register("watched", "cli");
+    const sender = await register("sender", "cli");
+    const watch = cliWatch(target, DB);
+    try {
+      await Bun.sleep(500); // preflight + subscribe
+      expect(watch.exitCode).toBeNull();
+      await post("/send-message", { from_id: sender, to_id: target, text: "hello" });
+      const reader = (watch.stdout as ReadableStream<Uint8Array>).getReader();
+      const { value } = await reader.read();
+      expect(new TextDecoder().decode(value)).toBe("[claude-peers] new peer message: call check_messages to read it\n");
+    } finally {
+      watch.kill();
+    }
+  });
+
   test("an uncredentialed watcher never sees message text", async () => {
     const victim = await register("victim", "cli");
     const sender = await register("sender", "cli");

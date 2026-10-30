@@ -2,7 +2,7 @@ import { test, expect, describe, afterAll } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { hostPid, hookCommand } from "./hook.ts";
+import { DESKTOP_WAKE_MARK, desktopWakeCommand, hostPid, hookCommand, isOurDesktopWakeCommand } from "./hook.ts";
 import { ensureSecret, secretPath } from "./shared/auth.ts";
 
 const HOOK = `${import.meta.dir}/hook.ts`;
@@ -108,6 +108,29 @@ describe("hook.ts", () => {
       const out = Bun.spawnSync(["sh", "-c", `printf '%s\\n' ${cmd.slice(4)}`]).stdout;
       expect(new TextDecoder().decode(out)).toBe(`${dir}/hook.ts\n`);
     }
+  });
+
+  const frontmatter = (file: string) => Bun.YAML.parse(file.split("---\n")[1]!) as Record<string, string>;
+
+  test("desktopWakeCommand's frontmatter holds exactly its three keys for any repo path", () => {
+    for (const dir of ["/tmp/a b", "/tmp/it's", '/tmp/q"uote', "/tmp/x: y", "/tmp/#hash", "/tmp/a\nevil: true"]) {
+      const fm = frontmatter(desktopWakeCommand(dir));
+      expect(Object.keys(fm).sort()).toEqual(["allowed-tools", "argument-hint", "description"]);
+      const run = `bun '${`${dir}/cli.ts`.replace(/'/g, `'\\''`)}' desktop-wake`;
+      expect(fm["allowed-tools"]).toBe(`Bash(${run}:*)`);
+    }
+  });
+
+  // ")" would close Bash(...) early and allow whatever follows it.
+  test("desktopWakeCommand leaves out allowed-tools when the path has a )", () => {
+    const fm = frontmatter(desktopWakeCommand("/tmp/x) Bash(rm"));
+    expect(Object.keys(fm).sort()).toEqual(["argument-hint", "description"]);
+  });
+
+  test("only a file carrying the exact marker line counts as ours", () => {
+    expect(isOurDesktopWakeCommand(desktopWakeCommand("/tmp/repo"))).toBe(true);
+    expect(isOurDesktopWakeCommand("my notes # claude-peers")).toBe(false);
+    expect(isOurDesktopWakeCommand(`see ${DESKTOP_WAKE_MARK} for details`)).toBe(false);
   });
 
   test("UserPromptSubmit nudges when this session's peer has unread mail", async () => {

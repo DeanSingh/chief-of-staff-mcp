@@ -14,11 +14,10 @@
  *   bun cli.ts desktop-wake    — Show or switch Desktop sessions' wake mode (active | passive)
  */
 
-import { chmodSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { authHeaders, peerSecret, readSecret, secretPath, PEER_HEADER } from "./shared/auth.ts";
-import { hookCommand } from "./hook.ts";
-import { mkdirSync } from "node:fs";
+import { chmodSync, mkdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { authHeaders, peerSecret, readSecret, secretPath, PEER_HEADER } from "./shared/auth.ts";
+import { desktopWakeCommand, hookCommand, isOurDesktopWakeCommand } from "./hook.ts";
 
 const BROKER_PORT = parseInt(process.env.CLAUDE_PEERS_PORT ?? "7899", 10);
 const BROKER_URL = `http://127.0.0.1:${BROKER_PORT}`;
@@ -39,21 +38,6 @@ async function brokerFetch<T>(path: string, body?: unknown): Promise<T> {
     throw new Error(`${res.status}: ${await res.text()}`);
   }
   return res.json() as Promise<T>;
-}
-
-/** The /desktop-wake slash command file, running the cli.ts in `dir`. */
-function desktopWakeCommand(dir: string): string {
-  const run = `bun '${`${dir}/cli.ts`.replace(/'/g, `'\\''`)}' desktop-wake`;
-  return `---
-description: Show or switch Claude Desktop agents' wake mode (active wakes them on new peer mail; passive costs nothing while idle)
-argument-hint: "[status | active | passive | default] [agent id or name] [--all]"
-allowed-tools: Bash(${run}:*)
----
-<!-- # claude-peers: written by \`bun cli.ts install-hooks\`; re-run it after moving the repo. -->
-
-Run \`${run} $ARGUMENTS\` and show the user its output. Do not run anything else.
-If the command fails, show the error as-is.
-`;
 }
 
 const cmd = process.argv[2];
@@ -180,6 +164,20 @@ switch (cmd) {
 
     let backoff = 1000;
     while (true) {
+      // A WebSocket client never sees why an upgrade failed, so ask over plain
+      // HTTP first: a refusal won't change by retrying, while 426 means the
+      // credentials passed and only the upgrade is missing.
+      const refused = await fetch(`${BROKER_URL}/watch/${encodeURIComponent(peerId)}`, {
+        headers,
+        signal: AbortSignal.timeout(3000),
+      }).then(
+        (res) => (res.status === 401 || res.status === 403 ? res.text() : null),
+        () => null, // broker down: the reconnect loop waits for it
+      );
+      if (refused !== null) {
+        console.error(`[claude-peers] Broker refused to watch ${peerId}: ${refused}`);
+        process.exit(1);
+      }
       await new Promise<void>((resolve) => {
         const ws = new WebSocket(wsUrl, { headers });
         ws.onopen = () => { backoff = 1000; };
@@ -271,7 +269,7 @@ switch (cmd) {
     // file of the same name that isn't ours is left alone.
     const cmdPath = `${dirname(path)}/commands/desktop-wake.md`;
     const cmdFile = Bun.file(cmdPath);
-    if ((await cmdFile.exists()) && !(await cmdFile.text()).includes(MARK)) {
+    if ((await cmdFile.exists()) && !isOurDesktopWakeCommand(await cmdFile.text())) {
       console.log(`Skipped ${cmdPath}: it exists and isn't from claude-peers.`);
     } else {
       mkdirSync(dirname(cmdPath), { recursive: true });

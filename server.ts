@@ -178,6 +178,23 @@ function remember(reg: RegisterResponse): RegisterResponse {
   return reg;
 }
 
+/** A non-2xx broker response, keeping the status so callers need not parse the message. */
+export class BrokerError extends Error {
+  constructor(
+    readonly path: string,
+    readonly status: number,
+    body: string,
+  ) {
+    super(`Broker error (${path}): ${status} ${body}`);
+    this.name = "BrokerError";
+  }
+}
+
+/** The broker no longer has this peer: it was reaped and must register again. */
+export function isNotFound(e: unknown): boolean {
+  return e instanceof BrokerError && e.status === 404;
+}
+
 /** POST to the broker; `as` names the peer the call acts for. */
 async function brokerFetch<T>(path: string, body: unknown, as?: PeerId | null): Promise<T> {
   const res = await fetch(`${BROKER_URL}${path}`, {
@@ -185,10 +202,7 @@ async function brokerFetch<T>(path: string, body: unknown, as?: PeerId | null): 
     headers: authHeaders(as ? credentials.get(as) : undefined),
     body: JSON.stringify(body),
   });
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`Broker error (${path}): ${res.status} ${err}`);
-  }
+  if (!res.ok) throw new BrokerError(path, res.status, await res.text());
   return res.json() as Promise<T>;
 }
 
@@ -290,22 +304,22 @@ function log(msg: string) {
   }
 }
 
-async function ensureRegistered(): Promise<void> {
-  // Re-register if our peer was cleaned up by the broker
-  if (!myId) return;
+/**
+ * Heartbeat the CLI host peer. A 404 means the broker reaped it; register
+ * again so it is reachable. peer_sessions hands back the same id.
+ */
+async function heartbeatHost(): Promise<void> {
+  const id = myId;
+  if (!id) return;
   try {
-    const peers = await brokerFetch<Peer[]>("/list-peers", {
-      scope: "machine",
-      cwd: myCwd,
-      git_root: myGitRoot,
-    });
-    if (!peers.some((p) => p.id === myId)) {
-      const reg = remember(await brokerFetch<RegisterResponse>("/register", cliRegisterBody(myLastSummary || PEER_NAME)));
-      log(`Re-registered as peer ${reg.id} (was ${myId})`);
-      myId = reg.id;
-    }
-  } catch {
-    // Non-critical
+    await brokerFetch("/heartbeat", { id }, id);
+  } catch (e) {
+    if (!isNotFound(e)) return;
+    const reg = remember(await brokerFetch<RegisterResponse>("/register", cliRegisterBody(myLastSummary || PEER_NAME)));
+    // set_summary may have re-registered while this request was in flight.
+    if (myId !== id) return;
+    log(`Re-registered as peer ${reg.id} (was ${id})`);
+    myId = reg.id;
   }
 }
 
@@ -983,7 +997,7 @@ Next: call set_summary (with your token) to tell other peers what you are workin
       } catch (e) {
         // If peer was cleaned up, re-register
         const errMsg = e instanceof Error ? e.message : String(e);
-        if (errMsg.includes("not found")) {
+        if (isNotFound(e)) {
           try {
             if (sessionId && PEER_TYPE === "desktop") {
               // Re-register with summary in one call (avoids extra /set-summary round-trip)
@@ -1243,10 +1257,21 @@ async function pollForPeer(peerId: PeerId) {
   }
 }
 
+/**
+ * Forgets delivery state for peer ids this server no longer serves (a CLI
+ * peer re-keyed, a Desktop session re-registered), so the map stays bounded
+ * by the live sessions. pushedMessageIds still stops a re-push if one returns.
+ */
+export function pruneInboxes<T>(state: Map<PeerId, T>, served: Iterable<PeerId>): void {
+  const keep = new Set(served);
+  for (const id of state.keys()) if (!keep.has(id)) state.delete(id);
+}
+
 async function pollAndPushMessages() {
   const peerIds: PeerId[] = [];
   if (myId) peerIds.push(myId);
   for (const [_, entry] of desktopPeers) peerIds.push(entry.peerId);
+  pruneInboxes(inboxes, peerIds);
   await Promise.all(peerIds.map(pollForPeer));
 }
 
@@ -1345,10 +1370,7 @@ async function main() {
     const beats: Promise<void>[] = [];
     if (myId) {
       beats.push(
-        ensureRegistered()
-          .then(() => brokerFetch("/heartbeat", { id: myId }, myId))
-          .then(() => {})
-          .catch(() => {})
+        heartbeatHost().catch(() => {})
       );
     }
     for (const [sessionId, entry] of desktopPeers) {
@@ -1367,7 +1389,7 @@ async function main() {
             // Reaped while this process was idle or suspended. Register again:
             // desktop_tokens hands back the same id, so addresses other peers
             // hold and mail queued for it stay valid.
-            if (!(e instanceof Error && e.message.includes("not found"))) return;
+            if (!isNotFound(e)) return;
             const reg = remember(await brokerFetch<RegisterResponse>("/register", desktopRegisterBody(sessionId, entry.summary)));
             desktopPeers.set(sessionId, { peerId: reg.id, summary: entry.summary, wakeUrl: reg.wake_url ?? entry.wakeUrl });
             log(`Re-registered a reaped desktop session as peer ${reg.id}`);

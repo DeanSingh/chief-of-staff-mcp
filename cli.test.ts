@@ -71,7 +71,7 @@ describe("install-hooks", () => {
       expect(await run()).toBe(0);
       const cmd = await Bun.file(join(dir, "commands", "desktop-wake.md")).text();
       expect(cmd).toContain(`Run \`bun '${import.meta.dir}/cli.ts' desktop-wake $ARGUMENTS\``);
-      expect(cmd).toContain(`allowed-tools: Bash(bun '${import.meta.dir}/cli.ts' desktop-wake:*)`);
+      expect(cmd).toContain(`allowed-tools: ${JSON.stringify(`Bash(bun '${import.meta.dir}/cli.ts' desktop-wake:*)`)}`);
       expect(await run()).toBe(0); // re-running rewrites ours
       expect(await Bun.file(join(dir, "commands", "desktop-wake.md")).text()).toBe(cmd);
 
@@ -79,6 +79,10 @@ describe("install-hooks", () => {
       await Bun.write(join(dir, "commands", "desktop-wake.md"), "mine");
       expect(await run()).toBe(0);
       expect(await Bun.file(join(dir, "commands", "desktop-wake.md")).text()).toBe("mine");
+      // Mentioning claude-peers doesn't make a file ours.
+      await Bun.write(join(dir, "commands", "desktop-wake.md"), "mine # claude-peers");
+      expect(await run()).toBe(0);
+      expect(await Bun.file(join(dir, "commands", "desktop-wake.md")).text()).toBe("mine # claude-peers");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

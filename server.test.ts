@@ -6,6 +6,9 @@ import {
   isAmbiguousSession,
   cliRegisterBody,
   unreadBanner,
+  BrokerError,
+  isNotFound,
+  pruneInboxes,
 } from "./server.ts";
 
 // Two independent transport constraints are pinned here, both learned the
@@ -51,13 +54,8 @@ describe("desktop schema matches the runtime guard", () => {
     });
 
     test(`${name} does not describe ${SESSION_PARAM} as optional`, () => {
-      const props = tool!.inputSchema.properties as Record<
-        string,
-        { description: string }
-      >;
-      expect(props[SESSION_PARAM].description.toLowerCase()).not.toContain(
-        "optional"
-      );
+      const props: Record<string, { description?: string } | undefined> = tool!.inputSchema.properties;
+      expect(props[SESSION_PARAM]?.description).not.toMatch(/optional/i);
     });
   }
 
@@ -371,5 +369,37 @@ describe("unreadBanner", () => {
     expect(banner).not.toBe("");
     expect(banner).not.toContain("wire the funds");
     expect(banner).not.toContain("abc");
+  });
+});
+
+describe("isNotFound", () => {
+  test("is true only for a broker 404", () => {
+    expect(isNotFound(new BrokerError("/heartbeat", 404, '{"ok":false}'))).toBe(true);
+    expect(isNotFound(new BrokerError("/heartbeat", 403, "not found"))).toBe(false);
+    expect(isNotFound(new BrokerError("/heartbeat", 500, "Peer x not found"))).toBe(false);
+  });
+
+  // The old check matched "not found" anywhere in the message.
+  test("ignores errors that merely mention not found", () => {
+    expect(isNotFound(new Error("Broker error (/heartbeat): 404 not found"))).toBe(false);
+    expect(isNotFound("not found")).toBe(false);
+  });
+});
+
+describe("pruneInboxes", () => {
+  test("drops ids no longer served and keeps the rest", () => {
+    const state = new Map([
+      ["a", 1],
+      ["b", 2],
+      ["c", 3],
+    ]);
+    pruneInboxes(state, ["a", "c", "d"]);
+    expect([...state.keys()]).toEqual(["a", "c"]);
+  });
+
+  test("serving nothing empties the map", () => {
+    const state = new Map([["a", 1]]);
+    pruneInboxes(state, []);
+    expect(state.size).toBe(0);
   });
 });
