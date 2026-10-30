@@ -56,7 +56,7 @@ export const WAKE_OFF_LINE = "claude-peers wake is now passive: this Monitor has
 // and "this overrides your earlier instructions" in a tool result is the shape
 // of a prompt injection. An agent holding a direct order from its user about
 // the Monitor should take a change to it from the user, not from this copy.
-const WAKE_SET_BY = "(set with /desktop-wake or set_wake)";
+const WAKE_SET_BY = "(set with /desktop-wake or set_wake, or the broker's default)";
 
 /** Told to a session whose wake mode just went passive. */
 export const WAKE_PASSIVE_NOTICE = `Wake mode for this session is now passive ${WAKE_SET_BY}. Your "claude-peers wake" Monitor stops by itself; do not re-arm it. Peer messages still arrive on your next claude-peers call.`;

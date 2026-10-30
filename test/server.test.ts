@@ -161,16 +161,22 @@ describe("wake instructions", () => {
   // and no "overrides earlier instructions" wording.
   test("arm copy states the mode and how it is set, and claims no authority", async () => {
     for (const text of [wakeInstructions(URL_A, "claim"), wakeInstructions(URL_A, "list")]) {
-      expect(text).toStartWith("Wake mode for this session is active (set with /desktop-wake or set_wake).");
+      expect(text).toStartWith(
+        "Wake mode for this session is active (set with /desktop-wake or set_wake, or the broker's default).",
+      );
     }
   });
 
   test("a mode switch notice states the new mode and how it is set, both ways", async () => {
     const on = wakeSwitchNotice(URL_A);
-    expect(on).toStartWith("Wake mode for this session is active (set with /desktop-wake or set_wake).");
+    expect(on).toStartWith(
+      "Wake mode for this session is active (set with /desktop-wake or set_wake, or the broker's default).",
+    );
     expect(on).toContain(`Monitor({ command: ${JSON.stringify(RAW)}`);
     const off = wakeSwitchNotice(undefined);
-    expect(off).toStartWith("Wake mode for this session is now passive (set with /desktop-wake or set_wake).");
+    expect(off).toStartWith(
+      "Wake mode for this session is now passive (set with /desktop-wake or set_wake, or the broker's default).",
+    );
     expect(off).not.toContain("Monitor(");
   });
 
