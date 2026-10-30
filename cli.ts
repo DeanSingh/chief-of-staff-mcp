@@ -280,11 +280,16 @@ switch (cmd) {
     // file of the same name that isn't ours is left alone.
     const cmdPath = `${dirname(path)}/commands/desktop-wake.md`;
     const cmdFile = Bun.file(cmdPath);
-    if ((await cmdFile.exists()) && !isOurDesktopWakeCommand(await cmdFile.text())) {
+    const wakeCommand = desktopWakeCommand(import.meta.dir);
+    if (!wakeCommand) {
+      console.log(
+        `Skipped ${cmdPath}: this checkout's path has a line break or backtick. Move the repo to use /desktop-wake.`,
+      );
+    } else if ((await cmdFile.exists()) && !isOurDesktopWakeCommand(await cmdFile.text())) {
       console.log(`Skipped ${cmdPath}: it exists and isn't from claude-peers.`);
     } else {
       mkdirSync(dirname(cmdPath), { recursive: true });
-      await Bun.write(cmdPath, desktopWakeCommand(import.meta.dir));
+      await Bun.write(cmdPath, wakeCommand);
       console.log(`Installed /desktop-wake in ${cmdPath}`);
     }
     break;

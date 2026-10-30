@@ -126,8 +126,8 @@ describe("hook.ts", () => {
   const frontmatter = (file: string) => Bun.YAML.parse(file.split("---\n")[1]!) as Record<string, string>;
 
   test("desktopWakeCommand's frontmatter holds exactly its three keys for any repo path", () => {
-    for (const dir of ["/tmp/a b", "/tmp/it's", '/tmp/q"uote', "/tmp/x: y", "/tmp/#hash", "/tmp/a\nevil: true"]) {
-      const fm = frontmatter(desktopWakeCommand(dir));
+    for (const dir of ["/tmp/a b", "/tmp/it's", '/tmp/q"uote', "/tmp/x: y", "/tmp/#hash", "/tmp/$HOME"]) {
+      const fm = frontmatter(desktopWakeCommand(dir)!);
       expect(Object.keys(fm).sort()).toEqual(["allowed-tools", "argument-hint", "description"]);
       const run = `bun '${`${dir}/cli.ts`.replace(/'/g, `'\\''`)}' desktop-wake`;
       expect(fm["allowed-tools"]).toBe(`Bash(${run}:*)`);
@@ -136,12 +136,17 @@ describe("hook.ts", () => {
 
   // ")" would close Bash(...) early and allow whatever follows it.
   test("desktopWakeCommand leaves out allowed-tools when the path has a )", () => {
-    const fm = frontmatter(desktopWakeCommand("/tmp/x) Bash(rm"));
+    const fm = frontmatter(desktopWakeCommand("/tmp/x) Bash(rm")!);
     expect(Object.keys(fm).sort()).toEqual(["argument-hint", "description"]);
   });
 
+  // The path is quoted into the Markdown body, where these would garble it.
+  test("desktopWakeCommand refuses a path with a line break or backtick", () => {
+    for (const dir of ["/tmp/a\nevil: true", "/tmp/a\rb", "/tmp/a`b"]) expect(desktopWakeCommand(dir)).toBeNull();
+  });
+
   test("only a file carrying the exact marker line counts as ours", () => {
-    expect(isOurDesktopWakeCommand(desktopWakeCommand("/tmp/repo"))).toBe(true);
+    expect(isOurDesktopWakeCommand(desktopWakeCommand("/tmp/repo")!)).toBe(true);
     expect(isOurDesktopWakeCommand("my notes # claude-peers")).toBe(false);
     expect(isOurDesktopWakeCommand(`see ${DESKTOP_WAKE_MARK} for details`)).toBe(false);
   });

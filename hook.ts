@@ -37,13 +37,16 @@ export const DESKTOP_WAKE_MARK =
   "<!-- # claude-peers: written by `bun cli.ts install-hooks`; re-run it after moving the repo. -->";
 
 /**
- * The /desktop-wake slash command file, running the cli.ts in `dir`.
+ * The /desktop-wake slash command file, running the cli.ts in `dir`, or null
+ * when `dir` holds a line break or backtick: the path is quoted into the
+ * Markdown body, where either would garble the instruction.
  * Frontmatter values are JSON-quoted, which YAML reads as plain strings, so
  * no path can add a key. A ")" in the path would end the Bash(...) rule
  * early, so then the allowed-tools line is left out and Claude Code asks
  * before running the command instead.
  */
-export function desktopWakeCommand(dir: string): string {
+export function desktopWakeCommand(dir: string): string | null {
+  if (/[\r\n`]/.test(dir)) return null;
   const run = `bun '${`${dir}/cli.ts`.replace(/'/g, `'\\''`)}' desktop-wake`;
   const frontmatter = [
     `description: ${JSON.stringify("Show or switch Claude Desktop agents' wake mode (active wakes them on new peer mail; passive costs nothing while idle)")}`,
