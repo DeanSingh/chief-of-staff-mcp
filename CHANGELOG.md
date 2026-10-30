@@ -6,6 +6,9 @@ Notable changes. There are no tagged releases yet; `main` is the release.
 
 ### Changed
 
+- No function in `src/` is over the complexity limit: the broker's routes
+  and the server's tools dispatch from tables, and registration reads as
+  its precedence order. Broker tests are split by area (#17).
 - Code moved into `src/` and tests into `test/`; the root entry files stay
   for existing installs (#13).
 - Stricter typecheck, pinned dev tooling, and a cognitive-complexity limit

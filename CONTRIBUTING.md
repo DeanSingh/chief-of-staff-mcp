@@ -24,8 +24,10 @@ bun run format     # apply Biome formatting
 CI runs the first three on Linux and macOS, and all must pass.
 
 - **Every behavior change comes with a test that fails without it.**
-  Tests live in `test/`. The end-to-end tests start a real broker and MCP
-  servers on a private port and database, so they never touch your own.
+  Tests live in `test/`; broker tests are in `test/broker/`, one file per
+  area, and start their broker with `useBroker()` from its harness. The
+  end-to-end tests start a real broker and MCP servers on a private port and
+  database, so they never touch your own.
 - **Keep the wire identity.** The MCP server key `claude-peers`, port `7899`,
   `~/.claude-peers.db` and the `CLAUDE_PEERS_*` variables are shared with
   existing installs. See CLAUDE.md before changing any of them.

@@ -3,6 +3,7 @@
  * credential) and the route table.
  */
 
+import type { Server } from "bun";
 import { PEER_HEADER, peerSecret, secretsEqual } from "../shared/auth.ts";
 import type {
   AckMessagesRequest,
@@ -82,93 +83,106 @@ function actsAsCaller(req: Request, path: string, body: Record<string, unknown>)
   return secretsEqual(req.headers.get(PEER_HEADER), peerSecret(SECRET, id));
 }
 
+// biome-ignore lint/suspicious/noExplicitAny: each route casts the body to its own request type
+type Body = Record<string, any>;
+
+/** POST routes. A route not listed here is a 404. */
+const ROUTES = new Map<string, (body: Body) => Response>([
+  ["/register", (b) => Response.json(handleRegister(b as RegisterRequest))],
+  [
+    "/heartbeat",
+    (b) => {
+      const beat = handleHeartbeat(b as HeartbeatRequest);
+      return Response.json(beat, { status: beat.ok ? 200 : 404 });
+    },
+  ],
+  [
+    "/set-summary",
+    (b) => {
+      const r = handleSetSummary(b as SetSummaryRequest);
+      return Response.json(r, { status: r.ok ? 200 : 404 });
+    },
+  ],
+  [
+    "/wake-mode",
+    (b) => {
+      const r = handleWakeMode(b);
+      return Response.json(r, { status: r.ok ? 200 : 400 });
+    },
+  ],
+  ["/wake-status", () => Response.json(handleWakeStatus())],
+  ["/list-peers", (b) => Response.json(handleListPeers(b as ListPeersRequest))],
+  ["/send-message", (b) => Response.json(handleSendMessage(b as SendMessageRequest))],
+  ["/poll-messages", (b) => Response.json(handlePollMessages(b as PollMessagesRequest))],
+  [
+    "/ack-messages",
+    (b) => {
+      handleAckMessages(b as AckMessagesRequest);
+      return Response.json({ ok: true });
+    },
+  ],
+  ["/peek-messages", (b) => Response.json(handlePeekMessages(b as { id: string; since_id?: number }))],
+  ["/session-start", (b) => Response.json(handleSessionStart(b as SessionStartRequest))],
+  ["/unread", (b) => Response.json(handleUnread(b as { pid: number }))],
+  [
+    "/unregister",
+    (b) => {
+      handleUnregister(b as { id: string });
+      return Response.json({ ok: true });
+    },
+  ],
+]);
+
+/**
+ * The /watch/<peer> upgrade. Origin was already refused by the gate, so a web
+ * page can't hijack a peer's message feed cross-site. A local process needs
+ * the same credentials it would need to read that peer's mail.
+ */
+function watchUpgrade(req: Request, server: Server<WatchData>, path: string): Response | undefined {
+  const peer = decodeURIComponent(path.slice("/watch/".length));
+  if (!peer) return new Response("missing peer id", { status: 400 });
+  if (!hasSecret(req)) return new Response("missing or wrong broker secret", { status: 401 });
+  if (!secretsEqual(req.headers.get(PEER_HEADER), peerSecret(SECRET, peer))) {
+    return new Response(`not authorized to watch ${peer}`, { status: 403 });
+  }
+  if (server.upgrade(req, { data: { peer } })) return;
+  return new Response("websocket upgrade required", { status: 426 });
+}
+
+function handleGet(req: Request, server: Server<WatchData>, path: string): Response | undefined {
+  if (path.startsWith("/watch/")) return watchUpgrade(req, server, path);
+  if (path === "/health") {
+    return Response.json({ status: "ok", peers: (selectAllPeers.all() as Peer[]).length });
+  }
+  return new Response("claude-peers broker", { status: 200 });
+}
+
+async function handlePost(req: Request, path: string): Promise<Response> {
+  try {
+    const body = (await req.json()) as Body;
+    if (!actsAsCaller(req, path, body)) {
+      return Response.json(
+        { ok: false, error: `not authorized to act as ${String(body?.[ACTS_AS[path]!])}` },
+        { status: 403 },
+      );
+    }
+    const route = ROUTES.get(path);
+    return route ? route(body) : Response.json({ error: "not found" }, { status: 404 });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return Response.json({ error: msg }, { status: 500 });
+  }
+}
+
 export function startServer() {
   return Bun.serve<WatchData>({
     port: PORT,
     hostname: "127.0.0.1",
-    // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: the route table, one branch per route
     async fetch(req, server) {
-      const url = new URL(req.url);
-      const path = url.pathname;
-
+      const path = new URL(req.url).pathname;
       const refused = gate(req);
       if (refused) return refused;
-
-      if (req.method !== "POST") {
-        if (path.startsWith("/watch/")) {
-          // Origin was already refused above, so a web page can't hijack a
-          // peer's message feed cross-site. A local process needs the same
-          // credentials it would need to read that peer's mail.
-          const peer = decodeURIComponent(path.slice("/watch/".length));
-          if (!peer) return new Response("missing peer id", { status: 400 });
-          if (!hasSecret(req)) return new Response("missing or wrong broker secret", { status: 401 });
-          if (!secretsEqual(req.headers.get(PEER_HEADER), peerSecret(SECRET, peer))) {
-            return new Response(`not authorized to watch ${peer}`, { status: 403 });
-          }
-          if (server.upgrade(req, { data: { peer } })) return;
-          return new Response("websocket upgrade required", { status: 426 });
-        }
-        if (path === "/health") {
-          return Response.json({ status: "ok", peers: (selectAllPeers.all() as Peer[]).length });
-        }
-        return new Response("claude-peers broker", { status: 200 });
-      }
-
-      try {
-        // biome-ignore lint/suspicious/noExplicitAny: each route casts the body to its own request type
-        const body = (await req.json()) as Record<string, any>;
-        if (!actsAsCaller(req, path, body)) {
-          return Response.json(
-            { ok: false, error: `not authorized to act as ${String(body?.[ACTS_AS[path]!])}` },
-            { status: 403 },
-          );
-        }
-
-        switch (path) {
-          case "/register":
-            return Response.json(handleRegister(body as RegisterRequest));
-          case "/heartbeat": {
-            const beat = handleHeartbeat(body as HeartbeatRequest);
-            return Response.json(beat, { status: beat.ok ? 200 : 404 });
-          }
-          case "/set-summary": {
-            const summaryResult = handleSetSummary(body as SetSummaryRequest);
-            if (!summaryResult.ok) {
-              return Response.json(summaryResult, { status: 404 });
-            }
-            return Response.json(summaryResult);
-          }
-          case "/wake-mode": {
-            const r = handleWakeMode(body);
-            return Response.json(r, { status: r.ok ? 200 : 400 });
-          }
-          case "/wake-status":
-            return Response.json(handleWakeStatus());
-          case "/list-peers":
-            return Response.json(handleListPeers(body as ListPeersRequest));
-          case "/send-message":
-            return Response.json(handleSendMessage(body as SendMessageRequest));
-          case "/poll-messages":
-            return Response.json(handlePollMessages(body as PollMessagesRequest));
-          case "/ack-messages":
-            handleAckMessages(body as AckMessagesRequest);
-            return Response.json({ ok: true });
-          case "/peek-messages":
-            return Response.json(handlePeekMessages(body as { id: string; since_id?: number }));
-          case "/session-start":
-            return Response.json(handleSessionStart(body as SessionStartRequest));
-          case "/unread":
-            return Response.json(handleUnread(body as { pid: number }));
-          case "/unregister":
-            handleUnregister(body as { id: string });
-            return Response.json({ ok: true });
-          default:
-            return Response.json({ error: "not found" }, { status: 404 });
-        }
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        return Response.json({ error: msg }, { status: 500 });
-      }
+      return req.method === "POST" ? handlePost(req, path) : handleGet(req, server, path);
     },
     websocket: {
       open(ws) {
