@@ -328,17 +328,23 @@ describe("wake Monitor output", () => {
 
 describe("unreadBanner", () => {
   test("nothing unread, no banner", () => {
-    expect(unreadBanner([], "cli")).toBe("");
-    expect(unreadBanner([], "desktop")).toBe("");
+    expect(unreadBanner([], "cli", 1)).toBe("");
+    expect(unreadBanner([], "desktop", 1)).toBe("");
   });
 
   test("a CLI server previews its own session's mail", () => {
-    expect(unreadBanner(["[abc]: hello"], "cli")).toContain("[abc]: hello");
+    expect(unreadBanner(["[abc]: hello"], "cli", 1)).toContain("[abc]: hello");
+  });
+
+  test("a server serving more than one peer never quotes mail, whatever its type", () => {
+    const banner = unreadBanner(["[abc]: wire the funds"], "cli", 2);
+    expect(banner).not.toBe("");
+    expect(banner).not.toContain("wire the funds");
   });
 
   // Every session on a Desktop server shares one tool list.
   test("a Desktop server never puts message text in the shared tool list", () => {
-    const banner = unreadBanner(["[abc]: wire the funds"], "desktop");
+    const banner = unreadBanner(["[abc]: wire the funds"], "desktop", 1);
     expect(banner).not.toBe("");
     expect(banner).not.toContain("wire the funds");
     expect(banner).not.toContain("abc");

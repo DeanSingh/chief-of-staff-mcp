@@ -637,13 +637,14 @@ async function clearPreview(peerId: PeerId): Promise<void> {
 
 /**
  * The check_messages banner. tools/list doesn't say which session is asking,
- * and every session on a Desktop server shares one tool list, so a Desktop
- * server shows no message text: one session's mail must not appear in
- * another's tool list. A CLI server serves only its own session.
+ * so the banner quotes mail only on a CLI server serving exactly one peer.
+ * Every session on a Desktop server shares one tool list, including sessions
+ * that haven't called a tool yet: one session's mail must not appear in
+ * another's tool list.
  */
-export function unreadBanner(previews: string[], peerType: "cli" | "desktop"): string {
+export function unreadBanner(previews: string[], peerType: "cli" | "desktop", servedPeers: number): string {
   if (previews.length === 0) return "";
-  if (peerType === "cli") return `⚠️ NEW MESSAGES WAITING — CALL THIS TOOL NOW.\n\nPreview: ${previews.join(" | ")}`;
+  if (peerType === "cli" && servedPeers === 1) return `⚠️ NEW MESSAGES WAITING — CALL THIS TOOL NOW.\n\nPreview: ${previews.join(" | ")}`;
   return "⚠️ New peer messages are waiting for at least one session on this server. Call this tool to see whether they are yours.";
 }
 
@@ -694,7 +695,7 @@ Fix — claim your own identity, then reuse it:
 mcp.setRequestHandler(ListToolsRequestSchema, async () => {
   const served = new Set([...(myId ? [myId] : []), ...[...desktopPeers.values()].map((e) => e.peerId)]);
   const previews = [...served].map((id) => inboxes.get(id)?.preview ?? "").filter(Boolean);
-  const banner = unreadBanner(previews, PEER_TYPE);
+  const banner = unreadBanner(previews, PEER_TYPE, served.size);
   if (!banner) return { tools: TOOLS };
 
   // Inject the banner into check_messages description
