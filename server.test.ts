@@ -1,15 +1,11 @@
 import { test, expect, describe } from "bun:test";
-import {
-  buildTools,
-  SESSION_ID_REQUIRED_TOOLS,
-  SESSION_PARAM,
-  isAmbiguousSession,
-  cliRegisterBody,
-  unreadBanner,
-  BrokerError,
-  isNotFound,
-  pruneInboxes,
-} from "./server.ts";
+import { BrokerError, isNotFound } from "./src/server/client.ts";
+import { pruneInboxes, unreadBanner } from "./src/server/delivery.ts";
+import { tightenLogFile, toolCallLogLine } from "./src/server/log.ts";
+import { SERVER_INSTRUCTIONS } from "./src/server/mcp.ts";
+import { cliRegisterBody, desktopRegisterBody, isAmbiguousSession, resolvableSession } from "./src/server/sessions.ts";
+import { SESSION_ID_REQUIRED_TOOLS, SESSION_PARAM, buildTools } from "./src/server/tools.ts";
+import { WAKE_OFF_LINE, peerListHeader, wakeCommand, wakeCopy, wakeInstructions } from "./src/server/wake.ts";
 
 // Two independent transport constraints are pinned here, both learned the
 // hard way from Desktop/Cowork sessions:
@@ -116,14 +112,12 @@ describe("wake instructions", () => {
   const RAW = `t=$(date +%s); while true; do c=$(date +%s); curl -sN --max-time 600 "${URL_A}/json?since=$t"; echo; t=$(( c - 5 )); sleep 2; done | while IFS= read -r l; do case $l in *'"event":"message"'*) ;; *) continue ;; esac; case $l in *'"message":"off"'*) echo "claude-peers wake is now passive: this Monitor has stopped. Do not re-arm it."; exit 0 ;; esac; i=\${l#*'"id":"'}; i=\${i%%'"'*}; case " $s " in *" $i "*) continue ;; esac; s="$s $i"; n=$(date +%s); [ $(( n - \${w:-0} )) -lt 8 ] && continue; w=$n; echo wake; done`;
 
   test("wakeInstructions embeds the exact curl|grep command and timeout 1800000", async () => {
-    const { wakeInstructions } = await import("./server.ts");
     expect(wakeInstructions(URL_A, "claim")).toContain(
       `Monitor({ command: ${JSON.stringify(RAW)}, description: "claude-peers wake", timeout_ms: 1800000 })`,
     );
   });
 
   test("wake command reconnects, bounds each stream, and resumes from the last connect", async () => {
-    const { wakeInstructions } = await import("./server.ts");
     const text = wakeInstructions(URL_A, "claim");
     // A half-open stream must not leave the agent deaf until Monitor expiry,
     // and resuming from the last *connect* (not disconnect) replays anything
@@ -142,12 +136,10 @@ describe("wake instructions", () => {
   });
 
   test("re-arming tells the agent to check messages once (wakes during the gap are not replayed)", async () => {
-    const { wakeInstructions } = await import("./server.ts");
     expect(wakeInstructions(URL_A, "claim")).toMatch(/arm it again with the same call, then call check_messages once/);
   });
 
   test("claim_session copy says arm now; list_peers copy only if not already running", async () => {
-    const { wakeInstructions } = await import("./server.ts");
     expect(wakeInstructions(URL_A, "claim")).toStartWith("To be woken when a peer messages you, arm this Monitor now");
     const list = wakeInstructions(URL_A, "list");
     expect(list).toStartWith(`If your "claude-peers wake" Monitor is not running (or has expired), arm it:`);
@@ -155,7 +147,6 @@ describe("wake instructions", () => {
   });
 
   test('no copy contains "persistent"', async () => {
-    const { wakeInstructions, peerListHeader, SERVER_INSTRUCTIONS } = await import("./server.ts");
     for (const text of [
       wakeInstructions(URL_A, "claim"),
       wakeInstructions(URL_A, "list"),
@@ -168,19 +159,16 @@ describe("wake instructions", () => {
   });
 
   test("server instructions carry no Monitor call (cli sessions read them)", async () => {
-    const { SERVER_INSTRUCTIONS } = await import("./server.ts");
     expect(SERVER_INSTRUCTIONS).not.toContain("Monitor(");
     expect(SERVER_INSTRUCTIONS).not.toContain("/watch/");
     expect(SERVER_INSTRUCTIONS).not.toContain("as soon as you see it");
   });
 
   test("cli list_peers header has no Monitor copy", async () => {
-    const { peerListHeader } = await import("./server.ts");
     expect(peerListHeader("abc", undefined)).toBe("Your peer ID: abc\n\n");
   });
 
   test("list_peers shows only the caller's own wake URL", async () => {
-    const { peerListHeader } = await import("./server.ts");
     const mine = peerListHeader("abc", URL_A);
     expect(mine).toContain(`${URL_A}/json`);
     expect(mine).not.toContain(URL_B);
@@ -188,13 +176,11 @@ describe("wake instructions", () => {
   });
 
   test("no wake URL (relay off at the broker) omits the wake copy", async () => {
-    const { peerListHeader, wakeCopy } = await import("./server.ts");
     expect(wakeCopy(undefined, "claim")).toBe("");
     expect(peerListHeader("abc", undefined)).toBe("Your peer ID: abc\n\n");
   });
 
   test("an ambiguous peer_session resolves to no identity (so list_peers can't hand out a shared topic)", async () => {
-    const { resolvableSession } = await import("./server.ts");
     expect(resolvableSession("/home/claude")).toBeUndefined();
     expect(resolvableSession("/home/claude/")).toBeUndefined();
     expect(resolvableSession("cs_1a2b3c4d5e6f")).toBe("cs_1a2b3c4d5e6f");
@@ -236,7 +222,6 @@ describe("CLI registration builder", () => {
 
 describe("hardening: what the server leaks and how it delivers", () => {
   test("a desktop registration never uses the session token as its cwd", async () => {
-    const { desktopRegisterBody } = await import("./server.ts");
     const body = desktopRegisterBody("cs_0123456789ab", "PM agent");
     expect(body.session_token).toBe("cs_0123456789ab");
     expect(body.peer_type).toBe("desktop");
@@ -245,7 +230,6 @@ describe("hardening: what the server leaks and how it delivers", () => {
   });
 
   test("the tool-call log line carries no argument values", async () => {
-    const { toolCallLogLine } = await import("./server.ts");
     const line = toolCallLogLine("send_message", {
       to_id: "abc",
       message: "patient record 42",
@@ -257,12 +241,12 @@ describe("hardening: what the server leaks and how it delivers", () => {
   });
 
   test("peer text is never handed to a sampling request as a user turn", async () => {
-    const src = await Bun.file(`${import.meta.dir}/server.ts`).text();
-    expect(src.includes("createMessage")).toBe(false);
+    for (const file of new Bun.Glob("src/server/*.ts").scanSync(import.meta.dir)) {
+      expect(await Bun.file(`${import.meta.dir}/${file}`).text()).not.toContain("createMessage");
+    }
   });
 
   test("the debug log is owner-only", async () => {
-    const { tightenLogFile } = await import("./server.ts");
     const { mkdtempSync, writeFileSync, chmodSync, statSync, rmSync } = await import("node:fs");
     const dir = mkdtempSync(`${require("node:os").tmpdir()}/cp-log-`);
     try {
@@ -284,7 +268,6 @@ describe("wake Monitor output", () => {
   // Runs the exact command the copy hands an agent, against a stand-in relay
   // that streams events on a schedule, and returns what the Monitor would see.
   async function monitorOutput(events: Array<[number, Record<string, unknown>]>, gap = 8, runMs = 0): Promise<string> {
-    const { wakeCommand } = await import("./server.ts");
     const relay = Bun.serve({
       port: 0,
       hostname: "127.0.0.1",
@@ -370,7 +353,6 @@ describe("wake Monitor output", () => {
     expect(out).toBe("wake\nwake\n");
   }, 10_000);
   test("an 'off' from the broker stops the Monitor with a constant line", async () => {
-    const { WAKE_OFF_LINE } = await import("./server.ts");
     const out = await monitorOutput(
       [
         [0, msg("f1")],
