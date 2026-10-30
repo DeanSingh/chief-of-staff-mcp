@@ -613,8 +613,39 @@ const TOOLS = buildTools(PEER_TYPE);
 
 // --- Tool handlers ---
 
-// Track pending message previews for dynamic tool descriptions
-let pendingMessagePreview = "";
+// Per-peer delivery state. One server polls every Desktop session it serves,
+// and a CLI peer's id can change (re-register, /resume re-key), so the poll
+// cursor and the unread preview belong to a peer id, never to the process.
+type Inbox = { lastSeen: number; preview: string };
+const inboxes = new Map<PeerId, Inbox>();
+
+function inboxFor(peerId: PeerId): Inbox {
+  let inbox = inboxes.get(peerId);
+  if (!inbox) inboxes.set(peerId, (inbox = { lastSeen: 0, preview: "" }));
+  return inbox;
+}
+
+/** Drops a peer's unread preview once its mail is read, and refreshes the tool list. */
+async function clearPreview(peerId: PeerId): Promise<void> {
+  const inbox = inboxes.get(peerId);
+  if (!inbox?.preview) return;
+  inbox.preview = "";
+  try {
+    await mcp.notification({ method: "notifications/tools/list_changed" });
+  } catch { /* non-critical */ }
+}
+
+/**
+ * The check_messages banner. tools/list doesn't say which session is asking,
+ * and every session on a Desktop server shares one tool list, so a Desktop
+ * server shows no message text: one session's mail must not appear in
+ * another's tool list. A CLI server serves only its own session.
+ */
+export function unreadBanner(previews: string[], peerType: "cli" | "desktop"): string {
+  if (previews.length === 0) return "";
+  if (peerType === "cli") return `⚠️ NEW MESSAGES WAITING — CALL THIS TOOL NOW.\n\nPreview: ${previews.join(" | ")}`;
+  return "⚠️ New peer messages are waiting for at least one session on this server. Call this tool to see whether they are yours.";
+}
 
 function missingSessionIdError(toolName: string): string {
   let exampleArgs = "";
@@ -661,15 +692,15 @@ Fix — claim your own identity, then reuse it:
 }
 
 mcp.setRequestHandler(ListToolsRequestSchema, async () => {
-  if (!pendingMessagePreview) return { tools: TOOLS };
+  const served = new Set([...(myId ? [myId] : []), ...[...desktopPeers.values()].map((e) => e.peerId)]);
+  const previews = [...served].map((id) => inboxes.get(id)?.preview ?? "").filter(Boolean);
+  const banner = unreadBanner(previews, PEER_TYPE);
+  if (!banner) return { tools: TOOLS };
 
-  // Inject message preview into check_messages description
+  // Inject the banner into check_messages description
   const dynamicTools = TOOLS.map((t) => {
     if (t.name === "check_messages") {
-      return {
-        ...t,
-        description: `⚠️ NEW MESSAGES WAITING — CALL THIS TOOL NOW.\n\nPreview: ${pendingMessagePreview}\n\n${t.description}`,
-      };
+      return { ...t, description: `${banner}\n\n${t.description}` };
     }
     return t;
   });
@@ -962,12 +993,7 @@ Next: call set_summary (with your token) to tell other peers what you are workin
         if (result.messages.length > 0) {
           await ackMessages(effectivePeerId, result.messages);
         }
-        if (pendingMessagePreview) {
-          pendingMessagePreview = "";
-          try {
-            await mcp.notification({ method: "notifications/tools/list_changed" });
-          } catch { /* non-critical */ }
-        }
+        await clearPreview(effectivePeerId);
         if (result.messages.length === 0) {
           return {
             content: [{ type: "text" as const, text: "No new messages." }],
@@ -1007,11 +1033,12 @@ Next: call set_summary (with your token) to tell other peers what you are workin
 // get messages opportunistically without calling check_messages.
 
 async function appendPendingMessages(result: { content: { type: string; text: string }[] }, toolName: string, effectivePeerId: PeerId | null) {
-  if (!effectivePeerId || toolName === "check_messages" || !pendingMessagePreview) return result;
+  if (!effectivePeerId || toolName === "check_messages" || !inboxes.get(effectivePeerId)?.preview) return result;
   try {
     const pending = await brokerFetch<PollMessagesResponse>("/poll-messages", { id: effectivePeerId }, effectivePeerId);
     if (pending.messages.length > 0) {
       await ackMessages(effectivePeerId, pending.messages);
+      await clearPreview(effectivePeerId);
       const inbox = pending.messages
         .map((m) => `From ${m.from_id} (${m.sent_at}):\n${m.text}`)
         .join("\n\n---\n\n");
@@ -1028,7 +1055,8 @@ async function appendPendingMessages(result: { content: { type: string; text: st
 
 // --- Message ack helper ---
 
-let lastSeenMessageId = 0;
+// Highest message id this server has seen for any peer; only bounds the prune below.
+let highestMessageId = 0;
 // Track message IDs already pushed via channel to avoid re-pushing every poll cycle.
 // Messages are NOT acked by the poll loop — only check_messages/piggybacking acks them —
 // so they remain available as a fallback when channels aren't active.
@@ -1037,13 +1065,15 @@ const pushedMessageIds = new Set<number>();
 async function ackMessages(peerId: PeerId, messages: Message[]): Promise<void> {
   const ids = messages.map((m) => m.id);
   await brokerFetch("/ack-messages", { id: peerId, message_ids: ids }, peerId);
+  const inbox = inboxFor(peerId);
   for (const id of ids) {
     pushedMessageIds.add(id);
-    if (id > lastSeenMessageId) lastSeenMessageId = id;
+    if (id > inbox.lastSeen) inbox.lastSeen = id;
+    if (id > highestMessageId) highestMessageId = id;
   }
   // Prune old entries — only IDs near the high-water mark matter
   if (pushedMessageIds.size > 1000) {
-    const threshold = lastSeenMessageId - 500;
+    const threshold = highestMessageId - 500;
     for (const id of pushedMessageIds) {
       if (id < threshold) pushedMessageIds.delete(id);
     }
@@ -1053,10 +1083,11 @@ async function ackMessages(peerId: PeerId, messages: Message[]): Promise<void> {
 // --- Polling loop for inbound messages ---
 
 async function pollForPeer(peerId: PeerId) {
+  const inbox = inboxFor(peerId);
   try {
     const result = await brokerFetch<PollMessagesResponse>("/peek-messages", {
       id: peerId,
-      since_id: lastSeenMessageId,
+      since_id: inbox.lastSeen,
     }, peerId);
 
     // Fetch peer list once for sender lookups (not per-message)
@@ -1076,9 +1107,8 @@ async function pollForPeer(peerId: PeerId) {
     for (const msg of result.messages) {
       if (pushedMessageIds.has(msg.id)) continue;
 
-      if (msg.id > lastSeenMessageId) {
-        lastSeenMessageId = msg.id;
-      }
+      if (msg.id > inbox.lastSeen) inbox.lastSeen = msg.id;
+      if (msg.id > highestMessageId) highestMessageId = msg.id;
       const sender = peersCache?.find((p) => p.id === msg.from_id);
       const fromSummary = sender?.summary ?? "";
       const fromCwd = sender?.cwd ?? "";
@@ -1134,7 +1164,7 @@ async function pollForPeer(peerId: PeerId) {
         const preview = m.text.slice(0, 100);
         return `[${sender}]: ${preview}`;
       });
-      pendingMessagePreview = previews.join(" | ");
+      inbox.preview = previews.join(" | ");
 
       // Tell client to re-fetch tool list — they'll see the message in check_messages description
       try {

@@ -5,6 +5,7 @@ import {
   SESSION_PARAM,
   isAmbiguousSession,
   cliRegisterBody,
+  unreadBanner,
 } from "./server.ts";
 
 // Two independent transport constraints are pinned here, both learned the
@@ -323,4 +324,23 @@ describe("wake Monitor output", () => {
     const out = await monitorOutput([[0, msg("r1")], [1500, msg("r1")], [3000, msg("r2")]], 1);
     expect(out).toBe("wake\nwake\n");
   }, 10_000);
+});
+
+describe("unreadBanner", () => {
+  test("nothing unread, no banner", () => {
+    expect(unreadBanner([], "cli")).toBe("");
+    expect(unreadBanner([], "desktop")).toBe("");
+  });
+
+  test("a CLI server previews its own session's mail", () => {
+    expect(unreadBanner(["[abc]: hello"], "cli")).toContain("[abc]: hello");
+  });
+
+  // Every session on a Desktop server shares one tool list.
+  test("a Desktop server never puts message text in the shared tool list", () => {
+    const banner = unreadBanner(["[abc]: wire the funds"], "desktop");
+    expect(banner).not.toBe("");
+    expect(banner).not.toContain("wire the funds");
+    expect(banner).not.toContain("abc");
+  });
 });
