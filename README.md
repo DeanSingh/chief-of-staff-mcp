@@ -125,7 +125,26 @@ Limits: the feed is on the broker host's loopback, so **cloud Cowork sandboxes (
 
 ### Wake relay for cloud Cowork sessions (opt-in)
 
-Cloud Cowork sandboxes can't reach the loopback feed above. With `CLAUDE_PEERS_WAKE_RELAY` set on the broker (an ntfy server: `https://…`, or `http://` on 127.0.0.1/localhost), each desktop identity gets a private topic, and a send to it POSTs the literal body `wake` there, never message content. `claim_session` and `list_peers` print a `Monitor` call that streams the topic and prints only the word `wake` (each event once, at most once per 8 s), so text published by anyone holding the topic never reaches the agent. The agent then calls `check_messages`. Unset or `off` (the default): no topics, no outbound traffic.
+Cloud Cowork sandboxes can't reach the loopback feed above. While a desktop identity's wake mode is **active**, it gets a private topic on an ntfy relay (`CLAUDE_PEERS_WAKE_RELAY`, default `https://ntfy.sh`; `https://…`, or `http://` on 127.0.0.1/localhost), and a send to it POSTs the literal body `wake` there, never message content. `claim_session` and `list_peers` print a `Monitor` call that streams the topic and prints only the word `wake` (each event once, at most once per 8 s), so text published by anyone holding the topic never reaches the agent. The agent then calls `check_messages`. `CLAUDE_PEERS_WAKE_RELAY=off` disables the relay entirely.
+
+#### Wake mode: active or passive
+
+The `Monitor` expires every 30 minutes, and re-arming it costs the agent a turn even when nothing arrived. So waking is a switch:
+
+- **passive** (the default): no topics are published to and no `Monitor` is suggested. Mail arrives on the agent's next claude-peers call. No idle cost.
+- **active**: agents are told to arm the `Monitor` and are woken within seconds, at one turn per agent per 30 minutes while idle.
+
+```bash
+bun cli.ts desktop-wake                    # show the global mode and each agent's
+bun cli.ts desktop-wake active             # all Desktop agents
+bun cli.ts desktop-wake passive --all      # all agents, clearing their own settings
+bun cli.ts desktop-wake active <agent>     # one agent, by id or a unique part of its summary
+bun cli.ts desktop-wake default <agent>    # that agent follows the global mode again
+```
+
+`/desktop-wake …` runs the same command from Claude Code in any project; `bun cli.ts install-hooks` installs it. An agent can also switch itself: ask it to "stay awake" or "go quiet" and it calls the `set_wake` tool. Turning its own wake on starts publishing to the relay for that agent's topic, so the relay sees when that agent gets mail (never the content). An agent's own setting wins over the global one. The mode is stored in the broker's database, so it survives restarts.
+
+Running agents pick up a switch within one heartbeat (15 s), on their next claude-peers call. Switching to passive also publishes `off` to the topic, which ends a running `Monitor` with a constant line telling the agent not to re-arm it. A broker started with `CLAUDE_PEERS_WAKE_RELAY` set and no stored mode starts active, as before.
 
 ### CLI session identity
 
@@ -153,7 +172,7 @@ conversation its original id back (mail included) within one heartbeat. Install
 it once, and again after moving the repo:
 
 ```bash
-bun cli.ts install-hooks   # adds the hook to ~/.claude/settings.json; safe to re-run
+bun cli.ts install-hooks   # adds the hooks to ~/.claude/settings.json and /desktop-wake to ~/.claude/commands; safe to re-run
 ```
 
 ### Desktop / Cowork identity
@@ -179,6 +198,7 @@ bun cli.ts send <id> <msg>   # send a message into a Claude session
 bun cli.ts watch <id>        # stream a peer's inbound messages (Monitor fallback)
 bun cli.ts install-hooks     # register the SessionStart identity hook
 bun cli.ts kill-broker       # stop the broker
+bun cli.ts desktop-wake      # show or switch Desktop agents' wake mode (see above)
 ```
 
 ## Configuration
