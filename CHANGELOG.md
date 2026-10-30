@@ -6,10 +6,9 @@ Notable changes. There are no tagged releases yet; `main` is the release.
 
 ### Changed
 
-- The wake copy says the user set the wake mode and that it replaces any
-  earlier instruction about the Monitor, on claim, on `list_peers`, and when
-  a switch either way reaches a running session. Agents once told to stop the
-  Monitor now arm it again when their user turns wake on.
+- The wake copy states the session's mode and how it is set (`/desktop-wake`
+  or `set_wake`), on claim, on `list_peers`, and when a switch either way
+  reaches a running session (#19).
 
 - No function in `src/` is over the complexity limit: the broker's routes
   and the server's tools dispatch from tables, and registration reads as

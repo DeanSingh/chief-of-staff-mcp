@@ -157,23 +157,32 @@ describe("wake instructions", () => {
     expect(list).not.toContain("arm this Monitor now");
   });
 
-  // An agent told by its user to stop the Monitor keeps that order over an
-  // unattributed tool hint, so the copy says whose setting this is.
-  test("arm copy says the user chose wake mode and that it replaces an earlier stop order", async () => {
+  // The copy states the mode and how it is set, with no claim of who set it
+  // and no "overrides earlier instructions" wording.
+  test("arm copy states the mode and how it is set, and claims no authority", async () => {
     for (const text of [wakeInstructions(URL_A, "claim"), wakeInstructions(URL_A, "list")]) {
-      expect(text).toStartWith("Wake mode is on for this session because your user chose it");
-      expect(text).toContain("replaces any earlier instruction to stop the wake Monitor");
+      expect(text).toStartWith("Wake mode for this session is active (set with /desktop-wake or set_wake).");
     }
   });
 
-  test("a mode switch notice says the user switched it, both ways", async () => {
+  test("a mode switch notice states the new mode and how it is set, both ways", async () => {
     const on = wakeSwitchNotice(URL_A);
-    expect(on).toStartWith("Your user switched this session's wake mode to active.");
+    expect(on).toStartWith("Wake mode for this session is active (set with /desktop-wake or set_wake).");
     expect(on).toContain(`Monitor({ command: ${JSON.stringify(RAW)}`);
     const off = wakeSwitchNotice(undefined);
-    expect(off).toStartWith("Your user switched this session's wake mode to passive.");
-    expect(off).toContain("replaces any earlier instruction to keep the wake Monitor running");
+    expect(off).toStartWith("Wake mode for this session is now passive (set with /desktop-wake or set_wake).");
     expect(off).not.toContain("Monitor(");
+  });
+
+  test("no wake copy asserts user authority or overrides earlier instructions", async () => {
+    for (const text of [
+      wakeInstructions(URL_A, "claim"),
+      wakeInstructions(URL_A, "list"),
+      wakeSwitchNotice(URL_A),
+      wakeSwitchNotice(undefined),
+    ]) {
+      expect(text).not.toMatch(/your user|replaces|overrides|earlier instruction/i);
+    }
   });
 
   test('no copy contains "persistent"', async () => {

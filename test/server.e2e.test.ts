@@ -335,7 +335,7 @@ describe("desktop wake mode", () => {
       await setMode({ mode: "active" });
       await Bun.sleep(2500); // two heartbeats
       const on = await desk.call("set_summary", { summary: "e2e wake", peer_session: token });
-      expect(on).toContain("Your user switched this session's wake mode to active.");
+      expect(on).toContain("Wake mode for this session is active (set with /desktop-wake or set_wake).");
       expect(on).toContain("Monitor(");
       const topic = on.match(/cp-wake-[0-9a-f]{24}/)![0];
       // Told once, not on every call.
@@ -355,19 +355,19 @@ describe("desktop wake mode", () => {
     }
   }, 30_000);
 
-  test("a global switch to passive tells a running session its user made it", async () => {
+  test("a global switch to passive reaches a running session", async () => {
     const desk = new McpClient({ ...ENV, CLAUDE_PEERS_PEER_TYPE: "desktop", CLAUDE_PEERS_HEARTBEAT_MS: "1000" });
     try {
       await desk.init();
       await setMode({ mode: "active", clear_overrides: true });
       const claimed = await desk.call("claim_session", { label: "e2e wake off" });
       const token = claimed.match(/cs_[0-9a-f]{12}/)![0];
-      expect(claimed).toContain("because your user chose it");
+      expect(claimed).toContain("Wake mode for this session is active (set with /desktop-wake or set_wake).");
 
       await setMode({ mode: "passive" });
       await Bun.sleep(2500); // two heartbeats
       const off = await desk.call("set_summary", { summary: "e2e wake off", peer_session: token });
-      expect(off).toContain("Your user switched this session's wake mode to passive.");
+      expect(off).toContain("Wake mode for this session is now passive (set with /desktop-wake or set_wake).");
       expect(off).not.toContain("Monitor(");
     } finally {
       desk.stop();
