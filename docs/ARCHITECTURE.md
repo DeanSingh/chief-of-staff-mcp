@@ -41,6 +41,12 @@ One Desktop server serves every Desktop/Cowork session, so each session
 claims a `peer_session` token and passes it on every call. The broker keys
 that peer on the token.
 
+The server's mutable state is in one place, `src/server/state.ts`: the CLI
+host peer's id, cwd, git root and last summary (`state`), and the Desktop
+sessions it serves (`desktopPeers`). Registration, the heartbeat, tool
+handlers and the poll loop all read and update it. Per-peer delivery state
+(poll cursors, unread previews) lives in `src/server/delivery.ts`.
+
 ## Hook and CLI
 
 `hook.ts` runs as Claude Code's SessionStart and UserPromptSubmit hook. It

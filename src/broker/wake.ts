@@ -44,29 +44,36 @@ function activeTopics(): Set<string> {
   return new Set(rows.filter((r) => effectiveWakeMode(r.wake_mode) === "active").map((r) => r.wake_topic));
 }
 
-// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: argument validation and the off notices for every session a switch affects
-export function handleWakeMode(body: { mode?: string; peer_id?: string; clear_overrides?: boolean }): {
+type WakeModeRequest = { mode?: string; peer_id?: string; clear_overrides?: boolean };
+
+/** Why a /wake-mode request can't be applied, or null if it can. */
+function wakeModeError(body: WakeModeRequest, perPeer: boolean): string | null {
+  if (!isWakeMode(body.mode) && !(perPeer && body.mode === "default")) {
+    return `mode must be active or passive${perPeer ? " (or default, to follow the global mode)" : ""}`;
+  }
+  if (body.mode === "active" && !WAKE_ON) {
+    return "the wake relay is disabled (CLAUDE_PEERS_WAKE_RELAY=off or invalid)";
+  }
+  return null;
+}
+
+/** The newest desktop token for a peer id, if it is a desktop session. */
+function tokenForPeer(peerId: string): string | undefined {
+  const row = db.query("SELECT token FROM desktop_tokens WHERE peer_id = ? ORDER BY updated_at DESC").get(peerId) as {
+    token: string;
+  } | null;
+  return row?.token;
+}
+
+export function handleWakeMode(body: WakeModeRequest): {
   ok: boolean;
   error?: string;
   wake_url?: string;
 } {
   const perPeer = typeof body.peer_id === "string";
-  if (!isWakeMode(body.mode) && !(perPeer && body.mode === "default")) {
-    return {
-      ok: false,
-      error: `mode must be active or passive${perPeer ? " (or default, to follow the global mode)" : ""}`,
-    };
-  }
-  if (body.mode === "active" && !WAKE_ON) {
-    return { ok: false, error: "the wake relay is disabled (CLAUDE_PEERS_WAKE_RELAY=off or invalid)" };
-  }
-  const token = perPeer
-    ? (
-        db.query("SELECT token FROM desktop_tokens WHERE peer_id = ? ORDER BY updated_at DESC").get(body.peer_id!) as {
-          token: string;
-        } | null
-      )?.token
-    : undefined;
+  const error = wakeModeError(body, perPeer);
+  if (error) return { ok: false, error };
+  const token = perPeer ? tokenForPeer(body.peer_id!) : undefined;
   if (perPeer && !token) return { ok: false, error: `${body.peer_id} is not a desktop session` };
 
   const before = activeTopics();

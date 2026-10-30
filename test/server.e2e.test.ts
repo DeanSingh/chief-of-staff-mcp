@@ -260,6 +260,27 @@ describe("desktop sessions after a reap", () => {
   }, 30_000);
 });
 
+describe("tool dispatch", () => {
+  // Tool names come from the client: one that is an Object prototype key must
+  // be as unknown as any other, not dispatched to a built-in.
+  test("an unknown tool name is refused, including prototype keys", async () => {
+    const cli = new McpClient({
+      ...ENV,
+      CLAUDE_PEERS_PEER_TYPE: "cli",
+      CLAUDE_CODE_SESSION_ID: `e2e-dispatch-${PORT}`,
+    });
+    try {
+      await cli.init();
+      for (const name of ["no_such_tool", "constructor", "toString", "__proto__"]) {
+        const r = await cli.request("tools/call", { name, arguments: {} });
+        expect(JSON.stringify(r)).toContain(`Unknown tool: ${name}`);
+      }
+    } finally {
+      cli.stop();
+    }
+  }, 30_000);
+});
+
 describe("cli sessions after a reap", () => {
   // Issue #5, CLI side: the heartbeat's 404 triggers the re-register, with no
   // list-peers round trip on every beat.
