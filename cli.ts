@@ -14,7 +14,8 @@
  *   bun cli.ts desktop-wake    — Show or switch Desktop sessions' wake mode (active | passive)
  */
 
-import { chmodSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { authHeaders } from "./shared/auth.ts";
 import { hookCommand } from "./hook.ts";
 
@@ -37,6 +38,21 @@ async function brokerFetch<T>(path: string, body?: unknown): Promise<T> {
     throw new Error(`${res.status}: ${await res.text()}`);
   }
   return res.json() as Promise<T>;
+}
+
+/** The /desktop-wake slash command file, running the cli.ts in `dir`. */
+function desktopWakeCommand(dir: string): string {
+  const run = `bun '${`${dir}/cli.ts`.replace(/'/g, `'\\''`)}' desktop-wake`;
+  return `---
+description: Show or switch Claude Desktop agents' wake mode (active wakes them on new peer mail; passive costs nothing while idle)
+argument-hint: "[status | active | passive | default] [agent id or name] [--all]"
+allowed-tools: Bash(${run}:*)
+---
+<!-- # claude-peers: written by \`bun cli.ts install-hooks\`; re-run it after moving the repo. -->
+
+Run \`${run} $ARGUMENTS\` and show the user its output. Do not run anything else.
+If the command fails, show the error as-is.
+`;
 }
 
 const cmd = process.argv[2];
@@ -255,6 +271,19 @@ switch (cmd) {
       throw e;
     }
     console.log(`Installed SessionStart and UserPromptSubmit hooks in ${path}:\n  ${command}`);
+
+    // The /desktop-wake slash command, user-wide so it works from any project.
+    // It runs this checkout's cli.ts by absolute path, like the hook above. A
+    // file of the same name that isn't ours is left alone.
+    const cmdPath = `${dirname(path)}/commands/desktop-wake.md`;
+    const cmdFile = Bun.file(cmdPath);
+    if ((await cmdFile.exists()) && !(await cmdFile.text()).includes(MARK)) {
+      console.log(`Skipped ${cmdPath}: it exists and isn't from claude-peers.`);
+    } else {
+      mkdirSync(dirname(cmdPath), { recursive: true });
+      await Bun.write(cmdPath, desktopWakeCommand(import.meta.dir));
+      console.log(`Installed /desktop-wake in ${cmdPath}`);
+    }
     break;
   }
 

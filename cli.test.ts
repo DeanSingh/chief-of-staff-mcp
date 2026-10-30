@@ -63,6 +63,27 @@ describe("install-hooks", () => {
     expect(commands(s)).toEqual([OURS]);
   });
 
+  test("installs /desktop-wake next to settings.json, pointing at this checkout", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cp-cmd-"));
+    try {
+      const path = join(dir, "settings.json");
+      const run = () => Bun.spawn(["bun", `${import.meta.dir}/cli.ts`, "install-hooks", "--settings", path], { stdout: "pipe", stderr: "pipe" }).exited;
+      expect(await run()).toBe(0);
+      const cmd = await Bun.file(join(dir, "commands", "desktop-wake.md")).text();
+      expect(cmd).toContain(`Run \`bun '${import.meta.dir}/cli.ts' desktop-wake $ARGUMENTS\``);
+      expect(cmd).toContain(`allowed-tools: Bash(bun '${import.meta.dir}/cli.ts' desktop-wake:*)`);
+      expect(await run()).toBe(0); // re-running rewrites ours
+      expect(await Bun.file(join(dir, "commands", "desktop-wake.md")).text()).toBe(cmd);
+
+      // Someone else's /desktop-wake is left alone.
+      await Bun.write(join(dir, "commands", "desktop-wake.md"), "mine");
+      expect(await run()).toBe(0);
+      expect(await Bun.file(join(dir, "commands", "desktop-wake.md")).text()).toBe("mine");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("install-hooks replaces settings.json by rename, not in place", async () => {
     const path = join(DIR, `atomic-${n++}.json`);
     await Bun.write(path, JSON.stringify({ model: "opus" }));
