@@ -108,7 +108,80 @@ export async function ackMessages(peerId: PeerId, messages: Message[]): Promise<
 
 // --- Polling loop for inbound messages ---
 
-// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: one poll: sender lookup, every push channel, then the preview
+/** The peer list, for sender details, when any of `messages` is still to be pushed. */
+async function sendersFor(messages: Message[]): Promise<Peer[] | null> {
+  if (!messages.some((m) => !pushedMessageIds.has(m.id))) return null;
+  try {
+    return await brokerFetch<Peer[]>("/list-peers", {
+      scope: "machine",
+      cwd: state.myCwd,
+      git_root: state.myGitRoot,
+    });
+  } catch {
+    return null; // Non-critical, proceed without sender info
+  }
+}
+
+/** Pushes one message through every channel. None confirms delivery, so all of them fire. */
+async function pushMessage(msg: Message, sender: Peer | undefined): Promise<void> {
+  const fromSummary = sender?.summary ?? "";
+  const fromCwd = sender?.cwd ?? "";
+
+  // 1. Channel notification (works in CLI with --channels)
+  try {
+    await mcp.notification({
+      method: "notifications/claude/channel",
+      params: {
+        content: msg.text,
+        meta: {
+          from_id: msg.from_id,
+          from_summary: fromSummary,
+          from_cwd: fromCwd,
+          sent_at: msg.sent_at,
+        },
+      },
+    });
+  } catch {
+    // Transport-level failure — channel definitely not available
+  }
+
+  // Also push via logging notification — may surface in some clients
+  try {
+    await mcp.sendLoggingMessage({
+      level: "info",
+      logger: "claude-peers",
+      data: {
+        type: "peer_message",
+        from_id: msg.from_id,
+        from_summary: fromSummary,
+        from_cwd: fromCwd,
+        sent_at: msg.sent_at,
+        text: msg.text,
+      },
+    });
+  } catch {
+    // Logging not supported — piggyback on next tool call will deliver
+  }
+
+  // Track so we don't re-push on next poll cycle
+  pushedMessageIds.add(msg.id);
+
+  log(`Pushed message ${msg.id} from ${msg.from_id}`);
+}
+
+/** Puts the unread messages in check_messages' description and tells the client to re-fetch it. */
+async function showPreview(inbox: Inbox, messages: Message[]): Promise<void> {
+  inbox.preview = messages.map((m) => `[${m.from_id}]: ${m.text.slice(0, 100)}`).join(" | ");
+  try {
+    await mcp.notification({
+      method: "notifications/tools/list_changed",
+    });
+    log("Sent tools/list_changed notification");
+  } catch {
+    // Client doesn't support it
+  }
+}
+
 async function pollForPeer(peerId: PeerId) {
   const inbox = inboxFor(peerId);
   try {
@@ -122,91 +195,18 @@ async function pollForPeer(peerId: PeerId) {
     );
 
     // Fetch peer list once for sender lookups (not per-message)
-    let peersCache: Peer[] | null = null;
-    if (result.messages.some((m) => !pushedMessageIds.has(m.id))) {
-      try {
-        peersCache = await brokerFetch<Peer[]>("/list-peers", {
-          scope: "machine",
-          cwd: state.myCwd,
-          git_root: state.myGitRoot,
-        });
-      } catch {
-        // Non-critical, proceed without sender info
-      }
-    }
-
+    const peers = await sendersFor(result.messages);
     for (const msg of result.messages) {
       if (pushedMessageIds.has(msg.id)) continue;
-
       if (msg.id > inbox.lastSeen) inbox.lastSeen = msg.id;
       if (msg.id > highestMessageId) highestMessageId = msg.id;
-      const sender = peersCache?.find((p) => p.id === msg.from_id);
-      const fromSummary = sender?.summary ?? "";
-      const fromCwd = sender?.cwd ?? "";
-
-      // Try ALL delivery mechanisms — none are confirmed delivery, so fire all of them
-
-      // 1. Channel notification (works in CLI with --channels)
-      try {
-        await mcp.notification({
-          method: "notifications/claude/channel",
-          params: {
-            content: msg.text,
-            meta: {
-              from_id: msg.from_id,
-              from_summary: fromSummary,
-              from_cwd: fromCwd,
-              sent_at: msg.sent_at,
-            },
-          },
-        });
-      } catch {
-        // Transport-level failure — channel definitely not available
-      }
-
-      // Also push via logging notification — may surface in some clients
-      try {
-        await mcp.sendLoggingMessage({
-          level: "info",
-          logger: "claude-peers",
-          data: {
-            type: "peer_message",
-            from_id: msg.from_id,
-            from_summary: fromSummary,
-            from_cwd: fromCwd,
-            sent_at: msg.sent_at,
-            text: msg.text,
-          },
-        });
-      } catch {
-        // Logging not supported — piggyback on next tool call will deliver
-      }
-
-      // Track so we don't re-push on next poll cycle
-      pushedMessageIds.add(msg.id);
-
-      log(`Pushed message ${msg.id} from ${msg.from_id}`);
+      await pushMessage(
+        msg,
+        peers?.find((p) => p.id === msg.from_id),
+      );
     }
 
-    // If we found new messages, update tool descriptions and notify client
-    if (result.messages.length > 0) {
-      const previews = result.messages.map((m) => {
-        const sender = m.from_id;
-        const preview = m.text.slice(0, 100);
-        return `[${sender}]: ${preview}`;
-      });
-      inbox.preview = previews.join(" | ");
-
-      // Tell client to re-fetch tool list — they'll see the message in check_messages description
-      try {
-        await mcp.notification({
-          method: "notifications/tools/list_changed",
-        });
-        log("Sent tools/list_changed notification");
-      } catch {
-        // Client doesn't support it
-      }
-    }
+    if (result.messages.length > 0) await showPreview(inbox, result.messages);
   } catch (e) {
     // Broker might be down temporarily, don't crash
     log(`Poll error (${peerId}): ${e instanceof Error ? e.message : String(e)}`);
