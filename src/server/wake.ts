@@ -51,8 +51,15 @@ export function wakeCommand(url: string, gapSec = 8): string {
 
 export const WAKE_OFF_LINE = "claude-peers wake is now passive: this Monitor has stopped. Do not re-arm it.";
 
+// The copy states the mode and how it is set, and claims no authority: the
+// broker can't tell who flipped it (anything holding the install secret can),
+// and "this overrides your earlier instructions" in a tool result is the shape
+// of a prompt injection. An agent holding a direct order from its user about
+// the Monitor should take a change to it from the user, not from this copy.
+const WAKE_SET_BY = "(set with /desktop-wake or set_wake, or the broker's default)";
+
 /** Told to a session whose wake mode just went passive. */
-export const WAKE_PASSIVE_NOTICE = `Wake mode for this session is now passive. Your "claude-peers wake" Monitor stops by itself; do not re-arm it. Peer messages still arrive on your next claude-peers call.`;
+export const WAKE_PASSIVE_NOTICE = `Wake mode for this session is now passive ${WAKE_SET_BY}. Your "claude-peers wake" Monitor stops by itself; do not re-arm it. Peer messages still arrive on your next claude-peers call.`;
 
 export function wakeInstructions(url: string, mode: "claim" | "list"): string {
   const command = wakeCommand(url);
@@ -60,11 +67,16 @@ export function wakeInstructions(url: string, mode: "claim" | "list"): string {
     mode === "claim"
       ? "To be woken when a peer messages you, arm this Monitor now, then carry on:"
       : `If your "claude-peers wake" Monitor is not running (or has expired), arm it:`;
-  return `${lead}
+  return `Wake mode for this session is active ${WAKE_SET_BY}. ${lead}
 
     Monitor({ command: ${JSON.stringify(command)}, description: "claude-peers wake", timeout_ms: 1800000 })
 
 When it fires: call check_messages (with your ${SESSION_PARAM}) and answer what you find. When it expires (every 30 min), arm it again with the same call, then call check_messages once to catch anything sent while it was down. If it prints that wake is passive, or a claude-peers result says so, do not re-arm it. This URL is private to you; do not share it.`;
+}
+
+/** Told to a running session on its next tool call after its wake mode is switched. */
+export function wakeSwitchNotice(url: string | undefined): string {
+  return url ? wakeInstructions(url, "claim") : WAKE_PASSIVE_NOTICE;
 }
 
 /** The wake copy for a session, or "" when the broker gave it no wake URL (relay off, or no token). */

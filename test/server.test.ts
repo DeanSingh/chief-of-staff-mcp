@@ -6,7 +6,14 @@ import { tightenLogFile, toolCallLogLine } from "../src/server/log.ts";
 import { SERVER_INSTRUCTIONS } from "../src/server/mcp.ts";
 import { cliRegisterBody, desktopRegisterBody, isAmbiguousSession, resolvableSession } from "../src/server/sessions.ts";
 import { SESSION_ID_REQUIRED_TOOLS, SESSION_PARAM, buildTools } from "../src/server/tools.ts";
-import { WAKE_OFF_LINE, peerListHeader, wakeCommand, wakeCopy, wakeInstructions } from "../src/server/wake.ts";
+import {
+  WAKE_OFF_LINE,
+  peerListHeader,
+  wakeCommand,
+  wakeCopy,
+  wakeInstructions,
+  wakeSwitchNotice,
+} from "../src/server/wake.ts";
 
 /** The repo root, where the entry files live. */
 const ROOT = dirname(import.meta.dir);
@@ -144,10 +151,44 @@ describe("wake instructions", () => {
   });
 
   test("claim_session copy says arm now; list_peers copy only if not already running", async () => {
-    expect(wakeInstructions(URL_A, "claim")).toStartWith("To be woken when a peer messages you, arm this Monitor now");
+    expect(wakeInstructions(URL_A, "claim")).toContain("To be woken when a peer messages you, arm this Monitor now");
     const list = wakeInstructions(URL_A, "list");
-    expect(list).toStartWith(`If your "claude-peers wake" Monitor is not running (or has expired), arm it:`);
+    expect(list).toContain(`If your "claude-peers wake" Monitor is not running (or has expired), arm it:`);
     expect(list).not.toContain("arm this Monitor now");
+  });
+
+  // The copy states the mode and how it is set, with no claim of who set it
+  // and no "overrides earlier instructions" wording.
+  test("arm copy states the mode and how it is set, and claims no authority", async () => {
+    for (const text of [wakeInstructions(URL_A, "claim"), wakeInstructions(URL_A, "list")]) {
+      expect(text).toStartWith(
+        "Wake mode for this session is active (set with /desktop-wake or set_wake, or the broker's default).",
+      );
+    }
+  });
+
+  test("a mode switch notice states the new mode and how it is set, both ways", async () => {
+    const on = wakeSwitchNotice(URL_A);
+    expect(on).toStartWith(
+      "Wake mode for this session is active (set with /desktop-wake or set_wake, or the broker's default).",
+    );
+    expect(on).toContain(`Monitor({ command: ${JSON.stringify(RAW)}`);
+    const off = wakeSwitchNotice(undefined);
+    expect(off).toStartWith(
+      "Wake mode for this session is now passive (set with /desktop-wake or set_wake, or the broker's default).",
+    );
+    expect(off).not.toContain("Monitor(");
+  });
+
+  test("no wake copy asserts user authority or overrides earlier instructions", async () => {
+    for (const text of [
+      wakeInstructions(URL_A, "claim"),
+      wakeInstructions(URL_A, "list"),
+      wakeSwitchNotice(URL_A),
+      wakeSwitchNotice(undefined),
+    ]) {
+      expect(text).not.toMatch(/your user|replaces|overrides|earlier instruction/i);
+    }
   });
 
   test('no copy contains "persistent"', async () => {
