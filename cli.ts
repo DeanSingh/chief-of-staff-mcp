@@ -180,7 +180,9 @@ switch (cmd) {
       }
       await new Promise<void>((resolve) => {
         const ws = new WebSocket(wsUrl, { headers });
-        ws.onopen = () => { backoff = 1000; };
+        ws.onopen = () => {
+          backoff = 1000;
+        };
         ws.onmessage = (ev) => {
           try {
             if ((JSON.parse(String(ev.data)) as { type: string }).type !== "wake") return; // "watching" handshake etc.
@@ -189,7 +191,9 @@ switch (cmd) {
             // ignore malformed frame
           }
         };
-        ws.onerror = () => { /* onclose follows */ };
+        ws.onerror = () => {
+          /* onclose follows */
+        };
         ws.onclose = () => resolve();
       });
       console.error(`[claude-peers] Feed closed; reconnecting in ${backoff / 1000}s`);
@@ -234,7 +238,9 @@ switch (cmd) {
     // Only the hooks we own are typed; everything else passes through untouched.
     type Hook = { command?: unknown; [k: string]: unknown };
     type Group = { hooks?: Hook[]; [k: string]: unknown };
-    const settings: { hooks?: Record<string, Group[]>; [k: string]: unknown } = (await file.exists()) ? await file.json() : {};
+    const settings: { hooks?: Record<string, Group[]>; [k: string]: unknown } = (await file.exists())
+      ? await file.json()
+      : {};
     const command = hookCommand(import.meta.dir);
 
     settings.hooks ??= {};
@@ -262,7 +268,9 @@ switch (cmd) {
       chmodSync(tmp, mode);
       renameSync(tmp, real);
     } catch (e) {
-      try { unlinkSync(tmp); } catch {}
+      try {
+        unlinkSync(tmp);
+      } catch {}
       throw e;
     }
     console.log(`Installed SessionStart and UserPromptSubmit hooks in ${path}:\n  ${command}`);
@@ -286,7 +294,11 @@ switch (cmd) {
     // Active: Desktop sessions arm a Monitor that wakes them within seconds of
     // a message, at one turn per session per 30-minute re-arm. Passive: pull
     // only, no idle cost. An agent's own setting wins over the global one.
-    type Status = { global: string; relay: string | null; peers: { id: string; summary: string; mode: string; own_setting: boolean }[] };
+    type Status = {
+      global: string;
+      relay: string | null;
+      peers: { id: string; summary: string; mode: string; own_setting: boolean }[];
+    };
     const args = process.argv.slice(3);
     const all = args.includes("--all");
     const [mode, ...rest] = args.filter((a) => a !== "--all");
@@ -294,10 +306,14 @@ switch (cmd) {
     const show = (st: Status) => {
       console.log(`Global: ${st.global}${st.relay ? ` (relay ${st.relay})` : " (relay disabled)"}`);
       for (const p of st.peers) {
-        console.log(`  ${p.id}  ${(p.mode + (p.own_setting ? "*" : "")).padEnd(8)} ${p.summary.slice(0, 70) || "(no summary)"}`);
+        console.log(
+          `  ${p.id}  ${(p.mode + (p.own_setting ? "*" : "")).padEnd(8)} ${p.summary.slice(0, 70) || "(no summary)"}`,
+        );
       }
-      if (st.peers.some((p) => p.own_setting)) console.log("  * = the agent's own setting, which wins over the global one");
-      if (st.peers.some((p) => p.mode === "active")) console.log("Active agents re-arm their Monitor every 30 min, one turn each, even when idle.");
+      if (st.peers.some((p) => p.own_setting))
+        console.log("  * = the agent's own setting, which wins over the global one");
+      if (st.peers.some((p) => p.mode === "active"))
+        console.log("Active agents re-arm their Monitor every 30 min, one turn each, even when idle.");
     };
     try {
       if (!mode || mode === "status") {
@@ -305,18 +321,24 @@ switch (cmd) {
         break;
       }
       if (!["active", "passive", "default"].includes(mode) || (mode === "default" && !target)) {
-        console.error("Usage: bun cli.ts desktop-wake [status | active | passive] [agent id or name] [--all]\n       bun cli.ts desktop-wake default <agent>   (the agent follows the global mode again)\n--all also clears every agent's own setting.");
+        console.error(
+          "Usage: bun cli.ts desktop-wake [status | active | passive] [agent id or name] [--all]\n       bun cli.ts desktop-wake default <agent>   (the agent follows the global mode again)\n--all also clears every agent's own setting.",
+        );
         process.exit(1);
       }
       let peer_id: string | undefined;
       if (target) {
         const st = await brokerFetch<Status>("/wake-status", {});
         const exact = st.peers.find((p) => p.id === target);
-        const matches = exact ? [exact] : st.peers.filter((p) => p.summary.toLowerCase().includes(target.toLowerCase()));
+        const matches = exact
+          ? [exact]
+          : st.peers.filter((p) => p.summary.toLowerCase().includes(target.toLowerCase()));
         if (matches.length !== 1) {
-          console.error(matches.length
-            ? `"${target}" matches ${matches.length} Desktop sessions; pass an id:\n${matches.map((p) => `  ${p.id}  ${p.summary.slice(0, 70)}`).join("\n")}`
-            : `No Desktop session matches "${target}".`);
+          console.error(
+            matches.length
+              ? `"${target}" matches ${matches.length} Desktop sessions; pass an id:\n${matches.map((p) => `  ${p.id}  ${p.summary.slice(0, 70)}`).join("\n")}`
+              : `No Desktop session matches "${target}".`,
+          );
           process.exit(1);
         }
         peer_id = matches[0]!.id;

@@ -23,7 +23,10 @@ const stub = Bun.serve({
 const DIR = mkdtempSync(join(tmpdir(), "cp-hook-"));
 const DB = join(DIR, "peers.db");
 const SECRET = ensureSecret(secretPath(DB));
-afterAll(() => { stub.stop(true); rmSync(DIR, { recursive: true, force: true }); });
+afterAll(() => {
+  stub.stop(true);
+  rmSync(DIR, { recursive: true, force: true });
+});
 
 async function runHook(input: unknown, port: number | undefined, hostComm = "bun", db = DB) {
   const started = performance.now();
@@ -45,7 +48,8 @@ describe("hook.ts", () => {
     try {
       let child = 0;
       for (let i = 0; i < 50 && !child; i++) {
-        child = parseInt(new TextDecoder().decode(Bun.spawnSync(["pgrep", "-P", String(sh.pid)]).stdout).trim(), 10) || 0;
+        child =
+          parseInt(new TextDecoder().decode(Bun.spawnSync(["pgrep", "-P", String(sh.pid)]).stdout).trim(), 10) || 0;
         if (!child) await Bun.sleep(20);
       }
       expect(hostPid(child, "sh")).toBe(sh.pid);
@@ -57,7 +61,11 @@ describe("hook.ts", () => {
 
   test("no host process: no request", async () => {
     const before = hits.length;
-    const r = await runHook({ hook_event_name: "SessionStart", session_id: "s-nohost", source: "startup" }, stub.port, "no-such-process-name");
+    const r = await runHook(
+      { hook_event_name: "SessionStart", session_id: "s-nohost", source: "startup" },
+      stub.port,
+      "no-such-process-name",
+    );
     expect(r.exitCode).toBe(0);
     expect(hits.length).toBe(before);
   });
@@ -94,7 +102,12 @@ describe("hook.ts", () => {
 
   test("no broker secret yet: no request", async () => {
     const before = hits.length;
-    const r = await runHook({ hook_event_name: "SessionStart", session_id: "s-nosecret", source: "startup" }, stub.port, "bun", join(DIR, "none.db"));
+    const r = await runHook(
+      { hook_event_name: "SessionStart", session_id: "s-nosecret", source: "startup" },
+      stub.port,
+      "bun",
+      join(DIR, "none.db"),
+    );
     expect(r.exitCode).toBe(0);
     expect(hits.length).toBe(before);
   });

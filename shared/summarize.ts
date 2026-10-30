@@ -92,10 +92,7 @@ export async function getGitBranch(cwd: string): Promise<string | null> {
 /**
  * Get recently modified tracked files in the git repo.
  */
-export async function getRecentFiles(
-  cwd: string,
-  limit = 10
-): Promise<string[]> {
+export async function getRecentFiles(cwd: string, limit = 10): Promise<string[]> {
   try {
     // Get modified/staged files first
     const diffProc = Bun.spawn(["git", "diff", "--name-only", "HEAD"], {
@@ -116,14 +113,11 @@ export async function getRecentFiles(
     }
 
     // Also get recently committed files
-    const logProc = Bun.spawn(
-      ["git", "log", "--oneline", "--name-only", "-5", "--format="],
-      {
-        cwd,
-        stdout: "pipe",
-        stderr: "ignore",
-      }
-    );
+    const logProc = Bun.spawn(["git", "log", "--oneline", "--name-only", "-5", "--format="], {
+      cwd,
+      stdout: "pipe",
+      stderr: "ignore",
+    });
     const logText = await new Response(logProc.stdout).text();
     await logProc.exited;
 

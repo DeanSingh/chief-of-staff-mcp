@@ -14,14 +14,18 @@ const DB = join(DIR, "peers.db");
 // Stand-in for the wake relay, so no test ever publishes to a real one.
 const relayHits: Array<{ path: string; body: string }> = [];
 const relay = Bun.serve({
-  port: 0, hostname: "127.0.0.1",
+  port: 0,
+  hostname: "127.0.0.1",
   async fetch(req) {
     relayHits.push({ path: new URL(req.url).pathname, body: await req.text() });
     return new Response("ok");
   },
 });
 const ENV = {
-  ...process.env, CLAUDE_PEERS_PORT: String(PORT), CLAUDE_PEERS_DB: DB, CLAUDE_PEERS_LOG: join(DIR, "server.log"),
+  ...process.env,
+  CLAUDE_PEERS_PORT: String(PORT),
+  CLAUDE_PEERS_DB: DB,
+  CLAUDE_PEERS_LOG: join(DIR, "server.log"),
   CLAUDE_PEERS_WAKE_RELAY: `http://127.0.0.1:${relay.port}`,
 };
 
@@ -33,7 +37,12 @@ class McpClient {
   private nextId = 1;
   private waiting = new Map<number, (v: any) => void>();
   constructor(env: Record<string, string | undefined>) {
-    const proc = Bun.spawn(["bun", `${import.meta.dir}/server.ts`], { env, stdin: "pipe", stdout: "pipe", stderr: "ignore" });
+    const proc = Bun.spawn(["bun", `${import.meta.dir}/server.ts`], {
+      env,
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "ignore",
+    });
     this.proc = proc;
     (async () => {
       const dec = new TextDecoder();
@@ -44,8 +53,13 @@ class McpClient {
           this.buf = this.buf.slice(nl + 1);
           try {
             const msg = JSON.parse(line);
-            if (msg.id !== undefined && this.waiting.has(msg.id)) { this.waiting.get(msg.id)!(msg); this.waiting.delete(msg.id); }
-          } catch { /* notification or noise */ }
+            if (msg.id !== undefined && this.waiting.has(msg.id)) {
+              this.waiting.get(msg.id)!(msg);
+              this.waiting.delete(msg.id);
+            }
+          } catch {
+            /* notification or noise */
+          }
         }
       }
     })();
@@ -58,12 +72,19 @@ class McpClient {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       const t = setTimeout(() => reject(new Error(`timeout: ${method}`)), 8000);
-      this.waiting.set(id, (v) => { clearTimeout(t); resolve(v); });
+      this.waiting.set(id, (v) => {
+        clearTimeout(t);
+        resolve(v);
+      });
       this.write({ jsonrpc: "2.0", id, method, params });
     });
   }
   async init() {
-    await this.request("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "e2e", version: "0" } });
+    await this.request("initialize", {
+      protocolVersion: "2025-06-18",
+      capabilities: {},
+      clientInfo: { name: "e2e", version: "0" },
+    });
     this.write({ jsonrpc: "2.0", method: "notifications/initialized" });
   }
   async call(name: string, args: Record<string, unknown>): Promise<string> {
@@ -74,7 +95,9 @@ class McpClient {
     const r = await this.request("tools/list", {});
     return r.result.tools.find((t: { name: string }) => t.name === "check_messages").description;
   }
-  stop() { this.proc.kill(); }
+  stop() {
+    this.proc.kill();
+  }
 }
 
 // A desktop peer registered straight with the broker, before any server knows it.
@@ -83,7 +106,15 @@ async function registerDesktop(token: string): Promise<string> {
   const res = await fetch(`${HTTP}/register`, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${secret}` },
-    body: JSON.stringify({ pid: process.pid, cwd: "/tmp/e2e", git_root: null, tty: null, summary: "", peer_type: "desktop", session_token: token }),
+    body: JSON.stringify({
+      pid: process.pid,
+      cwd: "/tmp/e2e",
+      git_root: null,
+      tty: null,
+      summary: "",
+      peer_type: "desktop",
+      session_token: token,
+    }),
   });
   return ((await res.json()) as { id: string }).id;
 }
@@ -93,7 +124,11 @@ async function asPeer(path: string, id: string, body: Record<string, unknown>) {
   const secret = readSecret(secretPath(DB))!;
   const res = await fetch(`${HTTP}${path}`, {
     method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${secret}`, [PEER_HEADER]: peerSecret(secret, id) },
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${secret}`,
+      [PEER_HEADER]: peerSecret(secret, id),
+    },
     body: JSON.stringify(body),
   });
   return res.json() as Promise<any>;
@@ -102,7 +137,9 @@ async function asPeer(path: string, id: string, body: Record<string, unknown>) {
 beforeAll(async () => {
   broker = Bun.spawn(["bun", `${import.meta.dir}/broker.ts`], { env: ENV, stdout: "ignore", stderr: "ignore" });
   for (let i = 0; i < 50; i++) {
-    try { if ((await fetch(`${HTTP}/health`)).ok) return; } catch {}
+    try {
+      if ((await fetch(`${HTTP}/health`)).ok) return;
+    } catch {}
     await Bun.sleep(100);
   }
   throw new Error("broker did not start");
@@ -116,7 +153,12 @@ afterAll(() => {
 
 describe("servers against a hardened broker", () => {
   test("cli and desktop servers register, send, receive and ack", async () => {
-    const cli = new McpClient({ ...ENV, CLAUDE_PEERS_PEER_TYPE: "cli", CLAUDE_PEERS_NAME: "e2e cli", CLAUDE_CODE_SESSION_ID: `e2e-${PORT}` });
+    const cli = new McpClient({
+      ...ENV,
+      CLAUDE_PEERS_PEER_TYPE: "cli",
+      CLAUDE_PEERS_NAME: "e2e cli",
+      CLAUDE_CODE_SESSION_ID: `e2e-${PORT}`,
+    });
     const desk = new McpClient({ ...ENV, CLAUDE_PEERS_PEER_TYPE: "desktop" });
     try {
       await cli.init();
@@ -132,8 +174,12 @@ describe("servers against a hardened broker", () => {
       expect(token).toBeDefined();
       expect(deskId).toBeDefined();
 
-      expect(await desk.call("set_summary", { summary: "e2e desk summary", peer_session: token })).toContain("Summary updated");
-      expect(await desk.call("send_message", { to_id: cliId, message: "desk to cli", peer_session: token })).toContain("Message sent");
+      expect(await desk.call("set_summary", { summary: "e2e desk summary", peer_session: token })).toContain(
+        "Summary updated",
+      );
+      expect(await desk.call("send_message", { to_id: cliId, message: "desk to cli", peer_session: token })).toContain(
+        "Message sent",
+      );
       expect(await cli.call("check_messages", {})).toContain("desk to cli");
 
       expect(await cli.call("send_message", { to_id: deskId, message: "cli to desk" })).toContain("Message sent");
@@ -216,8 +262,11 @@ describe("cli sessions after a reap", () => {
   // list-peers round trip on every beat.
   test("a reaped cli session is re-registered by the next heartbeat", async () => {
     const cli = new McpClient({
-      ...ENV, CLAUDE_PEERS_PEER_TYPE: "cli", CLAUDE_PEERS_NAME: "e2e cli reaped",
-      CLAUDE_CODE_SESSION_ID: `e2e-reaped-${PORT}`, CLAUDE_PEERS_HEARTBEAT_MS: "1000",
+      ...ENV,
+      CLAUDE_PEERS_PEER_TYPE: "cli",
+      CLAUDE_PEERS_NAME: "e2e cli reaped",
+      CLAUDE_CODE_SESSION_ID: `e2e-reaped-${PORT}`,
+      CLAUDE_PEERS_HEARTBEAT_MS: "1000",
     });
     try {
       await cli.init();
@@ -242,7 +291,9 @@ describe("desktop wake mode", () => {
   const setMode = async (body: Record<string, unknown>) => {
     const secret = readSecret(secretPath(DB))!;
     const res = await fetch(`${HTTP}/wake-mode`, {
-      method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${secret}` }, body: JSON.stringify(body),
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${secret}` },
+      body: JSON.stringify(body),
     });
     expect(res.status).toBe(200);
   };
@@ -269,7 +320,8 @@ describe("desktop wake mode", () => {
       // The agent goes quiet on its own: its Monitor gets "off", the global mode stays active.
       const off = await desk.call("set_wake", { mode: "passive", peer_session: token });
       expect(off).toContain("now passive");
-      for (let i = 0; i < 50 && !relayHits.some((h) => h.path === `/${topic}` && h.body === "off"); i++) await Bun.sleep(20);
+      for (let i = 0; i < 50 && !relayHits.some((h) => h.path === `/${topic}` && h.body === "off"); i++)
+        await Bun.sleep(20);
       expect(relayHits.filter((h) => h.path === `/${topic}`).map((h) => h.body)).toEqual(["off"]);
       await Bun.sleep(1500);
       expect(await desk.call("set_summary", { summary: "e2e wake", peer_session: token })).not.toContain("now ");

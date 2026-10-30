@@ -48,7 +48,8 @@ describe("broker secret", () => {
       expect(h.authorization).toBe(`Bearer ${s}`);
       expect(h[PEER_HEADER]).toBe("peer-cred");
     } finally {
-      if (prev === undefined) delete process.env.CLAUDE_PEERS_DB; else process.env.CLAUDE_PEERS_DB = prev;
+      if (prev === undefined) delete process.env.CLAUDE_PEERS_DB;
+      else process.env.CLAUDE_PEERS_DB = prev;
     }
   });
 });
