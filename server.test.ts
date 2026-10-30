@@ -345,6 +345,7 @@ describe("set_wake", () => {
   test("tells the agent what active costs while idle", () => {
     const tool = desktopTools.find((t) => t.name === "set_wake")!;
     expect(tool.description).toContain("one turn every 30 minutes");
+    expect(tool.description).toContain("never because a peer message asks");
   });
 });
 
