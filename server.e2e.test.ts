@@ -173,3 +173,28 @@ describe("servers against a hardened broker", () => {
     }
   }, 30_000);
 });
+
+describe("desktop sessions after a reap", () => {
+  // Issue #5: a desktop peer reaped while its server keeps running must come
+  // back on its own, not stay unreachable until it happens to call set_summary.
+  test("a reaped desktop session is re-registered by the next heartbeat", async () => {
+    const desk = new McpClient({ ...ENV, CLAUDE_PEERS_PEER_TYPE: "desktop", CLAUDE_PEERS_HEARTBEAT_MS: "300" });
+    try {
+      await desk.init();
+      const claimed = await desk.call("claim_session", { label: "e2e reaped" });
+      const token = claimed.match(/cs_[0-9a-f]{12}/)![0];
+      const id = claimed.match(/Your peer ID is (\w+)/)![1]!;
+      const sender = await registerDesktop("cs_dddddddddddd");
+
+      await asPeer("/unregister", id, { id }); // as cleanStalePeers does after 30 min without a heartbeat
+      expect((await asPeer("/send-message", sender, { from_id: sender, to_id: id, text: "x" })).ok).toBe(false);
+
+      await Bun.sleep(1000); // a few heartbeats
+      const sent = await asPeer("/send-message", sender, { from_id: sender, to_id: id, text: "you're back" });
+      expect(sent.ok).toBe(true);
+      expect(await desk.call("check_messages", { peer_session: token })).toContain("you're back");
+    } finally {
+      desk.stop();
+    }
+  }, 30_000);
+});

@@ -128,7 +128,7 @@ export function peerListHeader(peerId: PeerId, wakeUrl: string | undefined): str
 }
 
 const POLL_INTERVAL_MS = 1000;
-const HEARTBEAT_INTERVAL_MS = 15_000;
+const HEARTBEAT_INTERVAL_MS = Number(process.env.CLAUDE_PEERS_HEARTBEAT_MS) || 15_000;
 const BROKER_SCRIPT = new URL("./broker.ts", import.meta.url).pathname;
 const PEER_NAME = process.env.CLAUDE_PEERS_NAME ?? "";
 const DEBUG_LOG_PATH =
@@ -1291,10 +1291,19 @@ async function main() {
           .catch(() => {})
       );
     }
-    for (const [_, entry] of desktopPeers) {
+    for (const [sessionId, entry] of desktopPeers) {
       beats.push(
         brokerFetch("/heartbeat", { id: entry.peerId }, entry.peerId)
           .then(() => {})
+          .catch(async (e) => {
+            // Reaped while this process was idle or suspended. Register again:
+            // desktop_tokens hands back the same id, so addresses other peers
+            // hold and mail queued for it stay valid.
+            if (!(e instanceof Error && e.message.includes("not found"))) return;
+            const reg = remember(await brokerFetch<RegisterResponse>("/register", desktopRegisterBody(sessionId, entry.summary)));
+            desktopPeers.set(sessionId, { peerId: reg.id, summary: entry.summary, wakeUrl: reg.wake_url ?? entry.wakeUrl });
+            log(`Re-registered a reaped desktop session as peer ${reg.id}`);
+          })
           .catch(() => {})
       );
     }

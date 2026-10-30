@@ -204,6 +204,22 @@ describe("broker /watch WebSocket feed", () => {
     expect(peek.messages.map((m) => m.text)).toContain("while you were out");
   });
 
+  test("heartbeat for a reaped peer says not found, so its server can re-register it", async () => {
+    const reg = () => post<{ id: string }>("/register", {
+      pid: LIVE_PIDS[0]!, cwd: "cs_beat", git_root: null, tty: null, summary: "", peer_type: "desktop", session_token: "cs_beat",
+    });
+    const first = await reg();
+    const live = await fetch(`${HTTP}/heartbeat`, { method: "POST", headers: headersFor(DB, "/heartbeat", { id: first.id }), body: JSON.stringify({ id: first.id }) });
+    expect(live.status).toBe(200);
+    expect(await live.json()).toEqual({ ok: true });
+
+    await post("/unregister", { id: first.id }); // as cleanStalePeers does
+    const reaped = await fetch(`${HTTP}/heartbeat`, { method: "POST", headers: headersFor(DB, "/heartbeat", { id: first.id }), body: JSON.stringify({ id: first.id }) });
+    expect(reaped.status).toBe(404);
+    expect(await reaped.json()).toMatchObject({ ok: false, error: expect.stringContaining("not found") });
+    expect((await reg()).id).toBe(first.id);
+  });
+
   test("cli re-register with the same pid keeps the same id", async () => {
     const reg = (summary: string) => post<{ id: string }>("/register", {
       pid: LIVE_PIDS[1]!, cwd: "/tmp/cli-stable", git_root: null, tty: "ttys099", summary, peer_type: "cli",

@@ -677,15 +677,18 @@ function handleUnread(body: { pid: number }): { count: number } {
   return { count: row.n };
 }
 
-function handleHeartbeat(body: HeartbeatRequest): void {
+function handleHeartbeat(body: HeartbeatRequest): { ok: boolean; error?: string } {
   const now = new Date().toISOString();
-  updateLastSeen.run(now, body.id);
+  // A reaped peer has no row to touch. Say so, so its server can re-register
+  // it instead of heartbeating a row that is gone while nobody can reach it.
+  const found = updateLastSeen.run(now, body.id).changes > 0;
   // Keeps this peer's peer_sessions mapping alive past cleanStalePeers' 30-day
   // TTL as long as it keeps heartbeating. Without this, a session that
   // registered once and ran longer than the TTL would have its mapping swept
   // out from under it while still alive, and its next reconnect would mint a
   // new id. Single UPDATE, keyed on peer_id: heartbeat is a hot path.
   touchPeerSessionByPeerId.run(now, body.id);
+  return found ? { ok: true } : { ok: false, error: `Peer ${body.id} not found` };
 }
 
 function handleSetSummary(body: SetSummaryRequest): { ok: boolean; error?: string } {
@@ -899,9 +902,10 @@ Bun.serve<WatchData>({
       switch (path) {
         case "/register":
           return Response.json(handleRegister(body as RegisterRequest));
-        case "/heartbeat":
-          handleHeartbeat(body as HeartbeatRequest);
-          return Response.json({ ok: true });
+        case "/heartbeat": {
+          const beat = handleHeartbeat(body as HeartbeatRequest);
+          return Response.json(beat, { status: beat.ok ? 200 : 404 });
+        }
         case "/set-summary": {
           const summaryResult = handleSetSummary(body as SetSummaryRequest);
           if (!summaryResult.ok) {
