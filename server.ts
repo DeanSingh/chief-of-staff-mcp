@@ -128,7 +128,8 @@ export function peerListHeader(peerId: PeerId, wakeUrl: string | undefined): str
 }
 
 const POLL_INTERVAL_MS = 1000;
-const HEARTBEAT_INTERVAL_MS = Number(process.env.CLAUDE_PEERS_HEARTBEAT_MS) || 15_000;
+// Floor of 1s: a bad override must not turn the heartbeat into a busy loop on the broker.
+const HEARTBEAT_INTERVAL_MS = Math.max(1000, Number(process.env.CLAUDE_PEERS_HEARTBEAT_MS) || 15_000);
 const BROKER_SCRIPT = new URL("./broker.ts", import.meta.url).pathname;
 const PEER_NAME = process.env.CLAUDE_PEERS_NAME ?? "";
 const DEBUG_LOG_PATH =
