@@ -1,19 +1,22 @@
 import { test, expect, describe, afterAll } from "bun:test";
 import { mkdtempSync, rmSync, statSync, lstatSync, symlinkSync, readdirSync, readlinkSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { ensureSecret, secretPath } from "./shared/auth.ts";
+import { join, dirname } from "node:path";
+import { ensureSecret, secretPath } from "../src/shared/auth.ts";
+
+/** The repo root, where the entry files live. */
+const ROOT = dirname(import.meta.dir);
 
 const DIR = mkdtempSync(join(tmpdir(), "cp-install-hooks-"));
 afterAll(() => rmSync(DIR, { recursive: true, force: true }));
 
-const OURS = `bun '${import.meta.dir}/hook.ts' # claude-peers`;
+const OURS = `bun '${ROOT}/hook.ts' # claude-peers`;
 let n = 0;
 
 async function install(initial?: unknown) {
   const path = join(DIR, `settings-${n++}.json`);
   if (initial !== undefined) await Bun.write(path, JSON.stringify(initial));
-  const proc = Bun.spawn(["bun", `${import.meta.dir}/cli.ts`, "install-hooks", "--settings", path], {
+  const proc = Bun.spawn(["bun", `${ROOT}/cli.ts`, "install-hooks", "--settings", path], {
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -32,7 +35,7 @@ describe("install-hooks", () => {
 
   test("also registers the unread nudge for UserPromptSubmit, once", async () => {
     const first = await install();
-    const again = Bun.spawn(["bun", `${import.meta.dir}/cli.ts`, "install-hooks", "--settings", first.path], {
+    const again = Bun.spawn(["bun", `${ROOT}/cli.ts`, "install-hooks", "--settings", first.path], {
       stdout: "pipe",
     });
     await again.exited;
@@ -42,7 +45,7 @@ describe("install-hooks", () => {
 
   test("running twice leaves exactly one entry", async () => {
     const first = await install();
-    const proc = Bun.spawn(["bun", `${import.meta.dir}/cli.ts`, "install-hooks", "--settings", first.path], {
+    const proc = Bun.spawn(["bun", `${ROOT}/cli.ts`, "install-hooks", "--settings", first.path], {
       stdout: "pipe",
     });
     await proc.exited;
@@ -83,14 +86,14 @@ describe("install-hooks", () => {
     try {
       const path = join(dir, "settings.json");
       const run = () =>
-        Bun.spawn(["bun", `${import.meta.dir}/cli.ts`, "install-hooks", "--settings", path], {
+        Bun.spawn(["bun", `${ROOT}/cli.ts`, "install-hooks", "--settings", path], {
           stdout: "pipe",
           stderr: "pipe",
         }).exited;
       expect(await run()).toBe(0);
       const cmd = await Bun.file(join(dir, "commands", "desktop-wake.md")).text();
-      expect(cmd).toContain(`Run \`bun '${import.meta.dir}/cli.ts' desktop-wake $ARGUMENTS\``);
-      expect(cmd).toContain(`allowed-tools: ${JSON.stringify(`Bash(bun '${import.meta.dir}/cli.ts' desktop-wake:*)`)}`);
+      expect(cmd).toContain(`Run \`bun '${ROOT}/cli.ts' desktop-wake $ARGUMENTS\``);
+      expect(cmd).toContain(`allowed-tools: ${JSON.stringify(`Bash(bun '${ROOT}/cli.ts' desktop-wake:*)`)}`);
       expect(await run()).toBe(0); // re-running rewrites ours
       expect(await Bun.file(join(dir, "commands", "desktop-wake.md")).text()).toBe(cmd);
 
@@ -111,7 +114,7 @@ describe("install-hooks", () => {
     const path = join(DIR, `atomic-${n++}.json`);
     await Bun.write(path, JSON.stringify({ model: "opus" }));
     const before = statSync(path).ino;
-    const proc = Bun.spawn(["bun", `${import.meta.dir}/cli.ts`, "install-hooks", "--settings", path], {
+    const proc = Bun.spawn(["bun", `${ROOT}/cli.ts`, "install-hooks", "--settings", path], {
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -128,7 +131,7 @@ describe("install-hooks", () => {
     const link = join(DIR, `link-${n++}.json`);
     await Bun.write(real, JSON.stringify({ model: "opus" }));
     symlinkSync(real, link);
-    const proc = Bun.spawn(["bun", `${import.meta.dir}/cli.ts`, "install-hooks", "--settings", link], {
+    const proc = Bun.spawn(["bun", `${ROOT}/cli.ts`, "install-hooks", "--settings", link], {
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -142,7 +145,7 @@ describe("install-hooks", () => {
     const path = join(DIR, `mode-${n++}.json`);
     await Bun.write(path, JSON.stringify({ env: { TOKEN: "x" } }));
     chmodSync(path, 0o600);
-    const proc = Bun.spawn(["bun", `${import.meta.dir}/cli.ts`, "install-hooks", "--settings", path], {
+    const proc = Bun.spawn(["bun", `${ROOT}/cli.ts`, "install-hooks", "--settings", path], {
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -165,7 +168,7 @@ describe("broker commands", () => {
     try {
       const db = join(DIR, "send.db");
       const secret = ensureSecret(secretPath(db));
-      const proc = Bun.spawn(["bun", `${import.meta.dir}/cli.ts`, "send", "abc12345", "hello"], {
+      const proc = Bun.spawn(["bun", `${ROOT}/cli.ts`, "send", "abc12345", "hello"], {
         env: { ...process.env, CLAUDE_PEERS_PORT: String(stub.port), CLAUDE_PEERS_DB: db },
         stdout: "pipe",
         stderr: "pipe",

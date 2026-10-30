@@ -17,111 +17,16 @@
  * error swallowed, always exit 0, never launch the broker. Stdout is injected
  * into the model's context, so SessionStart prints nothing and
  * UserPromptSubmit prints only the nudge.
+ *
+ * The code lives in src/hook.ts; this file stays at the repo root because
+ * installed hooks run it by this path.
  */
 
-import { authHeaders, readSecret } from "./shared/auth.ts";
+import { runHook } from "./src/hook.ts";
 
-const BROKER_PORT = parseInt(process.env.CLAUDE_PEERS_PORT ?? "7899", 10);
-
-/**
- * The settings.json command that runs this hook from `dir`. Single-quoted so
- * no repo path can break out into the shell; "# claude-peers" marks the entry
- * as ours for install-hooks.
- */
-export function hookCommand(dir: string): string {
-  return `bun '${`${dir}/hook.ts`.replace(/'/g, `'\\''`)}' # claude-peers`;
+try {
+  await runHook();
+} catch {
+  // Broker down, bad payload, timeout: never the session's problem.
 }
-
-/** The line that marks ~/.claude/commands/desktop-wake.md as install-hooks' own. */
-export const DESKTOP_WAKE_MARK =
-  "<!-- # claude-peers: written by `bun cli.ts install-hooks`; re-run it after moving the repo. -->";
-
-/**
- * The /desktop-wake slash command file, running the cli.ts in `dir`, or null
- * when `dir` holds a line break or backtick: the path is quoted into the
- * Markdown body, where either would garble the instruction.
- * Frontmatter values are JSON-quoted, which YAML reads as plain strings, so
- * no path can add a key. A ")" in the path would end the Bash(...) rule
- * early, so then the allowed-tools line is left out and Claude Code asks
- * before running the command instead.
- */
-export function desktopWakeCommand(dir: string): string | null {
-  if (/[\r\n`]/.test(dir)) return null;
-  const run = `bun '${`${dir}/cli.ts`.replace(/'/g, `'\\''`)}' desktop-wake`;
-  const frontmatter = [
-    `description: ${JSON.stringify("Show or switch Claude Desktop agents' wake mode (active wakes them on new peer mail; passive costs nothing while idle)")}`,
-    `argument-hint: ${JSON.stringify("[status | active | passive | default] [agent id or name] [--all]")}`,
-    ...(run.includes(")") ? [] : [`allowed-tools: ${JSON.stringify(`Bash(${run}:*)`)}`]),
-  ];
-  return `---
-${frontmatter.join("\n")}
----
-${DESKTOP_WAKE_MARK}
-
-Run \`${run} $ARGUMENTS\` and show the user its output. Do not run anything else.
-If the command fails, show the error as-is.
-`;
-}
-
-/** True when `text` is a /desktop-wake file install-hooks wrote, so re-running may replace it. */
-export function isOurDesktopWakeCommand(text: string): boolean {
-  return text.split("\n").includes(DESKTOP_WAKE_MARK);
-}
-
-const HOST_COMM = process.env.CLAUDE_PEERS_HOST_COMM ?? "claude";
-
-/**
- * The nearest process at or above `start` whose name is `name`, or null.
- * Stops at the FIRST match: a `claude` started from inside another session
- * (a worker running `claude -p`) must resolve to itself, never to the parent
- * session above it, or the child would take over the parent's identity.
- */
-export function hostPid(start: number, name = HOST_COMM, maxDepth = 8): number | null {
-  let pid = start;
-  for (let i = 0; i < maxDepth && pid > 1; i++) {
-    const out = new TextDecoder().decode(Bun.spawnSync(["ps", "-o", "ppid=,comm=", "-p", String(pid)]).stdout).trim();
-    const m = out.match(/^(\d+)\s+(.+)$/);
-    if (!m) return null;
-    if (m[2]!.split("/").pop() === name) return pid;
-    pid = parseInt(m[1]!, 10);
-  }
-  return null;
-}
-
-function post(path: string, body: unknown): Promise<Response> {
-  return fetch(`http://127.0.0.1:${BROKER_PORT}${path}`, {
-    method: "POST",
-    headers: authHeaders(),
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(800),
-  });
-}
-
-async function main() {
-  const input = JSON.parse(await Bun.stdin.text());
-  const event = input?.hook_event_name;
-  if (event !== "SessionStart" && event !== "UserPromptSubmit") return;
-  const pid = hostPid(process.ppid);
-  // No secret yet means no broker has ever run: nothing to tell it.
-  if (!pid || !readSecret()) return;
-
-  if (event === "SessionStart") {
-    if (typeof input.session_id !== "string") return;
-    await post("/session-start", { session_key: input.session_id, pid, source: input.source ?? "" });
-    return;
-  }
-
-  // UserPromptSubmit: stdout is added to the model's context, so this line is
-  // the nudge that gets mail read even when channel push missed it.
-  const { count } = (await (await post("/unread", { pid })).json()) as { count: number };
-  if (count > 0) console.log(`You have ${count} unread peer message(s). Call check_messages now to read them.`);
-}
-
-if (import.meta.main) {
-  try {
-    await main();
-  } catch {
-    // Broker down, bad payload, timeout: never the session's problem.
-  }
-  process.exit(0);
-}
+process.exit(0);

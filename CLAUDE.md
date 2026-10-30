@@ -26,7 +26,17 @@ updates `.mcp.json`, every `CLAUDE.md` reference, and provides a migration path 
 
 ## Architecture
 
-- `broker.ts` — Singleton HTTP daemon on localhost:7899 + SQLite. Auto-launched by the MCP server.
+The four files at the repo root are thin entry points. They stay there
+because installs reference them by path: MCP configs run `server.ts`, the
+server launches `broker.ts`, and `install-hooks` points settings.json and
+`/desktop-wake` at `hook.ts` and `cli.ts`. The code lives in `src/`; tests
+live in `test/`.
+
+- `broker.ts` → `src/broker/` — Singleton HTTP daemon on localhost:7899 + SQLite. Auto-launched by the MCP server.
+  `config` (env), `db` (schema, migrations, prepared statements), `identity`
+  (register, session keys, summaries), `liveness` (pid checks, stale sweep),
+  `wake` (wake mode, relay), `peers` (heartbeat, summary, list, unread),
+  `messages` (send, poll, ack, `/watch` feed), `http` (request gate, routes).
   Peer identity is durable for CLI peers: `peer_sessions` maps
   `CLAUDE_CODE_SESSION_ID` to a peer id, so a restarted CLI session reclaims
   its id and mail sent to it *before* it died is still delivered. Desktop
@@ -37,16 +47,21 @@ updates `.mcp.json`, every `CLAUDE.md` reference, and provides a migration path 
   `cleanStalePeers` deletes that row ~30s after the process dies, so a dead
   peer can't be sent to at all until it re-registers. Undelivered mail is
   never deleted on reap; the pre-existing 72h TTL is the only bound.
-- `server.ts` — MCP stdio server, one per Claude Code instance. Connects to broker, exposes tools, pushes channel notifications.
-- `shared/auth.ts` — Broker access control. Every POST carries the install secret
+- `server.ts` → `src/server/` — MCP stdio server, one per Claude Code instance. Connects to broker, exposes tools, pushes channel notifications.
+  `config`, `client` (broker requests, launch), `sessions` (host peer and
+  Desktop session identity), `state`, `mcp`, `tools` (definitions),
+  `handlers` (tools/list, tools/call), `delivery` (inboxes, polling, pushes,
+  acks), `wake` (Monitor command and copy), `log`, `main` (startup).
+- `hook.ts` → `src/hook.ts` — Claude Code hook: SessionStart re-keys a resumed session's identity;
+  UserPromptSubmit prints the unread-mail nudge. Installed by `bun cli.ts install-hooks`.
+- `cli.ts` → `src/cli/` — CLI utility for inspecting broker state, `watch`,
+  `desktop-wake`, and `install-hooks` (`src/cli/install.ts`).
+- `src/shared/auth.ts` — Broker access control. Every POST carries the install secret
   (`<db>.secret`, 0600, created by the broker); routes that act as a peer also carry
   that peer's credential from `/register`. The broker also refuses browser-shaped
   requests (any `Origin`, a foreign `Host`, non-JSON bodies). See README "Access control".
-- `hook.ts` — Claude Code hook: SessionStart re-keys a resumed session's identity;
-  UserPromptSubmit prints the unread-mail nudge. Installed by `bun cli.ts install-hooks`.
-- `shared/types.ts` — Shared TypeScript types for broker API.
-- `shared/summarize.ts` — Auto-summary generation via gpt-5.4-nano.
-- `cli.ts` — CLI utility for inspecting broker state.
+- `src/shared/types.ts` — Shared TypeScript types for broker API.
+- `src/shared/summarize.ts` — Auto-summary generation via gpt-5.4-nano.
 
 ## Running
 

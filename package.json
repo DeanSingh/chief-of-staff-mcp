@@ -2,7 +2,6 @@
   "name": "chief-of-staff-mcp",
   "version": "0.1.0",
   "description": "A chief-of-staff layer for Claude Code agents: coordinator-driven triage and delegation over a local peer mesh",
-  "module": "index.ts",
   "type": "module",
   "private": true,
   "license": "MIT",
@@ -16,10 +15,8 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.6.4",
-    "@types/bun": "latest"
-  },
-  "peerDependencies": {
-    "typescript": "^5"
+    "@types/bun": "1.3.11",
+    "typescript": "5.9.3"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1"
