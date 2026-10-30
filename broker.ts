@@ -34,11 +34,12 @@ const DB_PATH = process.env.CLAUDE_PEERS_DB ?? `${process.env.HOME}/.claude-peer
 // woken through an outbound pub/sub relay instead: each desktop identity gets a
 // secret topic, and a send POSTs the bare word "wake" to it. Message content
 // never leaves the machine. "off" disables the relay.
-// Off unless configured: the relay is a third party that sees when each
-// desktop identity gets mail. It must be https, except on this machine, and
-// URL-safe characters only: it is pasted into the shell command every agent's
-// Monitor runs.
-const WAKE_RELAY = (process.env.CLAUDE_PEERS_WAKE_RELAY ?? "off").replace(/\/+$/, "");
+// Nothing is published unless the wake mode (below) is active: the relay is a
+// third party that sees when each desktop identity gets mail. It must be
+// https, except on this machine, and URL-safe characters only: it is pasted
+// into the shell command every agent's Monitor runs.
+const WAKE_RELAY_ENV = process.env.CLAUDE_PEERS_WAKE_RELAY;
+const WAKE_RELAY = (WAKE_RELAY_ENV ?? "https://ntfy.sh").replace(/\/+$/, "");
 const WAKE_ON = /^[A-Za-z0-9.:\/_-]+$/.test(WAKE_RELAY)
   && /^https:\/\/|^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(WAKE_RELAY);
 if (WAKE_RELAY !== "off" && !WAKE_ON) {
@@ -127,6 +128,13 @@ db.run(`
 if (!(db.query("PRAGMA table_info(desktop_tokens)").all() as { name: string }[]).some((c) => c.name === "wake_topic")) {
   db.run("ALTER TABLE desktop_tokens ADD COLUMN wake_topic TEXT");
 }
+// A session's own wake mode ('active' | 'passive'); NULL follows the global one.
+if (!(db.query("PRAGMA table_info(desktop_tokens)").all() as { name: string }[]).some((c) => c.name === "wake_mode")) {
+  db.run("ALTER TABLE desktop_tokens ADD COLUMN wake_mode TEXT");
+}
+// Broker-wide settings that must survive a restart, including the auto-spawn
+// that doesn't inherit the environment of the broker it replaces.
+db.run("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
 
 // Cache summaries by workspace so they survive across sessions
 db.run(`
@@ -408,13 +416,85 @@ function handleRegister(body: RegisterRequest): RegisterResponse {
   const res = registerPeer(body);
   if ((body.peer_type ?? "cli") !== "desktop") {
     db.run("UPDATE peers SET pid_started = ? WHERE id = ?", [pidStartTime(body.pid), res.id]);
-  } else if (WAKE_ON && body.session_token) {
-    res.wake_topic = wakeTopicFor(body.session_token);
+  } else if (body.session_token) {
     // The full subscribe base, so the server never pairs this topic with a
     // relay of its own (its env may differ from the one that launched us).
-    if (res.wake_topic) res.wake_url = `${WAKE_RELAY}/${res.wake_topic}`;
+    res.wake_url = activeWakeUrl(body.session_token);
+    if (res.wake_url) res.wake_topic = res.wake_url.slice(WAKE_RELAY.length + 1);
   }
   return { ...res, peer_secret: peerSecret(SECRET, res.id) };
+}
+
+// --- Wake mode ---
+// Active: sends publish a wake and sessions are told to arm the Monitor, which
+// costs each session a turn per 30-minute re-arm. Passive: pull only, no idle
+// cost. A session's own setting wins over the global one, so one agent can
+// stay awake while the rest are passive.
+type WakeMode = "active" | "passive";
+const isWakeMode = (v: unknown): v is WakeMode => v === "active" || v === "passive";
+
+function globalWakeMode(): WakeMode {
+  const row = db.query("SELECT value FROM settings WHERE key = 'desktop_wake'").get() as { value: string } | null;
+  if (isWakeMode(row?.value)) return row.value;
+  // Never set: a broker started with an explicit relay keeps waking, as it did
+  // before modes existed.
+  return WAKE_RELAY_ENV && WAKE_ON ? "active" : "passive";
+}
+
+const effectiveWakeMode = (override: string | null): WakeMode => (isWakeMode(override) ? override : globalWakeMode());
+
+/** <relay>/<topic> for a token whose wake mode is active, minting the topic on first use. */
+function activeWakeUrl(token: string): string | undefined {
+  if (!WAKE_ON) return undefined;
+  const row = db.query("SELECT wake_mode FROM desktop_tokens WHERE token = ?").get(token) as { wake_mode: string | null } | null;
+  if (!row || effectiveWakeMode(row.wake_mode) !== "active") return undefined;
+  const topic = wakeTopicFor(token);
+  return topic ? `${WAKE_RELAY}/${topic}` : undefined;
+}
+
+/** Topics whose wake mode is active right now, so a switch can tell which ones just went passive. */
+function activeTopics(): Set<string> {
+  const rows = db.query("SELECT wake_topic, wake_mode FROM desktop_tokens WHERE wake_topic IS NOT NULL").all() as { wake_topic: string; wake_mode: string | null }[];
+  return new Set(rows.filter((r) => effectiveWakeMode(r.wake_mode) === "active").map((r) => r.wake_topic));
+}
+
+function handleWakeMode(body: { mode?: string; peer_id?: string; clear_overrides?: boolean }): { ok: boolean; error?: string; wake_url?: string } {
+  const perPeer = typeof body.peer_id === "string";
+  if (!isWakeMode(body.mode) && !(perPeer && body.mode === "default")) {
+    return { ok: false, error: `mode must be active or passive${perPeer ? " (or default, to follow the global mode)" : ""}` };
+  }
+  if (body.mode === "active" && !WAKE_ON) {
+    return { ok: false, error: "the wake relay is disabled (CLAUDE_PEERS_WAKE_RELAY=off or invalid)" };
+  }
+  const token = perPeer
+    ? (db.query("SELECT token FROM desktop_tokens WHERE peer_id = ? ORDER BY updated_at DESC").get(body.peer_id!) as { token: string } | null)?.token
+    : undefined;
+  if (perPeer && !token) return { ok: false, error: `${body.peer_id} is not a desktop session` };
+
+  const before = activeTopics();
+  if (perPeer) {
+    db.run("UPDATE desktop_tokens SET wake_mode = ? WHERE peer_id = ?", [body.mode === "default" ? null : body.mode!, body.peer_id!]);
+  } else {
+    db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('desktop_wake', ?)", [body.mode!]);
+    if (body.clear_overrides) db.run("UPDATE desktop_tokens SET wake_mode = NULL");
+  }
+  // A Monitor still listening on a topic that just went passive gets one
+  // "off", which ends it, so the agent doesn't keep re-arming.
+  const after = activeTopics();
+  for (const topic of before) if (!after.has(topic)) postWake(topic, "off");
+  return { ok: true, wake_url: token ? activeWakeUrl(token) : undefined };
+}
+
+function handleWakeStatus(): { global: WakeMode; relay: string | null; peers: { id: string; summary: string; mode: WakeMode; own_setting: boolean }[] } {
+  const rows = db.query(`
+    SELECT p.id, p.summary, t.wake_mode FROM peers p JOIN desktop_tokens t ON t.peer_id = p.id
+    WHERE p.peer_type = 'desktop' ORDER BY p.summary
+  `).all() as { id: string; summary: string; wake_mode: string | null }[];
+  return {
+    global: globalWakeMode(),
+    relay: WAKE_ON ? WAKE_RELAY : null,
+    peers: rows.map((r) => ({ id: r.id, summary: r.summary, mode: effectiveWakeMode(r.wake_mode), own_setting: isWakeMode(r.wake_mode) })),
+  };
 }
 
 /** The token's wake topic, minted on first use (including tokens claimed before topics existed). */
@@ -448,8 +528,8 @@ function publishWake(topic: string): void {
 
 // Fire-and-forget: a slow or dead relay must never delay or fail a send. The
 // mail is already queued; the agent still finds it on its next pull.
-function postWake(topic: string): void {
-  fetch(`${WAKE_RELAY}/${topic}`, { method: "POST", body: "wake", signal: AbortSignal.timeout(3000) })
+function postWake(topic: string, body: "wake" | "off" = "wake"): void {
+  fetch(`${WAKE_RELAY}/${topic}`, { method: "POST", body, signal: AbortSignal.timeout(3000) })
     .then((r) => {
       // fetch resolves on 4xx/5xx; a rate-limited relay (429) must not fail silently.
       if (!r.ok) console.error(`[claude-peers broker] wake publish failed: HTTP ${r.status}`);
@@ -680,15 +760,21 @@ function handleUnread(body: { pid: number }): { count: number } {
   return { count: row.n };
 }
 
-function handleHeartbeat(body: HeartbeatRequest): void {
+function handleHeartbeat(body: HeartbeatRequest): { ok: boolean; error?: string; wake_url?: string } {
   const now = new Date().toISOString();
-  updateLastSeen.run(now, body.id);
+  // A reaped peer has no row to touch. Say so, so its server can re-register
+  // it instead of heartbeating a row that is gone while nobody can reach it.
+  const found = updateLastSeen.run(now, body.id).changes > 0;
   // Keeps this peer's peer_sessions mapping alive past cleanStalePeers' 30-day
   // TTL as long as it keeps heartbeating. Without this, a session that
   // registered once and ran longer than the TTL would have its mapping swept
   // out from under it while still alive, and its next reconnect would mint a
   // new id. Single UPDATE, keyed on peer_id: heartbeat is a hot path.
   touchPeerSessionByPeerId.run(now, body.id);
+  if (!found) return { ok: false, error: `Peer ${body.id} not found` };
+  // A desktop session learns about wake mode switches here, within one heartbeat.
+  const t = db.query("SELECT token FROM desktop_tokens WHERE peer_id = ? ORDER BY updated_at DESC").get(body.id) as { token: string } | null;
+  return { ok: true, wake_url: t ? activeWakeUrl(t.token) : undefined };
 }
 
 function handleSetSummary(body: SetSummaryRequest): { ok: boolean; error?: string } {
@@ -773,8 +859,8 @@ function handleSendMessage(body: SendMessageRequest): { ok: boolean; error?: str
   insertMessage.run(body.from_id, body.to_id, body.text, new Date().toISOString());
   const woke = notifyWatchers(body.to_id, { type: "wake" });
   if (WAKE_ON && target.peer_type === "desktop") {
-    const t = db.query("SELECT wake_topic FROM desktop_tokens WHERE peer_id = ? AND wake_topic IS NOT NULL").get(body.to_id) as { wake_topic: string } | null;
-    if (t) publishWake(t.wake_topic);
+    const t = db.query("SELECT wake_topic, wake_mode FROM desktop_tokens WHERE peer_id = ? AND wake_topic IS NOT NULL").get(body.to_id) as { wake_topic: string; wake_mode: string | null } | null;
+    if (t && effectiveWakeMode(t.wake_mode) === "active") publishWake(t.wake_topic);
   }
   return { ok: true, woke, target_last_seen: target.last_seen, target_type: target.peer_type };
 }
@@ -898,9 +984,10 @@ Bun.serve<WatchData>({
       switch (path) {
         case "/register":
           return Response.json(handleRegister(body as RegisterRequest));
-        case "/heartbeat":
-          handleHeartbeat(body as HeartbeatRequest);
-          return Response.json({ ok: true });
+        case "/heartbeat": {
+          const beat = handleHeartbeat(body as HeartbeatRequest);
+          return Response.json(beat, { status: beat.ok ? 200 : 404 });
+        }
         case "/set-summary": {
           const summaryResult = handleSetSummary(body as SetSummaryRequest);
           if (!summaryResult.ok) {
@@ -908,6 +995,12 @@ Bun.serve<WatchData>({
           }
           return Response.json(summaryResult);
         }
+        case "/wake-mode": {
+          const r = handleWakeMode(body);
+          return Response.json(r, { status: r.ok ? 200 : 400 });
+        }
+        case "/wake-status":
+          return Response.json(handleWakeStatus());
         case "/list-peers":
           return Response.json(handleListPeers(body as ListPeersRequest));
         case "/send-message":

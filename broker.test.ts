@@ -251,6 +251,22 @@ describe("broker /watch WebSocket feed", () => {
     expect(peek.messages.map((m) => m.text)).toContain("while you were out");
   });
 
+  test("heartbeat for a reaped peer says not found, so its server can re-register it", async () => {
+    const reg = () => post<{ id: string }>("/register", {
+      pid: LIVE_PIDS[0]!, cwd: "cs_beat", git_root: null, tty: null, summary: "", peer_type: "desktop", session_token: "cs_beat",
+    });
+    const first = await reg();
+    const live = await fetch(`${HTTP}/heartbeat`, { method: "POST", headers: headersFor(DB, "/heartbeat", { id: first.id }), body: JSON.stringify({ id: first.id }) });
+    expect(live.status).toBe(200);
+    expect(await live.json()).toMatchObject({ ok: true });
+
+    await post("/unregister", { id: first.id }); // as cleanStalePeers does
+    const reaped = await fetch(`${HTTP}/heartbeat`, { method: "POST", headers: headersFor(DB, "/heartbeat", { id: first.id }), body: JSON.stringify({ id: first.id }) });
+    expect(reaped.status).toBe(404);
+    expect(await reaped.json()).toMatchObject({ ok: false, error: expect.stringContaining("not found") });
+    expect((await reg()).id).toBe(first.id);
+  });
+
   test("cli re-register with the same pid keeps the same id", async () => {
     const reg = (summary: string) => post<{ id: string }>("/register", {
       pid: LIVE_PIDS[1]!, cwd: "/tmp/cli-stable", git_root: null, tty: "ttys099", summary, peer_type: "cli",
@@ -993,6 +1009,93 @@ describe("wake relay", () => {
       await b.exited;
       for (const suffix of ["", "-wal", "-shm", ".secret"]) { try { await Bun.file(ERR_DB + suffix).delete(); } catch {} }
     }
+  });
+
+  describe("wake mode", () => {
+    const setMode = (body: Record<string, unknown>) => fetch(`${HTTP}/wake-mode`, {
+      method: "POST", headers: headersFor(DB, "/wake-mode", body), body: JSON.stringify(body),
+    });
+    const status = () => post<{ global: string; relay: string | null; peers: { id: string; mode: string; own_setting: boolean }[] }>("/wake-status", {});
+    const beat = (id: string) => post<{ ok: boolean; wake_url?: string }>("/heartbeat", { id });
+    // These tests share one broker with the rest of the file: leave it active.
+    afterAll(async () => { await setMode({ mode: "active", clear_overrides: true }); });
+
+    test("a broker started with a relay is active by default", async () => {
+      const d = await regDesktop("cs_mode_a");
+      expect((await status()).global).toBe("active");
+      expect((await status()).peers.find((p) => p.id === d.id)).toMatchObject({ mode: "active", own_setting: false });
+      expect((await beat(d.id)).wake_url).toBe(d.wake_url!);
+    });
+
+    test("passive: no wake URL, no publish, and an armed topic gets one 'off'", async () => {
+      const d = await regDesktop("cs_mode_b");
+      const s = await regCli();
+      expect((await setMode({ mode: "passive" })).status).toBe(200);
+      await waitFor(() => hitsFor(d.wake_topic!).length > 0);
+      expect(hitsFor(d.wake_topic!)).toEqual([{ path: `/${d.wake_topic}`, body: "off" }]);
+
+      expect((await regDesktop("cs_mode_b")).wake_url).toBeUndefined();
+      expect((await beat(d.id)).wake_url).toBeUndefined();
+      await post("/send-message", { from_id: s.id, to_id: d.id, text: "hi" });
+      await Bun.sleep(300);
+      expect(hitsFor(d.wake_topic!)).toHaveLength(1); // still just the "off"
+
+      // Switching to the mode it's already in sends nothing.
+      await setMode({ mode: "passive" });
+      await Bun.sleep(200);
+      expect(hitsFor(d.wake_topic!)).toHaveLength(1);
+      await setMode({ mode: "active" });
+    });
+
+    test("an agent's own setting wins over the global one, and default clears it", async () => {
+      const keep = await regDesktop("cs_mode_keep");
+      const other = await regDesktop("cs_mode_other");
+      const s = await regCli();
+      await setMode({ mode: "passive" });
+      expect((await setMode({ mode: "active", peer_id: keep.id })).status).toBe(200);
+
+      expect((await beat(keep.id)).wake_url).toBe(keep.wake_url!);
+      expect((await beat(other.id)).wake_url).toBeUndefined();
+      expect((await status()).peers.find((p) => p.id === keep.id)).toMatchObject({ mode: "active", own_setting: true });
+      const before = hitsFor(keep.wake_topic!).length;
+      await post("/send-message", { from_id: s.id, to_id: keep.id, text: "still awake?" });
+      await waitFor(() => hitsFor(keep.wake_topic!).length > before);
+      expect(hitsFor(keep.wake_topic!).at(-1)).toEqual({ path: `/${keep.wake_topic}`, body: "wake" });
+
+      // Back to the global (passive) mode: that's a switch to passive, so "off".
+      expect((await setMode({ mode: "default", peer_id: keep.id })).status).toBe(200);
+      await waitFor(() => hitsFor(keep.wake_topic!).at(-1)?.body === "off");
+      expect(hitsFor(keep.wake_topic!).at(-1)!.body).toBe("off");
+      expect((await beat(keep.id)).wake_url).toBeUndefined();
+      await setMode({ mode: "active" });
+    });
+
+    test("--all clears every agent's own setting", async () => {
+      const d = await regDesktop("cs_mode_all");
+      await setMode({ mode: "active", peer_id: d.id });
+      await setMode({ mode: "passive", clear_overrides: true });
+      expect((await status()).peers.find((p) => p.id === d.id)).toMatchObject({ mode: "passive", own_setting: false });
+      await setMode({ mode: "active" });
+    });
+
+    test("the mode survives a broker restart", async () => {
+      const d = await regDesktop("cs_mode_restart");
+      await setMode({ mode: "passive" });
+      await restartBroker();
+      expect((await status()).global).toBe("passive");
+      expect((await regDesktop("cs_mode_restart")).wake_url).toBeUndefined();
+      expect(d.wake_url).toBeDefined();
+      await setMode({ mode: "active" });
+    });
+
+    test("bad requests are refused", async () => {
+      const c = await regCli();
+      expect((await setMode({ mode: "loud" })).status).toBe(400);
+      expect((await setMode({ mode: "default" })).status).toBe(400); // default needs an agent
+      expect((await setMode({ mode: "active", peer_id: c.id })).status).toBe(400); // not a desktop session
+      expect((await fetch(`${HTTP}/wake-mode`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ mode: "passive" }) })).status).toBe(401);
+      expect((await status()).global).toBe("active");
+    });
   });
 });
 
