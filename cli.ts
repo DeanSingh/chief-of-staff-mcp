@@ -8,13 +8,13 @@
  *   bun cli.ts status          — Show broker status and all peers
  *   bun cli.ts peers           — List all peers
  *   bun cli.ts send <id> <msg> — Send a message to a peer
- *   bun cli.ts watch <id>      — Stream incoming messages for a peer (for Monitor tool)
+ *   bun cli.ts watch <id>      — Print a line per inbound message for a peer (for Monitor tool)
  *   bun cli.ts install-hooks   — Register the identity and unread hooks in ~/.claude/settings.json
  *   bun cli.ts kill-broker     — Stop the broker daemon
  */
 
 import { chmodSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { authHeaders } from "./shared/auth.ts";
+import { authHeaders, peerSecret, readSecret, secretPath, PEER_HEADER } from "./shared/auth.ts";
 import { hookCommand } from "./hook.ts";
 
 const BROKER_PORT = parseInt(process.env.CLAUDE_PEERS_PORT ?? "7899", 10);
@@ -142,40 +142,33 @@ switch (cmd) {
       process.exit(1);
     }
 
-    // Stream incoming messages to stdout, one line per message.
-    // Designed for use with Claude Code's Monitor tool — each stdout line
-    // becomes a notification that Claude reacts to mid-conversation.
-    // (Monitor's native `ws` source can subscribe to the same URL directly;
-    // this command is the fallback for harnesses without it.)
+    // Print one line per inbound message. Designed for Claude Code's Monitor
+    // tool: each stdout line becomes a notification that Claude reacts to
+    // mid-conversation.
     //
     // Subscribes to the broker's WebSocket feed (ws://.../watch/<peer>), which
-    // is a wake signal only: nothing is acked, so the MCP server's
-    // check_messages / piggyback fallback still works.
-    //
-    // Format: single-line JSON so multi-line message text is preserved.
-    // Claude sees: [claude-peers] {"from":"abc","summary":"...","text":"..."}
+    // is a wake signal only: frames carry no content and nothing is acked, so
+    // the session reads the message itself with check_messages. The upgrade
+    // carries the install secret and this peer's credential, read from the
+    // secret file, so neither is ever in argv.
     const wsUrl = `${BROKER_URL.replace(/^http/, "ws")}/watch/${encodeURIComponent(peerId)}`;
+    const secret = readSecret();
+    if (!secret) {
+      console.error(`No broker secret at ${secretPath()}; start the broker first.`);
+      process.exit(1);
+    }
+    const headers = { authorization: `Bearer ${secret}`, [PEER_HEADER]: peerSecret(secret, peerId) };
     console.error(`[claude-peers] Watching peer ${peerId} for incoming messages via ${wsUrl} (Ctrl+C to stop)`);
 
     let backoff = 1000;
     while (true) {
       await new Promise<void>((resolve) => {
-        const ws = new WebSocket(wsUrl);
+        const ws = new WebSocket(wsUrl, { headers });
         ws.onopen = () => { backoff = 1000; };
         ws.onmessage = (ev) => {
           try {
-            const frame = JSON.parse(String(ev.data)) as {
-              type: string; from_id?: string; from_summary?: string; sent_at?: string; text?: string;
-            };
-            if (frame.type !== "peer_message") return; // "watching" handshake etc.
-            const payload = {
-              from: frame.from_id,
-              summary: frame.from_summary ?? "",
-              sent_at: frame.sent_at,
-              text: frame.text,
-            };
-            // One line of JSON per message — Monitor feeds this to Claude as a notification
-            console.log(`[claude-peers] ${JSON.stringify(payload)}`);
+            if ((JSON.parse(String(ev.data)) as { type: string }).type !== "wake") return; // "watching" handshake etc.
+            console.log("[claude-peers] new peer message: call check_messages to read it");
           } catch {
             // ignore malformed frame
           }
@@ -264,7 +257,7 @@ Usage:
   bun cli.ts status          Show broker status and all peers
   bun cli.ts peers           List all peers
   bun cli.ts send <id> <msg> Send a message to a peer
-  bun cli.ts watch <id>      Stream incoming messages for a peer (for Monitor tool)
+  bun cli.ts watch <id>      Print a line per inbound message for a peer (for Monitor tool)
   bun cli.ts install-hooks   Register the identity and unread hooks [--settings <path>]
   bun cli.ts kill-broker     Stop the broker daemon`);
 }
