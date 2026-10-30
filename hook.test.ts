@@ -2,7 +2,8 @@ import { test, expect, describe, afterAll } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DESKTOP_WAKE_MARK, desktopWakeCommand, hostPid, hookCommand, isOurDesktopWakeCommand } from "./hook.ts";
+import { DESKTOP_WAKE_MARK, desktopWakeCommand, hookCommand, isOurDesktopWakeCommand } from "./src/cli/install.ts";
+import { hostPid } from "./src/hook.ts";
 import { ensureSecret, secretPath } from "./src/shared/auth.ts";
 
 const HOOK = `${import.meta.dir}/hook.ts`;
