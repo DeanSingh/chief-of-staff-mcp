@@ -163,7 +163,7 @@ export async function main() {
   // reconnect, and the CLI respawns us on /mcp reconnect, while the SESSIONS
   // those peers represent live on. Unregistering on shutdown was the root
   // cause of peer-ID rotation (verified 2026-08-20: "Unregistered desktop
-  // session cs_45e87c2c5edd" at 23:05 → same token re-registered minutes
+  // session cs_…" at 23:05 → same token re-registered minutes
   // later under a new id, stranding queued mail). The broker already reaps
   // truly-dead peers: CLI by host-pid liveness, desktop by heartbeat timeout.
   const cleanup = () => {

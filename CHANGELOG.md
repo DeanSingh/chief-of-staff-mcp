@@ -35,3 +35,6 @@ Notable changes. There are no tagged releases yet; `main` is the release.
   and its frames carry no message content (#7).
 - The broker refuses browser-shaped requests and requires an install secret
   and per-peer credentials (#3).
+- If you run an older checkout, pull, then restart the broker
+  (`bun cli.ts kill-broker`) and your sessions so every part runs the fixed
+  code.
