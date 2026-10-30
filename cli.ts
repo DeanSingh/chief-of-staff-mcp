@@ -14,10 +14,11 @@
  *   bun cli.ts desktop-wake    — Show or switch Desktop sessions' wake mode (active | passive)
  */
 
-import { chmodSync, mkdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { chmodSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { authHeaders } from "./shared/auth.ts";
 import { hookCommand } from "./hook.ts";
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 
 const BROKER_PORT = parseInt(process.env.CLAUDE_PEERS_PORT ?? "7899", 10);
 const BROKER_URL = `http://127.0.0.1:${BROKER_PORT}`;
