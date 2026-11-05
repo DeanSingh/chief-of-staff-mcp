@@ -148,6 +148,34 @@ describe("coordination retention", () => {
       expect(bytes).not.toContain("SCRUB-E-SENTINEL-77");
     }
   });
+
+  test("TTL-deleted mail is gone from the main database file and the -wal", async () => {
+    // Nothing in the decision queue is eligible here, so only the messages
+    // deletes change rows in this sweep.
+    const seed = new Database(DB);
+    try {
+      seed.run(
+        "INSERT INTO messages (from_id, to_id, text, sent_at, delivered) VALUES ('a', 'b', 'MAIL-DELIVERED-SENTINEL-55', ?, 1)",
+        [new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString()],
+      );
+      seed.run(
+        "INSERT INTO messages (from_id, to_id, text, sent_at, delivered) VALUES ('a', 'b', 'MAIL-UNDELIVERED-SENTINEL-66', ?, 0)",
+        [new Date(Date.now() - 73 * 60 * 60 * 1000).toISOString()],
+      );
+    } finally {
+      seed.close();
+    }
+
+    await restartBroker();
+
+    for (const file of [DB, `${DB}-wal`]) {
+      const f = Bun.file(file);
+      if (!(await f.exists())) continue;
+      const bytes = Buffer.from(await f.arrayBuffer()).toString("latin1");
+      expect(bytes).not.toContain("MAIL-DELIVERED-SENTINEL-55");
+      expect(bytes).not.toContain("MAIL-UNDELIVERED-SENTINEL-66");
+    }
+  });
 });
 
 describe("/report-event", () => {
