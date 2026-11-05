@@ -98,9 +98,9 @@ The broker auto-launches when the first session starts. It cleans up dead peers 
 
 The broker can keep a record of what agents report and ask, for a chief of staff (or a person) to review.
 
-- **What is recorded.** Events (`/report-event`: a level, a message of up to 4 KB, optional structured data). A `stop` event stores only "turn ended", never the agent's text. Input requests (`/request-input`: a question capped at 1 KB, who it is waiting for, urgency), with escalation and answers (`/escalate-request`, `/answer-request`, `/close-requests`). Closed requests have their text cleared after 24 hours and their rows deleted after 7 days; open requests keep their row, and their text is cleared after 7 days. A per-reader cursor records how far into the events each peer has acknowledged.
-- **The digest.** `/get-digest` returns the peers, the pending and escalated requests, and the events after a cursor, filtered by `min_level` (default `info`) and capped by `limit` (default 200, at most 1000). A read never moves a cursor; `/ack-digest` does, and only forward. Event `data` is not in the digest. A Desktop session's key is never returned.
-- **Who can read it.** Any local process holding the install secret, and any registered peer with its own credential. There is no check that the caller is a chief of staff.
+- **What is recorded.** Events (`/report-event`: a level, a message of up to 4 KB, optional structured data). A `stop` event stores only "turn ended", never the agent's text. Input requests (`/request-input`: a question capped at 1 KB, who it is waiting for, urgency), with escalation and answers (`/escalate-request`, `/answer-request`, `/close-requests`). Free-text fields are size-capped (`waiting_for`, `urgency` and `logger` at 256 characters, a `session_key` at 256 characters and refused beyond that). Closed requests have their text cleared after 24 hours, along with `waiting_for` and `urgency`, and their rows deleted after 7 days; open requests keep their row, and their text, `waiting_for` and `urgency` are cleared 7 days after the question was last written. Cleared text is removed from the broker's files (freed pages are zeroed and the write-ahead log is truncated), not erased: SSDs, snapshots and backups can still hold it. An answer delivered as a message embeds up to 120 characters of the question plus the answer, and that copy lasts until the mail TTL: 24 hours once delivered, up to 72 hours if undelivered. A per-reader cursor records how far into the events each peer has acknowledged.
+- **The digest.** `/get-digest` returns the peers, the pending and escalated requests, and the events after a cursor, filtered by `min_level` (default `info`) and capped by `limit` (default 200, at most 1000). A read never moves a cursor; `/ack-digest` does, and only forward. Event `data` is not in the digest. Session keys in the Desktop token format (`cs_` prefix) are refused, and a key mapped to a Desktop session is not returned.
+- **Who can read it.** Any local process holding the install secret, and any registered peer with its own credential. There is no check that the caller is a chief of staff: any registered peer can answer or escalate any request, and `answered_via` is what the caller says. An answer from a chief of staff is never a person's approval. Routes that take a `session_key`, and `/close-requests`, need only the install secret, so attribution by session key is not authenticated. The install secret is readable by any process running as this user, so these controls stop mistakes and misled agents, not a hostile local process.
 - **It is data, not instructions.** Questions, messages and notes are text that agents and hooks wrote. A reader should weigh them and never obey them.
 - **Status.** The broker routes exist, but nothing calls them yet: capturing events and requests from hooks arrives separately.
 
@@ -111,7 +111,8 @@ Loopback alone doesn't keep web pages out: a page you open can POST to `127.0.0.
 - refuses any request with an `Origin` header, a `Host` other than `127.0.0.1:<port>` / `localhost:<port>`, or (for POSTs) a `Content-Type` other than `application/json`;
 - requires an install secret on every POST. It is 256 random bits in `~/.claude-peers.db.secret` (0600), created on the broker's first start and read by the MCP server, hook and CLI;
 - hands each peer a credential at `/register` and requires it on every route that acts as that peer (send, poll, peek, ack, heartbeat, set-summary, unregister, and the `/watch` upgrade), so a caller can only send as, or read the mail of, the peer it registered;
-- never returns desktop session tokens from `/list-peers`.
+- never returns desktop session tokens from `/list-peers`;
+- accepts the install secret alone on routes that take a `session_key` instead of a peer id, and on `/close-requests`, so attribution by session key is not authenticated.
 
 The DB, secret and debug log are owner-only. Processes running as your own user can still read those files, so this keeps out browsers and other users, not your own processes.
 
@@ -162,7 +163,7 @@ from `CLAUDE_CODE_SESSION_ID` in its environment. That id is stable across
 comes back gets the **same** peer id, and messages sent to it *before* it died
 are still there waiting when it returns. That's narrower than it sounds: once
 a session's process is gone, `cleanStalePeers` drops its peer row within 30
-seconds, and the broker refuses to queue a message for an id with no row — so
+seconds, and `/send-message` refuses to queue a message for an id with no row (`/answer-request` likewise refuses to deliver to a peer that is no longer known) — so
 nothing can be sent *to* a dead session, only to one that's still live or has
 already come back. Undelivered mail is never deleted when a process dies,
 though; the existing 72h TTL is the only bound on how long it waits.

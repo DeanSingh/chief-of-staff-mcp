@@ -90,6 +90,8 @@ export function cleanStalePeers() {
   sweepDecisionQueue();
 }
 
+const CLEARED_QUESTION = "(question text cleared after 7 days)";
+
 /**
  * Decision queue retention. Events live a week. Settled requests lose their
  * text after a day and the row after a week. Open requests are never deleted
@@ -97,18 +99,34 @@ export function cleanStalePeers() {
  * are tiny and must outlive a quiet week.
  */
 function sweepDecisionQueue() {
+  let changed = 0;
+  const run = (sql: string, params: (string | null)[]) => {
+    changed += db.run(sql, params).changes;
+  };
   const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
   const day = 24 * 60 * 60 * 1000;
-  db.run("DELETE FROM events WHERE created_at < ?", [ago(7 * day)]);
-  db.run("DELETE FROM input_requests WHERE state IN ('answered', 'canceled') AND answered_at < ?", [ago(7 * day)]);
-  db.run(
-    `UPDATE input_requests SET question = '', answer = NULL, escalation_note = NULL
-     WHERE state IN ('answered', 'canceled') AND answered_at < ?`,
+  run("DELETE FROM events WHERE created_at < ?", [ago(7 * day)]);
+  run("DELETE FROM input_requests WHERE state IN ('answered', 'canceled') AND answered_at < ?", [ago(7 * day)]);
+  // waiting_for and urgency are agent-written free text, so they go with the
+  // question. The "already cleared" guards keep a settled row from being
+  // rewritten on every sweep.
+  run(
+    `UPDATE input_requests
+     SET question = '', answer = NULL, escalation_note = NULL, waiting_for = 'input needed', urgency = 'normal'
+     WHERE state IN ('answered', 'canceled') AND answered_at < ?
+       AND (question != '' OR answer IS NOT NULL OR escalation_note IS NOT NULL
+            OR waiting_for != 'input needed' OR urgency != 'normal')`,
     [ago(day)],
   );
-  db.run(
-    `UPDATE input_requests SET question = '(question text cleared after 7 days)', escalation_note = NULL
-     WHERE state IN ('pending', 'escalated') AND created_at < ?`,
-    [ago(7 * day)],
+  run(
+    `UPDATE input_requests
+     SET question = ?1, escalation_note = NULL, waiting_for = 'input needed', urgency = 'normal'
+     WHERE state IN ('pending', 'escalated') AND question_at < ?2
+       AND (question != ?1 OR escalation_note IS NOT NULL
+            OR waiting_for != 'input needed' OR urgency != 'normal')`,
+    [CLEARED_QUESTION, ago(7 * day)],
   );
+  // Truncating the WAL drops the pre-clear page images. A busy result (an
+  // open reader) is fine: the next sweep that changes something retries.
+  if (changed > 0) db.run("PRAGMA wal_checkpoint(TRUNCATE)");
 }

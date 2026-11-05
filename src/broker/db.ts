@@ -17,6 +17,8 @@ process.umask(0o077);
 export const db = new Database(DB_PATH);
 db.run("PRAGMA journal_mode = WAL");
 db.run("PRAGMA busy_timeout = 3000");
+// Freed pages are overwritten with zeros, so cleared text does not linger in the file.
+db.run("PRAGMA secure_delete = ON");
 // The DB holds every peer's mail and session tokens: owner-only.
 for (const suffix of ["", "-wal", "-shm"]) {
   try {
@@ -157,15 +159,15 @@ db.run(`
 // row may be attributed by session_key alone (an agent not yet registered).
 db.run(`
   CREATE TABLE IF NOT EXISTS events (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    peer_id    TEXT,
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    peer_id     TEXT,
     session_key TEXT,
-    level      TEXT NOT NULL DEFAULT 'info',
-    source     TEXT NOT NULL DEFAULT 'tool',
-    logger     TEXT,
-    message    TEXT NOT NULL,
-    data       TEXT,
-    created_at TEXT NOT NULL
+    level       TEXT NOT NULL DEFAULT 'info',
+    source      TEXT NOT NULL DEFAULT 'tool',
+    logger      TEXT,
+    message     TEXT NOT NULL,
+    data        TEXT,
+    created_at  TEXT NOT NULL
   )
 `);
 db.run("CREATE INDEX IF NOT EXISTS idx_events_peer ON events (peer_id, id)");
@@ -186,6 +188,7 @@ db.run(`
     escalated_at    TEXT,
     escalation_note TEXT,
     created_at      TEXT NOT NULL,
+    question_at     TEXT,
     answered_at     TEXT
   )
 `);

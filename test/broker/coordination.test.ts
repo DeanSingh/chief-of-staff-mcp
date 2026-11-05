@@ -20,12 +20,12 @@ describe("coordination retention", () => {
       addEvent.run("recent event", daysAgo(1));
 
       const addRequest = db.prepare(
-        "INSERT INTO input_requests (id, question, state, created_at, answered_at) VALUES (?, 'q', ?, ?, ?)",
+        "INSERT INTO input_requests (id, question, state, created_at, question_at, answered_at) VALUES (?, 'q', ?, ?, ?, ?)",
       );
-      addRequest.run("old-answered", "answered", daysAgo(9), daysAgo(8));
-      addRequest.run("old-canceled", "canceled", daysAgo(9), daysAgo(8));
-      addRequest.run("old-pending", "pending", daysAgo(8), null);
-      addRequest.run("old-escalated", "escalated", daysAgo(8), null);
+      addRequest.run("old-answered", "answered", daysAgo(9), daysAgo(9), daysAgo(8));
+      addRequest.run("old-canceled", "canceled", daysAgo(9), daysAgo(9), daysAgo(8));
+      addRequest.run("old-pending", "pending", daysAgo(8), daysAgo(8), null);
+      addRequest.run("old-escalated", "escalated", daysAgo(8), daysAgo(8), null);
 
       db.run("INSERT INTO digest_cursors (peer_id, position, updated_at) VALUES ('p', 3, ?)", [daysAgo(60)]);
     } finally {
@@ -52,16 +52,16 @@ describe("coordination retention", () => {
     const seed = new Database(DB);
     try {
       const add = seed.prepare(
-        `INSERT INTO input_requests (id, question, answer, escalation_note, state, created_at, answered_at)
-         VALUES (?, 'secret q', ?, 'secret note', ?, ?, ?)`,
+        `INSERT INTO input_requests (id, question, answer, escalation_note, state, created_at, question_at, answered_at)
+         VALUES (?, 'secret q', ?, 'secret note', ?, ?, ?, ?)`,
       );
-      add.run("ret-closed-25h", "secret a", "answered", daysAgo(2), hoursAgo(25));
-      add.run("ret-closed-23h", "secret a", "answered", daysAgo(2), hoursAgo(23));
-      add.run("ret-canceled-25h", null, "canceled", daysAgo(2), hoursAgo(25));
-      add.run("ret-closed-8d", "secret a", "answered", daysAgo(9), daysAgo(8));
-      add.run("ret-pending-8d", null, "pending", daysAgo(8), null);
-      add.run("ret-escalated-8d", null, "escalated", daysAgo(8), null);
-      add.run("ret-pending-6d", null, "pending", daysAgo(6), null);
+      add.run("ret-closed-25h", "secret a", "answered", daysAgo(2), daysAgo(2), hoursAgo(25));
+      add.run("ret-closed-23h", "secret a", "answered", daysAgo(2), daysAgo(2), hoursAgo(23));
+      add.run("ret-canceled-25h", null, "canceled", daysAgo(2), daysAgo(2), hoursAgo(25));
+      add.run("ret-closed-8d", "secret a", "answered", daysAgo(9), daysAgo(9), daysAgo(8));
+      add.run("ret-pending-8d", null, "pending", daysAgo(8), daysAgo(8), null);
+      add.run("ret-escalated-8d", null, "escalated", daysAgo(8), daysAgo(8), null);
+      add.run("ret-pending-6d", null, "pending", daysAgo(6), daysAgo(6), null);
     } finally {
       seed.close();
     }
@@ -94,6 +94,58 @@ describe("coordination retention", () => {
       });
     } finally {
       check.close();
+    }
+  });
+
+  test("the sweep resets waiting_for and urgency with the text, and rewrites a cleared row only once", async () => {
+    const seed = new Database(DB);
+    try {
+      const add = seed.prepare(
+        `INSERT INTO input_requests (id, question, waiting_for, urgency, state, created_at, question_at, answered_at)
+         VALUES (?, 'q', 'SENTINEL-WAIT', 'SENTINEL-URG', ?, ?, ?, ?)`,
+      );
+      const hours25 = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
+      add.run("rst-closed", "answered", daysAgo(2), daysAgo(2), hours25);
+      add.run("rst-open", "pending", daysAgo(8), daysAgo(8), null);
+      add.run("rst-fresh", "pending", daysAgo(1), daysAgo(1), null);
+    } finally {
+      seed.close();
+    }
+
+    await restartBroker();
+
+    const check = new Database(DB, { readonly: true });
+    try {
+      const get = (id: string) => check.query("SELECT * FROM input_requests WHERE id = ?").get(id);
+      expect(get("rst-closed")).toMatchObject({ waiting_for: "input needed", urgency: "normal" });
+      expect(get("rst-open")).toMatchObject({ waiting_for: "input needed", urgency: "normal" });
+      expect(get("rst-fresh")).toMatchObject({ waiting_for: "SENTINEL-WAIT", urgency: "SENTINEL-URG" });
+    } finally {
+      check.close();
+    }
+  });
+
+  test("swept text is gone from the main database file and the -wal", async () => {
+    const hours25 = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
+    const seed = new Database(DB);
+    try {
+      seed.run(
+        "INSERT INTO input_requests (id, question, state, created_at, question_at, answered_at) VALUES ('scrub-req', 'SCRUB-Q-SENTINEL-91', 'answered', ?, ?, ?)",
+        [daysAgo(2), daysAgo(2), hours25],
+      );
+      seed.run("INSERT INTO events (message, created_at) VALUES ('SCRUB-E-SENTINEL-77', ?)", [daysAgo(8)]);
+    } finally {
+      seed.close();
+    }
+
+    await restartBroker();
+
+    for (const file of [DB, `${DB}-wal`]) {
+      const f = Bun.file(file);
+      if (!(await f.exists())) continue;
+      const bytes = Buffer.from(await f.arrayBuffer()).toString("latin1");
+      expect(bytes).not.toContain("SCRUB-Q-SENTINEL-91");
+      expect(bytes).not.toContain("SCRUB-E-SENTINEL-77");
     }
   });
 });
@@ -186,6 +238,36 @@ describe("/report-event", () => {
     } finally {
       check.close();
     }
+  });
+
+  test("a 5 KB logger is stored at 256 chars or fewer, and a stop logger still drops the message", async () => {
+    const peer_id = await register("loggercap", "cli");
+    const r = await post<{ event_id: number }>("/report-event", { peer_id, message: "x", logger: "l".repeat(5000) });
+    expect(stored(r.event_id).logger!.length).toBeLessThanOrEqual(256);
+    const s = await post<{ event_id: number }>("/report-event", { peer_id, message: "secret", logger: "stop" });
+    expect(stored(s.event_id)).toMatchObject({ logger: "stop", message: "turn ended" });
+  });
+
+  test("a session_key over 256 chars is a 400 and stores nothing", async () => {
+    const res = await rawPost({ session_key: "k".repeat(257), message: "longkey" });
+    expect(res.status).toBe(400);
+    const db = new Database(DB, { readonly: true });
+    expect(db.query("SELECT 1 FROM events WHERE message = 'longkey'").all()).toHaveLength(0);
+    db.close();
+    expect((await rawPost({ session_key: "k".repeat(256), message: "okkey" })).status).toBe(200);
+  });
+
+  test("a Desktop-format session_key (cs_ prefix) is a 400 and stores nothing", async () => {
+    const res = await rawPost({ session_key: "cs_anything", message: "csevent" });
+    expect(res.status).toBe(400);
+    const db = new Database(DB, { readonly: true });
+    expect(db.query("SELECT 1 FROM events WHERE session_key LIKE 'cs_%'").all()).toHaveLength(0);
+    db.close();
+  });
+
+  test("an explicit peer_id null with a session_key is accepted", async () => {
+    const res = await rawPost({ peer_id: null, session_key: "null-peer-key", message: "nullpeer" });
+    expect(res.status).toBe(200);
   });
 
   test("data over 8 KB is stored as a truncated preview", async () => {
@@ -415,6 +497,64 @@ describe("input requests", () => {
     const { closed } = await call<{ closed: number }>("/close-requests", { session_key: "close-mapped" });
     expect(closed).toBeGreaterThanOrEqual(1);
     expect(row(request_id).state).toBe("canceled");
+  });
+
+  test("waiting_for and urgency are clipped to 256 chars; short values are stored verbatim", async () => {
+    const big = await ask({
+      session_key: "wf-big",
+      question: "q",
+      waiting_for: "w".repeat(5000),
+      urgency: "u".repeat(5000),
+    });
+    expect(row(big.request_id).waiting_for!.length).toBeLessThanOrEqual(256);
+    expect(row(big.request_id).urgency!.length).toBeLessThanOrEqual(256);
+    const small = await ask({ session_key: "wf-small", question: "q", waiting_for: "a review", urgency: "high" });
+    expect(row(small.request_id)).toMatchObject({ waiting_for: "a review", urgency: "high" });
+  });
+
+  test("a session_key over 256 chars, or in the Desktop token format, is a 400 and stores nothing", async () => {
+    const long = await ask({ session_key: "k".repeat(257), question: "longkeyq" });
+    expect(long.status).toBe(400);
+    const cs = await ask({ session_key: "cs_anything", question: "csq" });
+    expect(cs.status).toBe(400);
+    const db = new Database(DB, { readonly: true });
+    expect(db.query("SELECT 1 FROM input_requests WHERE question IN ('longkeyq', 'csq')").all()).toHaveLength(0);
+    db.close();
+  });
+
+  test("answering a peer that no longer exists is a 409, leaves the request pending and mails nothing", async () => {
+    const keyless = await register("keyless-asker", "cli");
+    const answerer = await register("keyless-answerer", "cli");
+    // Ids are shared across tests by pid: make sure this one has no session mapping.
+    const seed = new Database(DB);
+    seed.run("DELETE FROM peer_sessions WHERE peer_id = ?", [keyless]);
+    expect(seed.query("SELECT 1 FROM peer_sessions WHERE peer_id = ?").all(keyless)).toHaveLength(0);
+    seed.close();
+    const { request_id } = await ask({ peer_id: keyless, question: "gone q" });
+    await post("/unregister", { id: keyless });
+    const r = await call("/answer-request", { request_id, answerer_id: answerer, answer: "a", answered_via: "cos" });
+    expect(r.status).toBe(409);
+    expect(row(request_id)).toMatchObject({ state: "pending", answer: null });
+    const db = new Database(DB, { readonly: true });
+    expect(db.query("SELECT 1 FROM messages WHERE text LIKE ?").all(`%${request_id}%`)).toHaveLength(0);
+    db.close();
+  });
+
+  test("a new question on a week-old open hook row survives the sweep, and created_at is unchanged", async () => {
+    const old = daysAgo(8);
+    const seed = new Database(DB);
+    seed.run(
+      `INSERT INTO input_requests (id, session_key, question, source, created_at, question_at)
+       VALUES ('stale-hook', 'stale-hook-key', 'old question', 'hook', ?, ?)`,
+      [old, old],
+    );
+    seed.close();
+    const upd = await ask({ session_key: "stale-hook-key", question: "fresh question", source: "hook" });
+    expect(upd.request_id).toBe("stale-hook");
+    await restartBroker();
+    expect(row("stale-hook")).toMatchObject({ question: "fresh question", created_at: old });
+    const d = await post<{ pending: Array<{ id: string; question: string; created_at: string }> }>("/get-digest", {});
+    expect(d.pending.find((r) => r.id === "stale-hook")).toMatchObject({ question: "fresh question", created_at: old });
   });
 
   test("answering a hook-only request with no resolvable peer is a 409 and changes nothing", async () => {
@@ -707,6 +847,23 @@ describe("digest and cursor", () => {
     const peer = out.peers.find((p) => p.id === d.id)!;
     expect(peer.session_key).toBeNull();
     expect(peer.cwd).not.toContain("cs_digest_x");
+  });
+
+  test("an unmapped cs_ key seeded directly never appears in the digest", async () => {
+    sql((db) => {
+      const now = new Date().toISOString();
+      db.run(
+        "INSERT INTO events (session_key, level, source, message, created_at) VALUES ('cs_unmapped_tok', 'warning', 'hook', 'unmapped', ?)",
+        [now],
+      );
+      db.run(
+        "INSERT INTO input_requests (id, session_key, question, created_at) VALUES ('dg-unmapped-cs', 'cs_unmapped_tok', 'q', ?)",
+        [now],
+      );
+    });
+    const out = await digest({ min_level: "debug", since_id: 0 });
+    expect(JSON.stringify(out)).not.toContain("cs_unmapped_tok");
+    expect(out.pending.find((r) => r.id === "dg-unmapped-cs")!.session_key).toBeNull();
   });
 
   test("peers[] lists public fields with the newest session key for a CLI peer", async () => {
