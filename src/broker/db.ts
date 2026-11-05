@@ -153,6 +153,50 @@ db.run(`
     updated_at TEXT NOT NULL
   )
 `);
+// Decision queue. peer_id is nullable on events and input_requests because a
+// row may be attributed by session_key alone (an agent not yet registered).
+db.run(`
+  CREATE TABLE IF NOT EXISTS events (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    peer_id    TEXT,
+    session_key TEXT,
+    level      TEXT NOT NULL DEFAULT 'info',
+    source     TEXT NOT NULL DEFAULT 'tool',
+    logger     TEXT,
+    message    TEXT NOT NULL,
+    data       TEXT,
+    created_at TEXT NOT NULL
+  )
+`);
+db.run("CREATE INDEX IF NOT EXISTS idx_events_peer ON events (peer_id, id)");
+db.run(`
+  CREATE TABLE IF NOT EXISTS input_requests (
+    id              TEXT PRIMARY KEY,
+    peer_id         TEXT,
+    session_key     TEXT,
+    question        TEXT NOT NULL,
+    waiting_for     TEXT NOT NULL DEFAULT 'input needed',
+    urgency         TEXT NOT NULL DEFAULT 'normal',
+    state           TEXT NOT NULL DEFAULT 'pending',
+    source          TEXT NOT NULL DEFAULT 'tool',
+    answer          TEXT,
+    answered_by     TEXT,
+    answered_via    TEXT,
+    escalated_at    TEXT,
+    escalation_note TEXT,
+    created_at      TEXT NOT NULL,
+    answered_at     TEXT
+  )
+`);
+db.run("CREATE INDEX IF NOT EXISTS idx_requests_state ON input_requests (state)");
+db.run("CREATE INDEX IF NOT EXISTS idx_requests_session ON input_requests (session_key)");
+db.run(`
+  CREATE TABLE IF NOT EXISTS digest_cursors (
+    peer_id    TEXT PRIMARY KEY,
+    position   INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+  )
+`);
 db.run(`
   CREATE TRIGGER IF NOT EXISTS keep_peer_summary BEFORE DELETE ON peers
   WHEN OLD.summary != ''
