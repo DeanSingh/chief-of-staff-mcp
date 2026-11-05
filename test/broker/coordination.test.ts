@@ -17,7 +17,7 @@ describe("coordination retention", () => {
     try {
       const addEvent = db.prepare("INSERT INTO events (message, created_at) VALUES (?, ?)");
       addEvent.run("old event", daysAgo(8));
-      addEvent.run("recent event", daysAgo(1));
+      addEvent.run("recent event", new Date(Date.now() - 23 * 60 * 60 * 1000).toISOString());
 
       const addRequest = db.prepare(
         "INSERT INTO input_requests (id, question, state, created_at, question_at, answered_at) VALUES (?, 'q', ?, ?, ?, ?)",
@@ -174,6 +174,65 @@ describe("coordination retention", () => {
       const bytes = Buffer.from(await f.arrayBuffer()).toString("latin1");
       expect(bytes).not.toContain("MAIL-DELIVERED-SENTINEL-55");
       expect(bytes).not.toContain("MAIL-UNDELIVERED-SENTINEL-66");
+    }
+  });
+
+  test("the sweep clears event text after 24h and keeps level, logger and time for the week", async () => {
+    const hoursAgo = (n: number) => new Date(Date.now() - n * 60 * 60 * 1000).toISOString();
+    const seed = new Database(DB);
+    try {
+      const add = seed.prepare(
+        "INSERT INTO events (level, logger, message, data, created_at) VALUES ('warning', 'lg', ?, ?, ?)",
+      );
+      add.run("EVT-OLD-SENTINEL-31", '{"k":"EVT-DATA-SENTINEL-32"}', hoursAgo(25));
+      add.run("evt fresh", '{"k":"fresh"}', hoursAgo(23));
+    } finally {
+      seed.close();
+    }
+
+    await restartBroker();
+
+    const check = new Database(DB, { readonly: true });
+    try {
+      const rows = check
+        .query("SELECT level, logger, message, data, created_at FROM events WHERE logger = 'lg' ORDER BY created_at")
+        .all() as Record<string, string | null>[];
+      expect(rows).toHaveLength(2);
+      expect(rows[0]).toMatchObject({ level: "warning", logger: "lg", message: "", data: null });
+      expect(rows[1]).toMatchObject({ message: "evt fresh", data: '{"k":"fresh"}' });
+    } finally {
+      check.close();
+    }
+    for (const file of [DB, `${DB}-wal`]) {
+      const f = Bun.file(file);
+      if (!(await f.exists())) continue;
+      const bytes = Buffer.from(await f.arrayBuffer()).toString("latin1");
+      expect(bytes).not.toContain("EVT-OLD-SENTINEL-31");
+      expect(bytes).not.toContain("EVT-DATA-SENTINEL-32");
+    }
+  });
+
+  test("a reader holding the WAL never stalls the sweep, and the owed checkpoint runs on the next one", async () => {
+    // In its own process and database: the sweep runs in-process there, so
+    // its timing and the WAL size are observable without the broker.
+    const db = `${import.meta.dir}/.test-broker-sweep-busy-${process.pid}.db`;
+    try {
+      const proc = Bun.spawn(["bun", `${import.meta.dir}/sweep-busy.fixture.ts`], {
+        env: { ...process.env, CLAUDE_PEERS_DB: db },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [out, err] = [await new Response(proc.stdout).text(), await new Response(proc.stderr).text()];
+      expect(await proc.exited, err).toBe(0);
+      const r = JSON.parse(out) as { busyMs: number; walAfterBusy: number; walAfterRetry: number };
+      expect(r.busyMs).toBeLessThan(1000); // busy_timeout is 3000 outside the checkpoint
+      expect(r.walAfterBusy).toBeGreaterThan(0);
+      expect(r.walAfterRetry).toBe(0);
+    } finally {
+      for (const suffix of ["", "-wal", "-shm", ".secret"])
+        await Bun.file(db + suffix)
+          .delete()
+          .catch(() => {});
     }
   });
 });

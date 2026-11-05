@@ -2,7 +2,7 @@
  * Process liveness and the stale-peer sweep.
  */
 
-import { db } from "./db.ts";
+import { BUSY_TIMEOUT_MS, db } from "./db.ts";
 
 /** Signal 0 checks existence without killing. */
 export function isPidAlive(pid: number): boolean {
@@ -102,14 +102,22 @@ let checkpointOwed = false;
  */
 function checkpointIfNeeded(changed: number) {
   if (changed === 0 && !checkpointOwed) return;
-  const row = db.query("PRAGMA wal_checkpoint(TRUNCATE)").get() as { busy: number } | null;
-  checkpointOwed = row?.busy !== 0;
+  // bun:sqlite is synchronous, so waiting out a reader here would stall every
+  // request: give up at once and let the next sweep retry.
+  db.run("PRAGMA busy_timeout = 0");
+  try {
+    const row = db.query("PRAGMA wal_checkpoint(TRUNCATE)").get() as { busy: number } | null;
+    checkpointOwed = row?.busy !== 0;
+  } finally {
+    db.run(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
+  }
 }
 
 const CLEARED_QUESTION = "(question text cleared after 7 days)";
 
 /**
- * Decision queue retention. Events live a week. Settled requests lose their
+ * Decision queue retention. Events lose their message and data after a day
+ * and the row after a week. Settled requests lose their
  * text after a day and the row after a week. Open requests are never deleted
  * (a human may still answer) but lose their text after a week. digest_cursors
  * are tiny and must outlive a quiet week.
@@ -122,6 +130,9 @@ function sweepDecisionQueue(): number {
   const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
   const day = 24 * 60 * 60 * 1000;
   run("DELETE FROM events WHERE created_at < ?", [ago(7 * day)]);
+  run("UPDATE events SET message = '', data = NULL WHERE created_at < ? AND (message != '' OR data IS NOT NULL)", [
+    ago(day),
+  ]);
   run("DELETE FROM input_requests WHERE state IN ('answered', 'canceled') AND answered_at < ?", [ago(7 * day)]);
   // waiting_for and urgency are agent-written free text, so they go with the
   // question. The "already cleared" guards keep a settled row from being
