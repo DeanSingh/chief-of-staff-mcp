@@ -62,12 +62,13 @@ export function cleanStalePeers() {
   db.run("DELETE FROM peers WHERE peer_type = 'desktop' AND last_seen < ?", [staleTimeout]);
 
   // TTL: delivered messages > 24h, undelivered > 72h (recipient never came back), summary cache > 7d
-  db.run("DELETE FROM messages WHERE delivered = 1 AND sent_at < ?", [
+  // Counted for the checkpoint below: an answer's copy lives in messages.
+  let changed = db.run("DELETE FROM messages WHERE delivered = 1 AND sent_at < ?", [
     new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
-  ]);
-  db.run("DELETE FROM messages WHERE delivered = 0 AND sent_at < ?", [
+  ]).changes;
+  changed += db.run("DELETE FROM messages WHERE delivered = 0 AND sent_at < ?", [
     new Date(Date.now() - 72 * 60 * 60 * 1000).toISOString(),
-  ]);
+  ]).changes;
   db.run("DELETE FROM desktop_tokens WHERE updated_at < ?", [
     new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
   ]);
@@ -87,7 +88,22 @@ export function cleanStalePeers() {
   db.run("DELETE FROM peer_summaries WHERE updated_at < ?", [
     new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
   ]);
-  sweepDecisionQueue();
+  changed += sweepDecisionQueue();
+  checkpointIfNeeded(changed);
+}
+
+/** Set when a checkpoint came back busy, so the next sweep retries even if it changed nothing. */
+let checkpointOwed = false;
+
+/**
+ * Truncating the WAL drops the pre-delete page images of swept text. A busy
+ * result (an open reader kept it from finishing) sets checkpointOwed, so the
+ * next sweep retries even if no rows change; a non-busy checkpoint clears it.
+ */
+function checkpointIfNeeded(changed: number) {
+  if (changed === 0 && !checkpointOwed) return;
+  const row = db.query("PRAGMA wal_checkpoint(TRUNCATE)").get() as { busy: number } | null;
+  checkpointOwed = row?.busy !== 0;
 }
 
 const CLEARED_QUESTION = "(question text cleared after 7 days)";
@@ -98,7 +114,7 @@ const CLEARED_QUESTION = "(question text cleared after 7 days)";
  * (a human may still answer) but lose their text after a week. digest_cursors
  * are tiny and must outlive a quiet week.
  */
-function sweepDecisionQueue() {
+function sweepDecisionQueue(): number {
   let changed = 0;
   const run = (sql: string, params: (string | null)[]) => {
     changed += db.run(sql, params).changes;
@@ -126,7 +142,5 @@ function sweepDecisionQueue() {
             OR waiting_for != 'input needed' OR urgency != 'normal')`,
     [CLEARED_QUESTION, ago(7 * day)],
   );
-  // Truncating the WAL drops the pre-clear page images. A busy result (an
-  // open reader) is fine: the next sweep that changes something retries.
-  if (changed > 0) db.run("PRAGMA wal_checkpoint(TRUNCATE)");
+  return changed;
 }
