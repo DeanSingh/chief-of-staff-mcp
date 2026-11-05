@@ -169,6 +169,7 @@ db.run(`
   )
 `);
 db.run("CREATE INDEX IF NOT EXISTS idx_events_peer ON events (peer_id, id)");
+db.run("CREATE INDEX IF NOT EXISTS idx_events_id_level ON events (id, level)");
 db.run(`
   CREATE TABLE IF NOT EXISTS input_requests (
     id              TEXT PRIMARY KEY,
@@ -188,7 +189,7 @@ db.run(`
     answered_at     TEXT
   )
 `);
-db.run("CREATE INDEX IF NOT EXISTS idx_requests_state ON input_requests (state)");
+db.run("CREATE INDEX IF NOT EXISTS idx_requests_state_session ON input_requests (state, session_key)");
 db.run("CREATE INDEX IF NOT EXISTS idx_requests_session ON input_requests (session_key)");
 db.run(`
   CREATE TABLE IF NOT EXISTS digest_cursors (

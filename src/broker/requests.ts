@@ -12,6 +12,7 @@ import { announce, storeMessage } from "./messages.ts";
 const fail = (status: Fail["status"], error: string): Fail => ({ ok: false, error, status });
 
 const OPEN = "state IN ('pending', 'escalated')";
+const QUESTION_MAX = 1024;
 const ANSWERERS = ["cos", "human"];
 
 type RequestInputBody = Subject & {
@@ -27,7 +28,7 @@ export function handleRequestInput(b: RequestInputBody): { ok: true; request_id:
   if (source !== "tool" && source !== "hook") return fail(400, "source must be tool or hook");
   const subject = subjectOf(b);
   if ("status" in subject) return subject;
-  const question = clip(b.question);
+  const question = clip(b.question, QUESTION_MAX);
 
   if (source === "hook") {
     // One open hook request per subject: a repeated notification refreshes it.

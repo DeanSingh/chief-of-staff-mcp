@@ -87,11 +87,28 @@ export function cleanStalePeers() {
   db.run("DELETE FROM peer_summaries WHERE updated_at < ?", [
     new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
   ]);
-  // Decision queue: a week of events, and settled requests a week after they
-  // settled. Pending and escalated requests are never swept (a human may still
-  // answer), and digest_cursors are tiny and must outlive a quiet week.
-  db.run("DELETE FROM events WHERE created_at < ?", [new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()]);
-  db.run("DELETE FROM input_requests WHERE state IN ('answered', 'canceled') AND answered_at < ?", [
-    new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(),
-  ]);
+  sweepDecisionQueue();
+}
+
+/**
+ * Decision queue retention. Events live a week. Settled requests lose their
+ * text after a day and the row after a week. Open requests are never deleted
+ * (a human may still answer) but lose their text after a week. digest_cursors
+ * are tiny and must outlive a quiet week.
+ */
+function sweepDecisionQueue() {
+  const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
+  const day = 24 * 60 * 60 * 1000;
+  db.run("DELETE FROM events WHERE created_at < ?", [ago(7 * day)]);
+  db.run("DELETE FROM input_requests WHERE state IN ('answered', 'canceled') AND answered_at < ?", [ago(7 * day)]);
+  db.run(
+    `UPDATE input_requests SET question = '', answer = NULL, escalation_note = NULL
+     WHERE state IN ('answered', 'canceled') AND answered_at < ?`,
+    [ago(day)],
+  );
+  db.run(
+    `UPDATE input_requests SET question = '(question text cleared after 7 days)', escalation_note = NULL
+     WHERE state IN ('pending', 'escalated') AND created_at < ?`,
+    [ago(7 * day)],
+  );
 }
