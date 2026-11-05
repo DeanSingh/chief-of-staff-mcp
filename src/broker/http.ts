@@ -18,6 +18,8 @@ import type {
 } from "../shared/types.ts";
 import { PORT } from "./config.ts";
 import { SECRET, selectAllPeers } from "./db.ts";
+import { handleAckDigest, handleGetDigest } from "./digest.ts";
+import { handleReportEvent, reply } from "./events.ts";
 import { handleRegister, handleSessionStart } from "./identity.ts";
 import {
   type WatchData,
@@ -28,6 +30,7 @@ import {
   watchers,
 } from "./messages.ts";
 import { handleHeartbeat, handleListPeers, handleSetSummary, handleUnread, handleUnregister } from "./peers.ts";
+import { handleAnswerRequest, handleCloseRequests, handleEscalateRequest, handleRequestInput } from "./requests.ts";
 import { handleWakeMode, handleWakeStatus } from "./wake.ts";
 
 // --- HTTP Server ---
@@ -42,7 +45,7 @@ const ALLOWED_HOSTS = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`]);
 
 // The body field naming the peer a route acts as. Those routes also need that
 // peer's credential, so a caller can only act as the peer it registered.
-const ACTS_AS: Record<string, "id" | "from_id"> = {
+const ACTS_AS: Record<string, "id" | "from_id" | "peer_id" | "answerer_id"> = {
   "/send-message": "from_id",
   "/heartbeat": "id",
   "/set-summary": "id",
@@ -50,7 +53,17 @@ const ACTS_AS: Record<string, "id" | "from_id"> = {
   "/peek-messages": "id",
   "/ack-messages": "id",
   "/unregister": "id",
+  "/report-event": "peer_id",
+  "/request-input": "peer_id",
+  "/escalate-request": "peer_id",
+  "/answer-request": "answerer_id",
+  "/get-digest": "peer_id",
+  "/ack-digest": "peer_id",
 };
+// Routes where the caller may name a session_key instead of a peer. A nullish
+// ACTS_AS field there claims no identity, so only the install secret is needed
+// (the handler rejects a body naming neither). A present one is checked as usual.
+const OPTIONAL_ACTOR = new Set(["/report-event", "/request-input", "/get-digest"]);
 // `bun cli.ts send` speaks for the human at the terminal, not for a peer.
 const OPERATOR_ID = "cli";
 
@@ -78,6 +91,7 @@ function actsAsCaller(req: Request, path: string, body: Record<string, unknown>)
   const field = ACTS_AS[path];
   if (!field) return true;
   const id = body?.[field];
+  if (id == null && OPTIONAL_ACTOR.has(path)) return true;
   if (typeof id !== "string") return false;
   if (path === "/send-message" && id === OPERATOR_ID) return true;
   return secretsEqual(req.headers.get(PEER_HEADER), peerSecret(SECRET, id));
@@ -122,6 +136,13 @@ const ROUTES = new Map<string, (body: Body) => Response>([
     },
   ],
   ["/peek-messages", (b) => Response.json(handlePeekMessages(b as { id: string; since_id?: number }))],
+  ["/report-event", (b) => reply(handleReportEvent(b as Parameters<typeof handleReportEvent>[0]))],
+  ["/request-input", (b) => reply(handleRequestInput(b as Parameters<typeof handleRequestInput>[0]))],
+  ["/escalate-request", (b) => reply(handleEscalateRequest(b as Parameters<typeof handleEscalateRequest>[0]))],
+  ["/answer-request", (b) => reply(handleAnswerRequest(b as Parameters<typeof handleAnswerRequest>[0]))],
+  ["/close-requests", (b) => reply(handleCloseRequests(b as Parameters<typeof handleCloseRequests>[0]))],
+  ["/get-digest", (b) => reply(handleGetDigest(b as Parameters<typeof handleGetDigest>[0]))],
+  ["/ack-digest", (b) => reply(handleAckDigest(b as Parameters<typeof handleAckDigest>[0]))],
   ["/session-start", (b) => Response.json(handleSessionStart(b as SessionStartRequest))],
   ["/unread", (b) => Response.json(handleUnread(b as { pid: number }))],
   [

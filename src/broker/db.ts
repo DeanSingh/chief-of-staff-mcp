@@ -16,7 +16,10 @@ process.umask(0o077);
 
 export const db = new Database(DB_PATH);
 db.run("PRAGMA journal_mode = WAL");
-db.run("PRAGMA busy_timeout = 3000");
+export const BUSY_TIMEOUT_MS = 3000;
+db.run(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
+// Freed pages are overwritten with zeros, so cleared text does not linger in the file.
+db.run("PRAGMA secure_delete = ON");
 // The DB holds every peer's mail and session tokens: owner-only.
 for (const suffix of ["", "-wal", "-shm"]) {
   try {
@@ -153,6 +156,52 @@ db.run(`
     updated_at TEXT NOT NULL
   )
 `);
+// Decision queue. peer_id is nullable on events and input_requests because a
+// row may be attributed by session_key alone (an agent not yet registered).
+db.run(`
+  CREATE TABLE IF NOT EXISTS events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    peer_id     TEXT,
+    session_key TEXT,
+    level       TEXT NOT NULL DEFAULT 'info',
+    source      TEXT NOT NULL DEFAULT 'tool',
+    logger      TEXT,
+    message     TEXT NOT NULL,
+    data        TEXT,
+    created_at  TEXT NOT NULL
+  )
+`);
+db.run("CREATE INDEX IF NOT EXISTS idx_events_peer ON events (peer_id, id)");
+db.run("CREATE INDEX IF NOT EXISTS idx_events_id_level ON events (id, level)");
+db.run(`
+  CREATE TABLE IF NOT EXISTS input_requests (
+    id              TEXT PRIMARY KEY,
+    peer_id         TEXT,
+    session_key     TEXT,
+    question        TEXT NOT NULL,
+    waiting_for     TEXT NOT NULL DEFAULT 'input needed',
+    urgency         TEXT NOT NULL DEFAULT 'normal',
+    state           TEXT NOT NULL DEFAULT 'pending',
+    source          TEXT NOT NULL DEFAULT 'tool',
+    answer          TEXT,
+    answered_by     TEXT,
+    answered_via    TEXT,
+    escalated_at    TEXT,
+    escalation_note TEXT,
+    created_at      TEXT NOT NULL,
+    question_at     TEXT,
+    answered_at     TEXT
+  )
+`);
+db.run("CREATE INDEX IF NOT EXISTS idx_requests_state_session ON input_requests (state, session_key)");
+db.run("CREATE INDEX IF NOT EXISTS idx_requests_session ON input_requests (session_key)");
+db.run(`
+  CREATE TABLE IF NOT EXISTS digest_cursors (
+    peer_id    TEXT PRIMARY KEY,
+    position   INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+  )
+`);
 db.run(`
   CREATE TRIGGER IF NOT EXISTS keep_peer_summary BEFORE DELETE ON peers
   WHEN OLD.summary != ''
@@ -203,7 +252,7 @@ export const deletePeer = db.prepare(`
 // What other peers may see of a peer. Never SELECT * here: session_token is
 // a desktop session's bearer identity. Older desktop rows also carry the
 // token as their cwd (servers registered with cwd = token), so mask it there.
-const PUBLIC_CWD =
+export const PUBLIC_CWD =
   "CASE WHEN session_token IS NOT NULL AND instr(cwd, session_token) > 0 THEN replace(cwd, session_token, '(desktop session)') ELSE cwd END";
 const PUBLIC_PEER_COLUMNS = `id, pid, ${PUBLIC_CWD} AS cwd, git_root, tty, summary, peer_type, registered_at, last_seen`;
 

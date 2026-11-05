@@ -14,7 +14,7 @@ covers setup and behavior in detail. This page is the map.
 
 One per machine, launched by the first MCP server that finds it down
 (`broker.ts`, code in `src/broker/`). It owns all state: peers, queued
-messages, the session_key → peer id mapping, summaries and wake settings, in
+messages, the session_key → peer id mapping, summaries, wake settings, events and input requests (the decision queue), in
 `~/.claude-peers.db`.
 
 | Module | Responsibility |
@@ -26,6 +26,9 @@ messages, the session_key → peer id mapping, summaries and wake settings, in
 | `peers` | Heartbeat, summaries, listing, unread count, unregister |
 | `messages` | Send, poll, peek, ack, and the `/watch` WebSocket wake feed |
 | `wake` | Active/passive wake mode and publishing to the relay |
+| `events` | `/report-event`, and the subject resolution the decision-queue routes share |
+| `requests` | Input requests: ask, escalate, answer (delivered as mail), close |
+| `digest` | `/get-digest` and the acknowledged cursor `/ack-digest` |
 | `http` | The request gate and the route table |
 
 ## MCP server
@@ -62,7 +65,10 @@ POST carries the install secret (`<db>.secret`, 0600). Routes that act as a
 peer also carry that peer's credential, an HMAC of its id under the secret,
 returned by `/register`. The logic is in `src/shared/auth.ts` and the gate in
 `src/broker/http.ts`. Processes running as the same user can read the
-secret; the model keeps out browsers and other users.
+secret; the model keeps out browsers and other users. Routes that take a
+`session_key` instead of a peer id, `/close-requests`, and `/get-digest`
+without a `peer_id` need only the install secret, so attribution by session
+key is not authenticated.
 
 ## Waking a session
 

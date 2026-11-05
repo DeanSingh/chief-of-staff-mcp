@@ -2,7 +2,7 @@
  * Process liveness and the stale-peer sweep.
  */
 
-import { db } from "./db.ts";
+import { BUSY_TIMEOUT_MS, db } from "./db.ts";
 
 /** Signal 0 checks existence without killing. */
 export function isPidAlive(pid: number): boolean {
@@ -62,12 +62,13 @@ export function cleanStalePeers() {
   db.run("DELETE FROM peers WHERE peer_type = 'desktop' AND last_seen < ?", [staleTimeout]);
 
   // TTL: delivered messages > 24h, undelivered > 72h (recipient never came back), summary cache > 7d
-  db.run("DELETE FROM messages WHERE delivered = 1 AND sent_at < ?", [
+  // Counted for the checkpoint below: an answer's copy lives in messages.
+  let changed = db.run("DELETE FROM messages WHERE delivered = 1 AND sent_at < ?", [
     new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
-  ]);
-  db.run("DELETE FROM messages WHERE delivered = 0 AND sent_at < ?", [
+  ]).changes;
+  changed += db.run("DELETE FROM messages WHERE delivered = 0 AND sent_at < ?", [
     new Date(Date.now() - 72 * 60 * 60 * 1000).toISOString(),
-  ]);
+  ]).changes;
   db.run("DELETE FROM desktop_tokens WHERE updated_at < ?", [
     new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
   ]);
@@ -87,4 +88,70 @@ export function cleanStalePeers() {
   db.run("DELETE FROM peer_summaries WHERE updated_at < ?", [
     new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
   ]);
+  changed += sweepDecisionQueue();
+  checkpointIfNeeded(changed);
+}
+
+/** Set when a checkpoint came back busy, so the next sweep retries even if it changed nothing. */
+let checkpointOwed = false;
+
+/**
+ * Truncating the WAL drops the pre-delete page images of swept text. A busy
+ * result (an open reader kept it from finishing) sets checkpointOwed, so the
+ * next sweep retries even if no rows change; a non-busy checkpoint clears it.
+ */
+function checkpointIfNeeded(changed: number) {
+  if (changed === 0 && !checkpointOwed) return;
+  // bun:sqlite is synchronous, so waiting out a reader here would stall every
+  // request: give up at once and let the next sweep retry.
+  db.run("PRAGMA busy_timeout = 0");
+  try {
+    const row = db.query("PRAGMA wal_checkpoint(TRUNCATE)").get() as { busy: number } | null;
+    checkpointOwed = row?.busy !== 0;
+  } finally {
+    db.run(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
+  }
+}
+
+const CLEARED_QUESTION = "(question text cleared after 7 days)";
+
+/**
+ * Decision queue retention. Events lose their message and data after a day
+ * and the row after a week. Settled requests lose their
+ * text after a day and the row after a week. Open requests are never deleted
+ * (a human may still answer) but lose their text after a week. digest_cursors
+ * are tiny and must outlive a quiet week.
+ */
+function sweepDecisionQueue(): number {
+  let changed = 0;
+  const run = (sql: string, params: (string | null)[]) => {
+    changed += db.run(sql, params).changes;
+  };
+  const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
+  const day = 24 * 60 * 60 * 1000;
+  run("DELETE FROM events WHERE created_at < ?", [ago(7 * day)]);
+  run("UPDATE events SET message = '', data = NULL WHERE created_at < ? AND (message != '' OR data IS NOT NULL)", [
+    ago(day),
+  ]);
+  run("DELETE FROM input_requests WHERE state IN ('answered', 'canceled') AND answered_at < ?", [ago(7 * day)]);
+  // waiting_for and urgency are agent-written free text, so they go with the
+  // question. The "already cleared" guards keep a settled row from being
+  // rewritten on every sweep.
+  run(
+    `UPDATE input_requests
+     SET question = '', answer = NULL, escalation_note = NULL, waiting_for = 'input needed', urgency = 'normal'
+     WHERE state IN ('answered', 'canceled') AND answered_at < ?
+       AND (question != '' OR answer IS NOT NULL OR escalation_note IS NOT NULL
+            OR waiting_for != 'input needed' OR urgency != 'normal')`,
+    [ago(day)],
+  );
+  run(
+    `UPDATE input_requests
+     SET question = ?1, escalation_note = NULL, waiting_for = 'input needed', urgency = 'normal'
+     WHERE state IN ('pending', 'escalated') AND question_at < ?2
+       AND (question != ?1 OR escalation_note IS NOT NULL
+            OR waiting_for != 'input needed' OR urgency != 'normal')`,
+    [CLEARED_QUESTION, ago(7 * day)],
+  );
+  return changed;
 }
