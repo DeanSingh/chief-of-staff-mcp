@@ -15,9 +15,9 @@ import {
   type EventLevel,
 } from "../shared/types.ts";
 import { PUBLIC_CWD, db } from "./db.ts";
-import type { Fail } from "./events.ts";
+import { DESKTOP_PREFIX, type Fail, fail as failWith } from "./events.ts";
 
-const fail = (error: string): Fail => ({ ok: false, error, status: 400 });
+const fail = (error: string): Fail => failWith(400, error);
 
 const DEFAULT_LIMIT = 200;
 const MAX_LIMIT = 1000;
@@ -30,7 +30,8 @@ const MAPPED_PEER = (col: string) => `(SELECT m.peer_id FROM peer_sessions m WHE
 /** Who a row is about and the key it is filed under, with Desktop keys withheld. */
 const attribution = (t: string) =>
   `COALESCE(${t}.peer_id, ${MAPPED_PEER(`${t}.session_key`)}) AS peer_id,
-   CASE WHEN ${isDesktopKey(`${t}.session_key`)} THEN NULL ELSE ${t}.session_key END AS session_key`;
+   CASE WHEN ${t}.session_key LIKE '${DESKTOP_PREFIX}%' OR ${isDesktopKey(`${t}.session_key`)}
+        THEN NULL ELSE ${t}.session_key END AS session_key`;
 
 const isCount = (v: unknown, min: number): v is number => typeof v === "number" && Number.isInteger(v) && v >= min;
 
@@ -42,7 +43,6 @@ function checkBody(b: DigestBody): Fail | null {
   }
   if (b.limit != null && !isCount(b.limit, 1)) return fail("limit must be a positive integer");
   if (b.since_id != null && !isCount(b.since_id, 0)) return fail("since_id must be a non-negative integer");
-  if (b.peer_id != null && typeof b.peer_id !== "string") return fail("peer_id must be a string");
   return null;
 }
 
@@ -109,7 +109,7 @@ export function handleGetDigest(b: DigestBody): Digest | Fail {
 }
 
 export function handleAckDigest(b: { peer_id: string; position: number }): { ok: true; position: number } | Fail {
-  if (typeof b.peer_id !== "string" || !b.peer_id) return fail("peer_id is required");
+  if (!b.peer_id) return fail("peer_id is required");
   if (!isCount(b.position, 0)) return fail("position must be a non-negative integer");
   // Never backward (current wins), never past the newest event, and a swept
   // table (highest 0) cannot pull a stored position down.

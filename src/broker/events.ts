@@ -13,7 +13,10 @@ export function reply(r: { ok: boolean }): Response {
   return Response.json(r, { status: r.ok ? 200 : (r as unknown as Fail).status });
 }
 
-const fail = (status: Fail["status"], error: string): Fail => ({ ok: false, error, status });
+export const fail = (status: Fail["status"], error: string): Fail => ({ ok: false, error, status });
+
+/** Cap on short agent-written fields (logger, waiting_for, urgency, session_key). */
+export const FIELD_MAX = 256;
 
 const TRUNCATED = "…[truncated]";
 const DATA_MAX = 8192;
@@ -33,7 +36,18 @@ export function clipData(data: unknown): string | null {
   return JSON.stringify({ truncated: true, preview: json.slice(0, DATA_PREVIEW) });
 }
 
+/** The prefix of a Desktop session token, a bearer credential that is never stored as a key. */
+export const DESKTOP_PREFIX = "cs_";
+
 const given = (v: unknown) => v !== undefined && v !== null && v !== "";
+
+/** True when a peer id is known: it has a live row or a durable session mapping. */
+export function peerKnown(peer_id: string): boolean {
+  return !!(
+    db.query("SELECT 1 FROM peers WHERE id = ?").get(peer_id) ??
+    db.query("SELECT 1 FROM peer_sessions WHERE peer_id = ?").get(peer_id)
+  );
+}
 
 /**
  * Resolve who a row is about. Exactly one key is accepted. A session_key that
@@ -44,13 +58,14 @@ export function subjectOf(body: Subject): { peer_id: string | null; session_key:
   const { peer_id, session_key } = body;
   if (given(peer_id) === given(session_key)) return fail(400, "give exactly one of peer_id or session_key");
   if (given(peer_id)) {
-    if (typeof peer_id !== "string") return fail(400, "peer_id must be a string");
-    const known =
-      db.query("SELECT 1 FROM peers WHERE id = ?").get(peer_id) ??
-      db.query("SELECT 1 FROM peer_sessions WHERE peer_id = ?").get(peer_id);
-    return known ? { peer_id, session_key: null } : fail(404, `no such peer: ${peer_id}`);
+    return peerKnown(peer_id as string)
+      ? { peer_id: peer_id as string, session_key: null }
+      : fail(404, `no such peer: ${peer_id}`);
   }
   if (typeof session_key !== "string") return fail(400, "session_key must be a string");
+  if (session_key.length > FIELD_MAX) return fail(400, `session_key is longer than ${FIELD_MAX} characters`);
+  if (session_key.startsWith(DESKTOP_PREFIX))
+    return fail(400, "a Desktop session token cannot be used as a session_key");
   const row = db.query("SELECT peer_id, peer_type FROM peer_sessions WHERE session_key = ?").get(session_key) as {
     peer_id: string;
     peer_type: string;
@@ -90,7 +105,7 @@ export function handleReportEvent(b: ReportEventRequest): { ok: true; event_id: 
       subject.session_key,
       level,
       source,
-      b.logger ?? null,
+      b.logger == null ? null : clip(b.logger, FIELD_MAX),
       isStop ? "turn ended" : clip(b.message),
       isStop ? null : clipData(b.data),
       new Date().toISOString(),

@@ -6,10 +6,8 @@
 
 import type { PeerType, Subject } from "../shared/types.ts";
 import { db } from "./db.ts";
-import { type Fail, clip, subjectOf } from "./events.ts";
+import { type Fail, FIELD_MAX, clip, fail, peerKnown, subjectOf } from "./events.ts";
 import { announce, storeMessage } from "./messages.ts";
-
-const fail = (status: Fail["status"], error: string): Fail => ({ ok: false, error, status });
 
 const OPEN = "state IN ('pending', 'escalated')";
 const QUESTION_MAX = 1024;
@@ -39,24 +37,30 @@ export function handleRequestInput(b: RequestInputBody): { ok: true; request_id:
       )
       .get(subject.peer_id, subject.session_key) as { id: string } | null;
     if (open) {
-      db.run("UPDATE input_requests SET question = ? WHERE id = ?", [question, open.id]);
+      db.run("UPDATE input_requests SET question = ?, question_at = ? WHERE id = ?", [
+        question,
+        new Date().toISOString(),
+        open.id,
+      ]);
       return { ok: true, request_id: open.id };
     }
   }
 
   const id = crypto.randomUUID();
+  const now = new Date().toISOString();
   db.run(
-    `INSERT INTO input_requests (id, peer_id, session_key, question, waiting_for, urgency, source, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO input_requests (id, peer_id, session_key, question, waiting_for, urgency, source, created_at, question_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       subject.peer_id,
       subject.session_key,
       question,
-      typeof b.waiting_for === "string" ? b.waiting_for : "input needed",
-      typeof b.urgency === "string" ? b.urgency : "normal",
+      typeof b.waiting_for === "string" ? clip(b.waiting_for, FIELD_MAX) : "input needed",
+      typeof b.urgency === "string" ? clip(b.urgency, FIELD_MAX) : "normal",
       source,
-      new Date().toISOString(),
+      now,
+      now,
     ],
   );
   return { ok: true, request_id: id };
@@ -90,14 +94,16 @@ export function handleEscalateRequest(b: { request_id: string; peer_id: string; 
 
 type RequestRow = { id: string; peer_id: string | null; session_key: string | null; question: string; state: string };
 
-/** The peer an answer is mailed to: the row's own, else whoever its session key maps to. */
+/** The peer an answer is mailed to: the row's own, else whoever its session key maps to, if still known. */
 function resolvePeer(row: RequestRow): string | null {
-  if (row.peer_id) return row.peer_id;
-  if (!row.session_key) return null;
-  const m = db.query("SELECT peer_id FROM peer_sessions WHERE session_key = ?").get(row.session_key) as {
-    peer_id: string;
-  } | null;
-  return m?.peer_id ?? null;
+  let peer = row.peer_id;
+  if (!peer && row.session_key) {
+    const m = db.query("SELECT peer_id FROM peer_sessions WHERE session_key = ?").get(row.session_key) as {
+      peer_id: string;
+    } | null;
+    peer = m?.peer_id ?? null;
+  }
+  return peer && peerKnown(peer) ? peer : null;
 }
 
 type AnswerBody = { request_id: string; answerer_id: string; answer: string; answered_via: "cos" | "human" };
