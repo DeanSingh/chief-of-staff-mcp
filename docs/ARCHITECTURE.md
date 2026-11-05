@@ -66,8 +66,9 @@ peer also carry that peer's credential, an HMAC of its id under the secret,
 returned by `/register`. The logic is in `src/shared/auth.ts` and the gate in
 `src/broker/http.ts`. Processes running as the same user can read the
 secret; the model keeps out browsers and other users. Routes that take a
-`session_key` instead of a peer id, and `/close-requests`, need only the install
-secret, so attribution by session key is not authenticated.
+`session_key` instead of a peer id, `/close-requests`, and `/get-digest`
+without a `peer_id` need only the install secret, so attribution by session
+key is not authenticated.
 
 ## Waking a session
 

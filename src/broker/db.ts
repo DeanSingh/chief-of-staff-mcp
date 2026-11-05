@@ -16,7 +16,8 @@ process.umask(0o077);
 
 export const db = new Database(DB_PATH);
 db.run("PRAGMA journal_mode = WAL");
-db.run("PRAGMA busy_timeout = 3000");
+export const BUSY_TIMEOUT_MS = 3000;
+db.run(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
 // Freed pages are overwritten with zeros, so cleared text does not linger in the file.
 db.run("PRAGMA secure_delete = ON");
 // The DB holds every peer's mail and session tokens: owner-only.
