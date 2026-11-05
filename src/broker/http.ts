@@ -29,6 +29,7 @@ import {
   watchers,
 } from "./messages.ts";
 import { handleHeartbeat, handleListPeers, handleSetSummary, handleUnread, handleUnregister } from "./peers.ts";
+import { handleAnswerRequest, handleCloseRequests, handleEscalateRequest, handleRequestInput } from "./requests.ts";
 import { handleWakeMode, handleWakeStatus } from "./wake.ts";
 
 // --- HTTP Server ---
@@ -43,7 +44,7 @@ const ALLOWED_HOSTS = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`]);
 
 // The body field naming the peer a route acts as. Those routes also need that
 // peer's credential, so a caller can only act as the peer it registered.
-const ACTS_AS: Record<string, "id" | "from_id" | "peer_id"> = {
+const ACTS_AS: Record<string, "id" | "from_id" | "peer_id" | "answerer_id"> = {
   "/send-message": "from_id",
   "/heartbeat": "id",
   "/set-summary": "id",
@@ -52,11 +53,14 @@ const ACTS_AS: Record<string, "id" | "from_id" | "peer_id"> = {
   "/ack-messages": "id",
   "/unregister": "id",
   "/report-event": "peer_id",
+  "/request-input": "peer_id",
+  "/escalate-request": "peer_id",
+  "/answer-request": "answerer_id",
 };
 // Routes where the caller may name a session_key instead of a peer. A nullish
 // ACTS_AS field there claims no identity, so only the install secret is needed
 // (the handler rejects a body naming neither). A present one is checked as usual.
-const OPTIONAL_ACTOR = new Set(["/report-event"]);
+const OPTIONAL_ACTOR = new Set(["/report-event", "/request-input"]);
 // `bun cli.ts send` speaks for the human at the terminal, not for a peer.
 const OPERATOR_ID = "cli";
 
@@ -130,6 +134,10 @@ const ROUTES = new Map<string, (body: Body) => Response>([
   ],
   ["/peek-messages", (b) => Response.json(handlePeekMessages(b as { id: string; since_id?: number }))],
   ["/report-event", (b) => reply(handleReportEvent(b as Parameters<typeof handleReportEvent>[0]))],
+  ["/request-input", (b) => reply(handleRequestInput(b as Parameters<typeof handleRequestInput>[0]))],
+  ["/escalate-request", (b) => reply(handleEscalateRequest(b as Parameters<typeof handleEscalateRequest>[0]))],
+  ["/answer-request", (b) => reply(handleAnswerRequest(b as Parameters<typeof handleAnswerRequest>[0]))],
+  ["/close-requests", (b) => reply(handleCloseRequests(b as Parameters<typeof handleCloseRequests>[0]))],
   ["/session-start", (b) => Response.json(handleSessionStart(b as SessionStartRequest))],
   ["/unread", (b) => Response.json(handleUnread(b as { pid: number }))],
   [
