@@ -248,7 +248,7 @@ export const deletePeer = db.prepare(`
 // What other peers may see of a peer. Never SELECT * here: session_token is
 // a desktop session's bearer identity. Older desktop rows also carry the
 // token as their cwd (servers registered with cwd = token), so mask it there.
-const PUBLIC_CWD =
+export const PUBLIC_CWD =
   "CASE WHEN session_token IS NOT NULL AND instr(cwd, session_token) > 0 THEN replace(cwd, session_token, '(desktop session)') ELSE cwd END";
 const PUBLIC_PEER_COLUMNS = `id, pid, ${PUBLIC_CWD} AS cwd, git_root, tty, summary, peer_type, registered_at, last_seen`;
 

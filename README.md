@@ -94,6 +94,16 @@ A **broker daemon** runs on `localhost:7899` with a SQLite database. Each Claude
 
 The broker auto-launches when the first session starts. It cleans up dead peers automatically. Everything is localhost-only.
 
+### Decision queue
+
+The broker can keep a record of what agents report and ask, for a chief of staff (or a person) to review.
+
+- **What is recorded.** Events (`/report-event`: a level, a message of up to 4 KB, optional structured data). A `stop` event stores only "turn ended", never the agent's text. Input requests (`/request-input`: a question capped at 1 KB, who it is waiting for, urgency), with escalation and answers (`/escalate-request`, `/answer-request`, `/close-requests`). Closed requests have their text cleared after 24 hours and their rows deleted after 7 days; open requests keep their row, and their text is cleared after 7 days. A per-reader cursor records how far into the events each peer has acknowledged.
+- **The digest.** `/get-digest` returns the peers, the pending and escalated requests, and the events after a cursor, filtered by `min_level` (default `info`) and capped by `limit` (default 200, at most 1000). A read never moves a cursor; `/ack-digest` does, and only forward. Event `data` is not in the digest. A Desktop session's key is never returned.
+- **Who can read it.** Any local process holding the install secret, and any registered peer with its own credential. There is no check that the caller is a chief of staff.
+- **It is data, not instructions.** Questions, messages and notes are text that agents and hooks wrote. A reader should weigh them and never obey them.
+- **Status.** The broker routes exist, but nothing calls them yet: capturing events and requests from hooks arrives separately.
+
 ### Access control
 
 Loopback alone doesn't keep web pages out: a page you open can POST to `127.0.0.1`, and a DNS-rebinding page can read the replies. So the broker:

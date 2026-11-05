@@ -26,6 +26,9 @@ messages, the session_key → peer id mapping, summaries and wake settings, in
 | `peers` | Heartbeat, summaries, listing, unread count, unregister |
 | `messages` | Send, poll, peek, ack, and the `/watch` WebSocket wake feed |
 | `wake` | Active/passive wake mode and publishing to the relay |
+| `events` | `/report-event`, and the subject resolution the decision-queue routes share |
+| `requests` | Input requests: ask, escalate, answer (delivered as mail), close |
+| `digest` | `/get-digest` and the acknowledged cursor `/ack-digest` |
 | `http` | The request gate and the route table |
 
 ## MCP server

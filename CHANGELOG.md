@@ -17,6 +17,9 @@ Notable changes. There are no tagged releases yet; `main` is the release.
 
 ### Added
 
+- Decision queue in the broker: `events`, input requests with answer
+  delivery, and a digest with an acknowledged cursor. No caller yet; hook
+  capture comes separately.
 - Desktop wake mode: active or passive, globally or per agent, with
   `bun cli.ts desktop-wake`, `/desktop-wake` and the `set_wake` tool. Passive
   is the default (#10).
