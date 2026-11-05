@@ -36,7 +36,9 @@ live in `test/`.
   `config` (env), `db` (schema, migrations, prepared statements), `identity`
   (register, session keys, summaries), `liveness` (pid checks, stale sweep),
   `wake` (wake mode, relay), `peers` (heartbeat, summary, list, unread),
-  `messages` (send, poll, ack, `/watch` feed), `http` (request gate, routes).
+  `messages` (send, poll, ack, `/watch` feed), `events` (`/report-event`),
+  `requests` (input requests), `digest` (digest and acknowledged cursor),
+  `http` (request gate, routes).
   Peer identity is durable for CLI peers: `peer_sessions` maps
   `CLAUDE_CODE_SESSION_ID` to a peer id, so a restarted CLI session reclaims
   its id and mail sent to it *before* it died is still delivered. Desktop

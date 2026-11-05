@@ -9,7 +9,7 @@ import { db } from "./db.ts";
 export type Fail = { ok: false; error: string; status: 400 | 404 | 409 };
 
 /** A route result as an HTTP response: a Fail carries its status, success is 200. */
-export function reply(r: { ok: boolean } & Record<string, unknown>): Response {
+export function reply(r: { ok: boolean }): Response {
   return Response.json(r, { status: r.ok ? 200 : (r as unknown as Fail).status });
 }
 

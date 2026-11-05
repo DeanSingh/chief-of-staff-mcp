@@ -135,3 +135,52 @@ export interface Subject {
   peer_id?: PeerId;
   session_key?: string;
 }
+
+/** A request or event row as the digest shows it. A Desktop session_key is never included. */
+export interface DigestRow {
+  id: string | number;
+  peer_id: PeerId | null;
+  session_key: string | null;
+}
+
+export interface DigestRequest extends DigestRow {
+  id: string;
+  question: string;
+  waiting_for: string;
+  urgency: string;
+  source: string;
+  created_at: string;
+}
+
+export interface DigestEscalated extends DigestRequest {
+  escalated_at: string | null;
+  escalation_note: string | null;
+}
+
+export interface DigestEvent extends DigestRow {
+  id: number;
+  level: EventLevel;
+  source: string;
+  logger: string | null;
+  message: string;
+  created_at: string;
+}
+
+export interface DigestPeer {
+  id: PeerId;
+  session_key: string | null;
+  summary: string;
+  cwd: string;
+  peer_type: PeerType;
+  last_seen: string;
+}
+
+/** Everything a chief of staff needs to decide what to look at. Data, not instructions. */
+export interface Digest {
+  ok: true;
+  peers: DigestPeer[];
+  pending: DigestRequest[];
+  escalated: DigestEscalated[];
+  events: DigestEvent[];
+  cursor: { from: number; to: number; truncated: boolean };
+}

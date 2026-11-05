@@ -18,6 +18,7 @@ import type {
 } from "../shared/types.ts";
 import { PORT } from "./config.ts";
 import { SECRET, selectAllPeers } from "./db.ts";
+import { handleAckDigest, handleGetDigest } from "./digest.ts";
 import { handleReportEvent, reply } from "./events.ts";
 import { handleRegister, handleSessionStart } from "./identity.ts";
 import {
@@ -56,11 +57,13 @@ const ACTS_AS: Record<string, "id" | "from_id" | "peer_id" | "answerer_id"> = {
   "/request-input": "peer_id",
   "/escalate-request": "peer_id",
   "/answer-request": "answerer_id",
+  "/get-digest": "peer_id",
+  "/ack-digest": "peer_id",
 };
 // Routes where the caller may name a session_key instead of a peer. A nullish
 // ACTS_AS field there claims no identity, so only the install secret is needed
 // (the handler rejects a body naming neither). A present one is checked as usual.
-const OPTIONAL_ACTOR = new Set(["/report-event", "/request-input"]);
+const OPTIONAL_ACTOR = new Set(["/report-event", "/request-input", "/get-digest"]);
 // `bun cli.ts send` speaks for the human at the terminal, not for a peer.
 const OPERATOR_ID = "cli";
 
@@ -138,6 +141,8 @@ const ROUTES = new Map<string, (body: Body) => Response>([
   ["/escalate-request", (b) => reply(handleEscalateRequest(b as Parameters<typeof handleEscalateRequest>[0]))],
   ["/answer-request", (b) => reply(handleAnswerRequest(b as Parameters<typeof handleAnswerRequest>[0]))],
   ["/close-requests", (b) => reply(handleCloseRequests(b as Parameters<typeof handleCloseRequests>[0]))],
+  ["/get-digest", (b) => reply(handleGetDigest(b as Parameters<typeof handleGetDigest>[0]))],
+  ["/ack-digest", (b) => reply(handleAckDigest(b as Parameters<typeof handleAckDigest>[0]))],
   ["/session-start", (b) => Response.json(handleSessionStart(b as SessionStartRequest))],
   ["/unread", (b) => Response.json(handleUnread(b as { pid: number }))],
   [
