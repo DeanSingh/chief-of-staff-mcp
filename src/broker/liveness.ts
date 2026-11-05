@@ -87,4 +87,11 @@ export function cleanStalePeers() {
   db.run("DELETE FROM peer_summaries WHERE updated_at < ?", [
     new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
   ]);
+  // Decision queue: a week of events, and settled requests a week after they
+  // settled. Pending and escalated requests are never swept (a human may still
+  // answer), and digest_cursors are tiny and must outlive a quiet week.
+  db.run("DELETE FROM events WHERE created_at < ?", [new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()]);
+  db.run("DELETE FROM input_requests WHERE state IN ('answered', 'canceled') AND answered_at < ?", [
+    new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(),
+  ]);
 }
