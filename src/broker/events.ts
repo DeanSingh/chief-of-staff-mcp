@@ -77,6 +77,9 @@ export function handleReportEvent(b: ReportEventRequest): { ok: true; event_id: 
   if (b.logger != null && typeof b.logger !== "string") return fail(400, "logger must be a string");
   const subject = subjectOf(b);
   if ("status" in subject) return subject;
+  // A stop event records only that a turn ended: the assistant's last message
+  // can carry case details, so neither it nor its data is kept.
+  const isStop = b.logger === "stop";
   const r = db
     .query(
       `INSERT INTO events (peer_id, session_key, level, source, logger, message, data, created_at)
@@ -88,8 +91,8 @@ export function handleReportEvent(b: ReportEventRequest): { ok: true; event_id: 
       level,
       source,
       b.logger ?? null,
-      clip(b.message),
-      clipData(b.data),
+      isStop ? "turn ended" : clip(b.message),
+      isStop ? null : clipData(b.data),
       new Date().toISOString(),
     );
   return { ok: true, event_id: Number(r.lastInsertRowid) };

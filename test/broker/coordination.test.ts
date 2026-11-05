@@ -45,6 +45,57 @@ describe("coordination retention", () => {
       check.close();
     }
   });
+
+  test("the sweep clears request text: closed after 24h, open after 7 days; rows and open state stay", async () => {
+    const hoursAgo = (n: number) => new Date(Date.now() - n * 60 * 60 * 1000).toISOString();
+    const FIXED = "(question text cleared after 7 days)";
+    const seed = new Database(DB);
+    try {
+      const add = seed.prepare(
+        `INSERT INTO input_requests (id, question, answer, escalation_note, state, created_at, answered_at)
+         VALUES (?, 'secret q', ?, 'secret note', ?, ?, ?)`,
+      );
+      add.run("ret-closed-25h", "secret a", "answered", daysAgo(2), hoursAgo(25));
+      add.run("ret-closed-23h", "secret a", "answered", daysAgo(2), hoursAgo(23));
+      add.run("ret-canceled-25h", null, "canceled", daysAgo(2), hoursAgo(25));
+      add.run("ret-closed-8d", "secret a", "answered", daysAgo(9), daysAgo(8));
+      add.run("ret-pending-8d", null, "pending", daysAgo(8), null);
+      add.run("ret-escalated-8d", null, "escalated", daysAgo(8), null);
+      add.run("ret-pending-6d", null, "pending", daysAgo(6), null);
+    } finally {
+      seed.close();
+    }
+
+    await restartBroker();
+
+    const check = new Database(DB, { readonly: true });
+    try {
+      const get = (id: string) =>
+        check.query("SELECT * FROM input_requests WHERE id = ?").get(id) as Record<string, string | null> | null;
+      expect(get("ret-closed-25h")).toMatchObject({
+        state: "answered",
+        question: "",
+        answer: null,
+        escalation_note: null,
+      });
+      expect(get("ret-canceled-25h")).toMatchObject({ state: "canceled", question: "", escalation_note: null });
+      expect(get("ret-closed-23h")).toMatchObject({
+        question: "secret q",
+        answer: "secret a",
+        escalation_note: "secret note",
+      });
+      expect(get("ret-closed-8d")).toBeNull();
+      expect(get("ret-pending-8d")).toMatchObject({ state: "pending", question: FIXED, escalation_note: null });
+      expect(get("ret-escalated-8d")).toMatchObject({ state: "escalated", question: FIXED, escalation_note: null });
+      expect(get("ret-pending-6d")).toMatchObject({
+        state: "pending",
+        question: "secret q",
+        escalation_note: "secret note",
+      });
+    } finally {
+      check.close();
+    }
+  });
 });
 
 describe("/report-event", () => {
@@ -162,6 +213,27 @@ describe("/report-event", () => {
     expect(row.message!.endsWith("…[truncated]")).toBe(true);
     expect(JSON.parse(row.data!)).toEqual({ a: 1 });
   });
+
+  test("a stop event stores a fixed message and no data; other loggers keep theirs", async () => {
+    const peer_id = await register("stopper", "cli");
+    const body = {
+      peer_id,
+      level: "warning",
+      source: "hook",
+      message: "Patient J. Doe, DOB 1/2/1980",
+      data: { last_assistant_message: "private" },
+    };
+    const stop = await post<{ event_id: number }>("/report-event", { ...body, logger: "stop" });
+    expect(stored(stop.event_id)).toMatchObject({
+      message: "turn ended",
+      data: null,
+      level: "warning",
+      source: "hook",
+    });
+    const other = await post<{ event_id: number }>("/report-event", { ...body, logger: "notification" });
+    expect(stored(other.event_id)).toMatchObject({ message: body.message });
+    expect(JSON.parse(stored(other.event_id).data!)).toEqual(body.data);
+  });
 });
 
 describe("input requests", () => {
@@ -192,6 +264,46 @@ describe("input requests", () => {
       })
     ).id;
   const ask = (body: Record<string, unknown>) => call<{ request_id: string }>("/request-input", body);
+
+  test("a 2 KB question is truncated to 1 KB on insert and on the hook update path; answers keep 4 KB", async () => {
+    const big = "q".repeat(2048);
+    const a = await ask({ session_key: "cap-tool", question: big });
+    expect(row(a.request_id).question!.length).toBeLessThanOrEqual(1024);
+    expect(row(a.request_id).question!.endsWith("…[truncated]")).toBe(true);
+    const h = await ask({ session_key: "cap-hook", question: "short", source: "hook" });
+    await ask({ session_key: "cap-hook", question: big, source: "hook" });
+    expect(row(h.request_id).question!.length).toBeLessThanOrEqual(1024);
+    expect(row(h.request_id).question!.endsWith("…[truncated]")).toBe(true);
+    const peer_id = await regKeyed("cap-key", LIVE_PIDS[0]!);
+    const answerer = await register("cap-answerer", "cli");
+    const r = await ask({ peer_id, question: "q" });
+    await call("/answer-request", {
+      request_id: r.request_id,
+      answerer_id: answerer,
+      answer: "a".repeat(2048),
+      answered_via: "cos",
+    });
+    expect(row(r.request_id).answer).toHaveLength(2048);
+    await post("/poll-messages", { id: peer_id }); // drain: fake peers share ids across tests
+  });
+
+  test("an answer given while the asker is down is delivered when it re-registers", async () => {
+    const id = await regKeyed("down-key", LIVE_PIDS[0]!);
+    const { request_id } = await ask({ peer_id: id, question: "Proceed?" });
+    await post("/unregister", { id });
+    const answerer = await register("down-answerer", "cli");
+    const r = await call("/answer-request", {
+      request_id,
+      answerer_id: answerer,
+      answer: "yes",
+      answered_via: "human",
+    });
+    expect(r).toMatchObject({ status: 200, ok: true });
+    expect(await regKeyed("down-key", LIVE_PIDS[1]!)).toBe(id);
+    const { messages } = await post<{ messages: { text: string }[] }>("/poll-messages", { id });
+    // Fake peers share ids across tests, so other mail may be queued too.
+    expect(messages.map((m) => m.text)).toContain(`Answer to your request ${request_id} ("Proceed?"): yes`);
+  });
 
   test("a restarted peer receives the answer to a request it made before it died", async () => {
     const id = await regKeyed("restart-key", LIVE_PIDS[0]!);
