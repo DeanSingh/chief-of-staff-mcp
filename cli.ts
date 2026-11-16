@@ -11,12 +11,14 @@
  *   bun cli.ts peers           — List all peers
  *   bun cli.ts send <id> <msg> — Send a message to a peer
  *   bun cli.ts watch <id>      — Print a line per inbound message for a peer (for Monitor tool)
- *   bun cli.ts install-hooks   — Register the identity and unread hooks in ~/.claude/settings.json
+ *   bun cli.ts digest          — Show the decision queue: waiting requests and recent events
+ *   bun cli.ts install-hooks   — Register the identity, unread and decision-queue hooks in ~/.claude/settings.json
  *   bun cli.ts kill-broker     — Stop the broker daemon
  *   bun cli.ts desktop-wake    — Show or switch Desktop sessions' wake mode (active | passive)
  */
 
 import { desktopWake } from "./src/cli/desktop-wake.ts";
+import { digest } from "./src/cli/digest.ts";
 import { installHooks } from "./src/cli/install.ts";
 import { killBroker, listPeers, send, status } from "./src/cli/peers.ts";
 import { watch } from "./src/cli/watch.ts";
@@ -26,6 +28,7 @@ const COMMANDS: Record<string, () => Promise<void>> = {
   peers: listPeers,
   send,
   watch,
+  digest,
   "kill-broker": killBroker,
   "install-hooks": () => installHooks(import.meta.dir),
   "desktop-wake": desktopWake,
@@ -42,7 +45,8 @@ Usage:
   bun cli.ts peers           List all peers
   bun cli.ts send <id> <msg> Send a message to a peer
   bun cli.ts watch <id>      Print a line per inbound message for a peer (for Monitor tool)
-  bun cli.ts install-hooks   Register the identity and unread hooks [--settings <path>]
+  bun cli.ts digest          Show the decision queue: [--since <id>] [--limit <n>] [--level <level>] [--json]
+  bun cli.ts install-hooks   Register the identity, unread and decision-queue hooks [--settings <path>]
   bun cli.ts kill-broker     Stop the broker daemon
   bun cli.ts desktop-wake    Show or switch Desktop wake mode: [status | active | passive | default] [agent] [--all]`);
 }

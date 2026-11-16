@@ -205,6 +205,7 @@ bun cli.ts status            # broker status + all peers
 bun cli.ts peers             # list peers
 bun cli.ts send <id> <msg>   # send a message into a Claude session
 bun cli.ts watch <id>        # print a line per inbound message (for Monitor)
+bun cli.ts digest            # the decision queue: waiting requests and recent events (--since, --limit, --level, --json)
 bun cli.ts install-hooks     # register the identity, unread-mail and decision-queue hooks
 bun cli.ts kill-broker       # stop the broker
 bun cli.ts desktop-wake      # show or switch Desktop agents' wake mode (see above)
