@@ -5,6 +5,7 @@
 import type {
   AckMessagesRequest,
   Message,
+  PeerType,
   PollMessagesRequest,
   PollMessagesResponse,
   SendMessageRequest,
@@ -39,6 +40,38 @@ function notifyWatchers(to_id: string, frame: unknown): number {
   return n;
 }
 
+/** Store a message for `to_id`. Callers announce it afterward with `announce`. */
+export function storeMessage(from_id: string, to_id: string, text: string): void {
+  insertMessage.run(from_id, to_id, text, new Date().toISOString());
+}
+
+/** Wake `to_id`'s watchers and, for an active-wake Desktop peer, publish to the relay. */
+export function announce(to_id: string): { woke: number; target_type: PeerType | null } {
+  const woke = notifyWatchers(to_id, { type: "wake" });
+  const target_type = peerTypeOf(to_id);
+  if (WAKE_ON && target_type === "desktop") {
+    const t = db
+      .query("SELECT wake_topic, wake_mode FROM desktop_tokens WHERE peer_id = ? AND wake_topic IS NOT NULL")
+      .get(to_id) as { wake_topic: string; wake_mode: string | null } | null;
+    if (t && effectiveWakeMode(t.wake_mode) === "active") publishWake(t.wake_topic);
+  }
+  return { woke, target_type };
+}
+
+/** From `peers`, falling back to the durable `peer_sessions` mapping. */
+function peerTypeOf(id: string): PeerType | null {
+  const row =
+    db.query("SELECT peer_type FROM peers WHERE id = ?").get(id) ??
+    db.query("SELECT peer_type FROM peer_sessions WHERE peer_id = ? LIMIT 1").get(id);
+  return ((row as { peer_type: PeerType } | null)?.peer_type as PeerType | undefined) ?? null;
+}
+
+/** Insert a message and announce it. */
+export function deliver(from_id: string, to_id: string, text: string) {
+  storeMessage(from_id, to_id, text);
+  return announce(to_id);
+}
+
 export function handleSendMessage(body: SendMessageRequest): {
   ok: boolean;
   error?: string;
@@ -56,14 +89,7 @@ export function handleSendMessage(body: SendMessageRequest): {
     return { ok: false, error: `Peer ${body.to_id} not found (stale or expired ID — call list_peers and re-send)` };
   }
 
-  insertMessage.run(body.from_id, body.to_id, body.text, new Date().toISOString());
-  const woke = notifyWatchers(body.to_id, { type: "wake" });
-  if (WAKE_ON && target.peer_type === "desktop") {
-    const t = db
-      .query("SELECT wake_topic, wake_mode FROM desktop_tokens WHERE peer_id = ? AND wake_topic IS NOT NULL")
-      .get(body.to_id) as { wake_topic: string; wake_mode: string | null } | null;
-    if (t && effectiveWakeMode(t.wake_mode) === "active") publishWake(t.wake_topic);
-  }
+  const { woke } = deliver(body.from_id, body.to_id, body.text);
   return { ok: true, woke, target_last_seen: target.last_seen, target_type: target.peer_type };
 }
 

@@ -27,6 +27,12 @@ const SUBJECT: Record<string, string> = {
   "/peek-messages": "id",
   "/ack-messages": "id",
   "/unregister": "id",
+  "/report-event": "peer_id",
+  "/request-input": "peer_id",
+  "/escalate-request": "peer_id",
+  "/get-digest": "peer_id",
+  "/ack-digest": "peer_id",
+  "/answer-request": "answerer_id",
 };
 
 export function headersFor(db: string, path: string, body: unknown): Record<string, string> {

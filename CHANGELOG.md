@@ -9,7 +9,6 @@ Notable changes. There are no tagged releases yet; `main` is the release.
 - The wake copy states the session's mode and how it is set (`/desktop-wake`,
   `set_wake`, or the broker's default), on claim, on `list_peers`, and when
   a switch either way reaches a running session (#19).
-
 - No function in `src/` is over the complexity limit: the broker's routes
   and the server's tools dispatch from tables, and registration reads as
   its precedence order. Broker tests are split by area (#17).
@@ -21,6 +20,9 @@ Notable changes. There are no tagged releases yet; `main` is the release.
 
 ### Added
 
+- Decision queue in the broker: `events`, input requests with answer
+  delivery, and a digest with an acknowledged cursor. No caller yet; hook
+  capture comes separately (#20).
 - Desktop wake mode: active or passive, globally or per agent, with
   `bun cli.ts desktop-wake`, `/desktop-wake` and the `set_wake` tool. Passive
   is the default (#10).

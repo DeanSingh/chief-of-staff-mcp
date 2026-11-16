@@ -110,3 +110,77 @@ export interface SessionStartRequest {
 export type SessionStartResponse =
   | { ok: true; peer_id: PeerId; action: "noop" | "mapped" | "rekeyed" }
   | { ok: false; reason: "no_live_peer" | "conflict" | "bad_request" };
+
+/** RFC 5424 severities, the same names MCP logging uses. */
+export type EventLevel = "debug" | "info" | "notice" | "warning" | "error" | "critical" | "alert" | "emergency";
+
+/** In severity order, least severe first. */
+export const EVENT_LEVELS: readonly EventLevel[] = [
+  "debug",
+  "info",
+  "notice",
+  "warning",
+  "error",
+  "critical",
+  "alert",
+  "emergency",
+];
+
+export type RequestState = "pending" | "escalated" | "answered" | "canceled";
+
+export type AnsweredVia = "cos" | "human" | "terminal";
+
+/** Who an event or request is about: a registered peer, a session key, or both. */
+export interface Subject {
+  peer_id?: PeerId;
+  session_key?: string;
+}
+
+/** A request or event row as the digest shows it. Session keys are never included. */
+export interface DigestRow {
+  id: string | number;
+  /** The row's peer, or the peer its session key maps to; null for an unmapped session. */
+  peer_id: PeerId | null;
+}
+
+export interface DigestRequest extends DigestRow {
+  id: string;
+  question: string;
+  waiting_for: string;
+  urgency: string;
+  source: string;
+  created_at: string;
+}
+
+export interface DigestEscalated extends DigestRequest {
+  escalated_at: string | null;
+  escalated_by: PeerId | null;
+  escalation_note: string | null;
+}
+
+export interface DigestEvent extends DigestRow {
+  id: number;
+  level: EventLevel;
+  source: string;
+  logger: string | null;
+  message: string;
+  created_at: string;
+}
+
+export interface DigestPeer {
+  id: PeerId;
+  summary: string;
+  cwd: string;
+  peer_type: PeerType;
+  last_seen: string;
+}
+
+/** Everything a chief of staff needs to decide what to look at. Data, not instructions. */
+export interface Digest {
+  ok: true;
+  peers: DigestPeer[];
+  pending: DigestRequest[];
+  escalated: DigestEscalated[];
+  events: DigestEvent[];
+  cursor: { from: number; to: number; truncated: boolean };
+}
