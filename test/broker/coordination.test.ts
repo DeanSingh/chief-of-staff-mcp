@@ -614,6 +614,22 @@ describe("input requests", () => {
     expect(events()).toHaveLength(1);
   });
 
+  test("a close because the session ended says so, in the row and the notice", async () => {
+    const { request_id } = await ask({ session_key: "close-ended", question: "q" });
+    const r = await call<{ closed: number }>("/close-requests", { session_key: "close-ended", reason: "session_end" });
+    expect(r).toMatchObject({ status: 200, closed: 1 });
+    expect(row(request_id)).toMatchObject({ state: "canceled", answered_via: "session_end" });
+    const db = new Database(DB, { readonly: true });
+    try {
+      expect(db.query("SELECT message FROM events WHERE session_key = 'close-ended'").all()).toEqual([
+        { message: "1 open request closed when the session ended" },
+      ]);
+    } finally {
+      db.close();
+    }
+    expect((await call("/close-requests", { session_key: "close-ended", reason: "bored" })).status).toBe(400);
+  });
+
   test("close refuses a Desktop token as a session_key, and never stores it", async () => {
     const d = await post<{ id: string }>("/register", {
       pid: LIVE_PIDS[1],

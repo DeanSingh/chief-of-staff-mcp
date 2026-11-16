@@ -128,7 +128,7 @@ export const EVENT_LEVELS: readonly EventLevel[] = [
 
 export type RequestState = "pending" | "escalated" | "answered" | "canceled";
 
-export type AnsweredVia = "cos" | "human" | "terminal";
+export type AnsweredVia = "cos" | "human" | "terminal" | "session_end";
 
 /** Who an event or request is about: a registered peer, a session key, or both. */
 export interface Subject {

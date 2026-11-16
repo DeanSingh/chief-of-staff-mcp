@@ -203,7 +203,9 @@ describe("hook.ts", () => {
     test("a captured SessionEnd payload closes the session's requests", async () => {
       const n = hits.length;
       await runHook(CAPTURED.sessionEnd, stub.port);
-      expect(since(n).map((h) => [h.path, h.body])).toEqual([["/close-requests", { session_key: "s-captured-end" }]]);
+      expect(since(n).map((h) => [h.path, h.body])).toEqual([
+        ["/close-requests", { session_key: "s-captured-end", reason: "session_end" }],
+      ]);
     });
 
     test("agent_needs_input raises one hook request for the session, with no host walk", async () => {
@@ -349,7 +351,7 @@ describe("hook.ts", () => {
       expect(r.exitCode).toBe(0);
       expect(r.stdout).toBe("");
       expect(since(n).map((h) => h.path)).toEqual(["/close-requests"]);
-      expect(since(n)[0]!.body).toEqual({ session_key: "s-end" });
+      expect(since(n)[0]!.body).toEqual({ session_key: "s-end", reason: "session_end" });
     });
 
     test("a broker that hangs: every queue event still exits 0 within 1s", async () => {

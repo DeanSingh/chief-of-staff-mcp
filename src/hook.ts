@@ -128,7 +128,7 @@ export async function runHook(): Promise<void> {
       return;
     // The session is over, so no one will answer its open requests there.
     case "SessionEnd":
-      if (session_key) await post("/close-requests", { session_key });
+      if (session_key) await post("/close-requests", { session_key, reason: "session_end" });
       return;
     case "Stop":
       // Only that a turn ended: the assistant's last message can carry case details.
