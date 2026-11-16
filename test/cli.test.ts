@@ -43,6 +43,22 @@ describe("install-hooks", () => {
     expect(s.hooks.UserPromptSubmit).toEqual([{ hooks: [{ type: "command", command: OURS, timeout: 1 }] }]);
   });
 
+  test("registers all four events, and a re-run leaves exactly one entry for each", async () => {
+    const first = await install();
+    const again = Bun.spawn(["bun", `${ROOT}/cli.ts`, "install-hooks", "--settings", first.path], {
+      stdout: "pipe",
+    });
+    expect(await again.exited).toBe(0);
+    expect(await new Response(again.stdout).text()).toContain(
+      "Installed SessionStart, UserPromptSubmit, Notification and Stop hooks",
+    );
+    const s = await first.read();
+    for (const event of ["SessionStart", "UserPromptSubmit", "Notification", "Stop"]) {
+      const ours = s.hooks[event].flatMap((g: any) => g.hooks).filter((h: any) => h.command === OURS);
+      expect(ours).toEqual([{ type: "command", command: OURS, timeout: 1 }]);
+    }
+  });
+
   test("running twice leaves exactly one entry", async () => {
     const first = await install();
     const proc = Bun.spawn(["bun", `${ROOT}/cli.ts`, "install-hooks", "--settings", first.path], {
@@ -63,7 +79,10 @@ describe("install-hooks", () => {
       })
     ).read();
     expect(s.model).toBe("opus");
-    expect(s.hooks.Stop).toEqual([{ hooks: [{ type: "command", command: "say done" }] }]);
+    expect(s.hooks.Stop).toEqual([
+      { hooks: [{ type: "command", command: "say done" }] },
+      { hooks: [{ type: "command", command: OURS, timeout: 1 }] },
+    ]);
     expect(s.hooks.SessionStart[0]).toEqual({ matcher: "startup", hooks: [{ type: "command", command: "echo hi" }] });
     expect(commands(s)).toContain(OURS);
   });

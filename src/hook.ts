@@ -1,5 +1,7 @@
 /**
- * The SessionStart and UserPromptSubmit hook. See hook.ts at the repo root.
+ * The Claude Code hook: identity on SessionStart, the unread nudge and
+ * request closing on UserPromptSubmit, and decision-queue capture on
+ * Notification and Stop. See hook.ts at the repo root.
  */
 
 import { authHeaders, readSecret } from "./shared/auth.ts";
@@ -35,22 +37,74 @@ function post(path: string, body: unknown): Promise<Response> {
   });
 }
 
-export async function runHook(): Promise<void> {
-  const input = JSON.parse(await Bun.stdin.text());
-  const event = input?.hook_event_name;
-  if (event !== "SessionStart" && event !== "UserPromptSubmit") return;
-  const pid = hostPid(process.ppid);
-  // No secret yet means no broker has ever run: nothing to tell it.
-  if (!pid || !readSecret()) return;
+type HookInput = { session_id?: unknown; notification_type?: unknown; message?: unknown; source?: unknown };
 
-  if (event === "SessionStart") {
-    if (typeof input.session_id !== "string") return;
-    await post("/session-start", { session_key: input.session_id, pid, source: input.source ?? "" });
-    return;
+/**
+ * Notification: a blocked agent raises one input request for its session (the
+ * broker keeps one open hook request per session); a permission prompt is a
+ * warning, because no one but the human may answer it; anything else is a
+ * debug event that names only its type, never its text.
+ */
+function notify(session_key: string, input: HookInput): Promise<Response> {
+  const type = typeof input.notification_type === "string" ? input.notification_type : "unknown";
+  const message = typeof input.message === "string" && input.message ? input.message : type;
+  if (type === "agent_needs_input") {
+    return post("/request-input", { session_key, question: message, waiting_for: "input needed", source: "hook" });
   }
+  if (type === "permission_prompt") {
+    return post("/report-event", { session_key, level: "warning", logger: "notification", message, source: "hook" });
+  }
+  const debug = `notification: ${type}`;
+  return post("/report-event", { session_key, level: "debug", logger: "notification", message: debug, source: "hook" });
+}
 
-  // UserPromptSubmit: stdout is added to the model's context, so this line is
-  // the nudge that gets mail read even when channel push missed it.
-  const { count } = (await (await post("/unread", { pid })).json()) as { count: number };
-  if (count > 0) console.log(`You have ${count} unread peer message(s). Call check_messages now to read them.`);
+/**
+ * UserPromptSubmit: the human answered at the terminal, so the session's open
+ * requests are closed; and stdout is added to the model's context, so the
+ * unread line is the nudge that gets mail read even when channel push missed
+ * it. The two requests run side by side to stay inside the hook's budget.
+ */
+async function promptSubmitted(session_key: string | null): Promise<void> {
+  const pid = hostPid(process.ppid);
+  const unread = async () => {
+    if (!pid) return;
+    const { count } = (await (await post("/unread", { pid })).json()) as { count: number };
+    if (count > 0) console.log(`You have ${count} unread peer message(s). Call check_messages now to read them.`);
+  };
+  await Promise.all([session_key ? post("/close-requests", { session_key }) : null, unread()]);
+}
+
+export async function runHook(): Promise<void> {
+  const input = JSON.parse(await Bun.stdin.text()) as HookInput & { hook_event_name?: unknown };
+  const event = input?.hook_event_name;
+  // No secret yet means no broker has ever run: nothing to tell it.
+  if (!readSecret()) return;
+  const session_key = typeof input.session_id === "string" && input.session_id ? input.session_id : null;
+
+  switch (event) {
+    case "SessionStart": {
+      const pid = hostPid(process.ppid);
+      if (!pid || !session_key) return;
+      await post("/session-start", { session_key, pid, source: input.source ?? "" });
+      return;
+    }
+    case "UserPromptSubmit":
+      return promptSubmitted(session_key);
+    // Notification and Stop are filed by session key alone: no host walk.
+    case "Notification":
+      if (session_key) await notify(session_key, input);
+      return;
+    case "Stop":
+      // Only that a turn ended: the assistant's last message can carry case details.
+      if (session_key) {
+        await post("/report-event", {
+          session_key,
+          level: "info",
+          logger: "stop",
+          message: "turn ended",
+          source: "hook",
+        });
+      }
+      return;
+  }
 }

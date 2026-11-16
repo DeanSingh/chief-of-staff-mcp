@@ -85,9 +85,9 @@ describe("hook.ts", () => {
     expect(r.stdout).toBe("");
   });
 
-  test("ignores non-SessionStart events", async () => {
+  test("ignores events it doesn't handle", async () => {
     const before = hits.length;
-    const r = await runHook({ hook_event_name: "Stop", session_id: "s-stop" }, stub.port);
+    const r = await runHook({ hook_event_name: "PreToolUse", session_id: "s-pre", tool_name: "Bash" }, stub.port);
     expect(r.exitCode).toBe(0);
     expect(hits.length).toBe(before);
   });
@@ -170,5 +170,150 @@ describe("hook.ts", () => {
     const r = await runHook({ hook_event_name: "UserPromptSubmit", session_id: "s-ups0", prompt: "hi" }, stub.port);
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toBe("");
+  });
+
+  describe("decision queue", () => {
+    const since = (n: number) => hits.slice(n);
+
+    test("agent_needs_input raises one hook request for the session, with no host walk", async () => {
+      const n = hits.length;
+      const r = await runHook(
+        {
+          hook_event_name: "Notification",
+          session_id: "s-blocked",
+          notification_type: "agent_needs_input",
+          message: "Claude is waiting for your input",
+        },
+        stub.port,
+        "no-such-process-name",
+      );
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toBe("");
+      expect(since(n).map((h) => h.path)).toEqual(["/request-input"]);
+      expect(since(n)[0]!.body).toEqual({
+        session_key: "s-blocked",
+        question: "Claude is waiting for your input",
+        waiting_for: "input needed",
+        source: "hook",
+      });
+      expect(since(n)[0]!.auth).toBe(`Bearer ${SECRET}`);
+    });
+
+    test("permission_prompt is a warning event, never a request", async () => {
+      const n = hits.length;
+      await runHook(
+        {
+          hook_event_name: "Notification",
+          session_id: "s-perm",
+          notification_type: "permission_prompt",
+          message: "Claude needs your permission to use Bash",
+        },
+        stub.port,
+      );
+      expect(since(n).map((h) => h.path)).toEqual(["/report-event"]);
+      expect(since(n)[0]!.body).toEqual({
+        session_key: "s-perm",
+        level: "warning",
+        logger: "notification",
+        message: "Claude needs your permission to use Bash",
+        source: "hook",
+      });
+    });
+
+    test("any other notification is a debug event naming its type, with no text and no data", async () => {
+      for (const [type, expected] of [
+        ["auth_success", "notification: auth_success"],
+        [undefined, "notification: unknown"],
+      ] as const) {
+        const n = hits.length;
+        await runHook(
+          { hook_event_name: "Notification", session_id: "s-other", notification_type: type, message: "private text" },
+          stub.port,
+        );
+        expect(since(n).map((h) => h.path)).toEqual(["/report-event"]);
+        expect(since(n)[0]!.body).toEqual({
+          session_key: "s-other",
+          level: "debug",
+          logger: "notification",
+          message: expected,
+          source: "hook",
+        });
+      }
+    });
+
+    test("Stop reports a turn ended, without the assistant's last message", async () => {
+      const n = hits.length;
+      const r = await runHook(
+        { hook_event_name: "Stop", session_id: "s-stop", stop_hook_active: false, last_assistant_message: "secret" },
+        stub.port,
+      );
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toBe("");
+      expect(since(n).map((h) => h.path)).toEqual(["/report-event"]);
+      expect(since(n)[0]!.body).toEqual({
+        session_key: "s-stop",
+        level: "info",
+        logger: "stop",
+        message: "turn ended",
+        source: "hook",
+      });
+      expect(JSON.stringify(since(n))).not.toContain("secret");
+    });
+
+    test("UserPromptSubmit closes the session's requests and checks unread mail", async () => {
+      unread = 0;
+      const n = hits.length;
+      await runHook({ hook_event_name: "UserPromptSubmit", session_id: "s-reply", prompt: "go ahead" }, stub.port);
+      const got = since(n);
+      expect(got.map((h) => h.path).sort()).toEqual(["/close-requests", "/unread"]);
+      expect(got.find((h) => h.path === "/close-requests")!.body).toEqual({ session_key: "s-reply" });
+    });
+
+    test("UserPromptSubmit with no host process still closes requests", async () => {
+      const n = hits.length;
+      await runHook(
+        { hook_event_name: "UserPromptSubmit", session_id: "s-nohost-reply", prompt: "x" },
+        stub.port,
+        "no-such-process-name",
+      );
+      expect(since(n).map((h) => h.path)).toEqual(["/close-requests"]);
+    });
+
+    test("no session_id: nothing is posted for the queue", async () => {
+      const n = hits.length;
+      for (const hook_event_name of ["Notification", "Stop"]) {
+        await runHook({ hook_event_name, notification_type: "agent_needs_input", message: "m" }, stub.port);
+      }
+      expect(since(n)).toHaveLength(0);
+    });
+
+    test("no secret: no hits, exit 0", async () => {
+      const n = hits.length;
+      for (const input of [
+        { hook_event_name: "Notification", session_id: "s-ns", notification_type: "agent_needs_input", message: "m" },
+        { hook_event_name: "Stop", session_id: "s-ns" },
+        { hook_event_name: "UserPromptSubmit", session_id: "s-ns", prompt: "x" },
+      ]) {
+        const r = await runHook(input, stub.port, "bun", join(DIR, "none.db"));
+        expect(r.exitCode).toBe(0);
+      }
+      expect(since(n)).toHaveLength(0);
+    });
+
+    test("broker down: every queue event exits 0 within 1s", async () => {
+      const tmp = Bun.serve({ port: 0, fetch: () => new Response() });
+      const closed = tmp.port;
+      tmp.stop(true);
+      for (const input of [
+        { hook_event_name: "Notification", session_id: "s-d", notification_type: "agent_needs_input", message: "m" },
+        { hook_event_name: "Stop", session_id: "s-d" },
+        { hook_event_name: "UserPromptSubmit", session_id: "s-d", prompt: "x" },
+      ]) {
+        const r = await runHook(input, closed);
+        expect(r.exitCode).toBe(0);
+        expect(r.elapsed).toBeLessThan(1000);
+        expect(r.stdout).toBe("");
+      }
+    });
   });
 });

@@ -20,6 +20,10 @@ Notable changes. There are no tagged releases yet; `main` is the release.
 
 ### Added
 
+- Hook capture for the decision queue: `install-hooks` also registers
+  `Notification` and `Stop`. A blocked agent raises one input request per
+  session, a permission prompt is a warning event, and typing in the session
+  closes its open requests. No agent text from `Stop` is recorded.
 - Decision queue in the broker: `events`, input requests with answer
   delivery, and a digest with an acknowledged cursor. No caller yet; hook
   capture comes separately (#20).
