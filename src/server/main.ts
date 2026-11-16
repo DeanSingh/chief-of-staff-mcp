@@ -21,7 +21,7 @@ import { log, tightenLogFile } from "./log.ts";
 import { mcp } from "./mcp.ts";
 import { cliRegisterBody, desktopRegisterBody, getGitRoot, getTty, heartbeatHost } from "./sessions.ts";
 import { desktopPeers, state } from "./state.ts";
-import { WAKE_PASSIVE_NOTICE, wakeInstructions } from "./wake.ts";
+import { wakeSwitchNotice } from "./wake.ts";
 
 // --- Startup ---
 
@@ -132,9 +132,7 @@ export async function main() {
             // the session on its next tool call.
             if (r.wake_url === entry.wakeUrl) return;
             entry.wakeUrl = r.wake_url;
-            entry.wakeNotice = r.wake_url
-              ? `Wake mode for this session is now active.\n\n${wakeInstructions(r.wake_url, "claim")}`
-              : WAKE_PASSIVE_NOTICE;
+            entry.wakeNotice = wakeSwitchNotice(r.wake_url);
           })
           .catch(async (e) => {
             // Reaped while this process was idle or suspended. Register again:

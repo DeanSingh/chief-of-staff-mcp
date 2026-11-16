@@ -6,6 +6,10 @@ Notable changes. There are no tagged releases yet; `main` is the release.
 
 ### Changed
 
+- The wake copy states the session's mode and how it is set (`/desktop-wake`,
+  `set_wake`, or the broker's default), on claim, on `list_peers`, and when
+  a switch either way reaches a running session (#19).
+
 - No function in `src/` is over the complexity limit: the broker's routes
   and the server's tools dispatch from tables, and registration reads as
   its precedence order. Broker tests are split by area (#17).

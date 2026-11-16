@@ -423,7 +423,7 @@ async function setWake(
         {
           type: "text" as const,
           text: r.wake_url
-            ? `Wake mode for this session is now active.\n\n${wakeInstructions(r.wake_url, "claim")}`
+            ? wakeInstructions(r.wake_url, "claim")
             : mode === "passive"
               ? WAKE_PASSIVE_NOTICE
               : `This session now follows the global wake mode, which is passive. ${WAKE_PASSIVE_NOTICE}`,
