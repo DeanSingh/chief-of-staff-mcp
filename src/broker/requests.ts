@@ -86,8 +86,9 @@ export function handleEscalateRequest(b: { request_id: string; peer_id: string; 
     return fail(404, `no such request: ${b.request_id}`);
   }
   const r = db.run(
-    "UPDATE input_requests SET state = 'escalated', escalated_at = ?, escalation_note = ? WHERE id = ? AND state = 'pending'",
-    [new Date().toISOString(), typeof b.note === "string" ? clip(b.note) : null, b.request_id],
+    `UPDATE input_requests SET state = 'escalated', escalated_at = ?, escalated_by = ?, escalation_note = ?
+     WHERE id = ? AND state = 'pending'`,
+    [new Date().toISOString(), b.peer_id, typeof b.note === "string" ? clip(b.note) : null, b.request_id],
   );
   return r.changes === 1 ? { ok: true } : fail(409, "request is not pending");
 }

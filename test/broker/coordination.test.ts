@@ -182,10 +182,10 @@ describe("coordination retention", () => {
     const seed = new Database(DB);
     try {
       const add = seed.prepare(
-        "INSERT INTO events (level, logger, message, data, created_at) VALUES ('warning', 'lg', ?, ?, ?)",
+        "INSERT INTO events (level, logger, message, created_at) VALUES ('warning', 'lg', ?, ?)",
       );
-      add.run("EVT-OLD-SENTINEL-31", '{"k":"EVT-DATA-SENTINEL-32"}', hoursAgo(25));
-      add.run("evt fresh", '{"k":"fresh"}', hoursAgo(23));
+      add.run("EVT-OLD-SENTINEL-31", hoursAgo(25));
+      add.run("evt fresh", hoursAgo(23));
     } finally {
       seed.close();
     }
@@ -195,11 +195,11 @@ describe("coordination retention", () => {
     const check = new Database(DB, { readonly: true });
     try {
       const rows = check
-        .query("SELECT level, logger, message, data, created_at FROM events WHERE logger = 'lg' ORDER BY created_at")
+        .query("SELECT level, logger, message, created_at FROM events WHERE logger = 'lg' ORDER BY created_at")
         .all() as Record<string, string | null>[];
       expect(rows).toHaveLength(2);
-      expect(rows[0]).toMatchObject({ level: "warning", logger: "lg", message: "", data: null });
-      expect(rows[1]).toMatchObject({ message: "evt fresh", data: '{"k":"fresh"}' });
+      expect(rows[0]).toMatchObject({ level: "warning", logger: "lg", message: "" });
+      expect(rows[1]).toMatchObject({ message: "evt fresh" });
     } finally {
       check.close();
     }
@@ -208,6 +208,40 @@ describe("coordination retention", () => {
       if (!(await f.exists())) continue;
       const bytes = Buffer.from(await f.arrayBuffer()).toString("latin1");
       expect(bytes).not.toContain("EVT-OLD-SENTINEL-31");
+    }
+  });
+
+  test("a database from an earlier build loses events.data and the (id, level) index, and gains escalated_by", async () => {
+    const seed = new Database(DB);
+    try {
+      seed.run("ALTER TABLE events ADD COLUMN data TEXT");
+      seed.run("CREATE INDEX IF NOT EXISTS idx_events_id_level ON events (id, level)");
+      seed.run("ALTER TABLE input_requests DROP COLUMN escalated_by");
+      seed.run("INSERT INTO events (message, data, created_at) VALUES ('old build', ?, ?)", [
+        '{"k":"EVT-DATA-SENTINEL-32"}',
+        new Date().toISOString(),
+      ]);
+    } finally {
+      seed.close();
+    }
+
+    await restartBroker();
+
+    const check = new Database(DB, { readonly: true });
+    try {
+      const cols = (table: string) =>
+        (check.query(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name);
+      expect(cols("events")).not.toContain("data");
+      expect(cols("input_requests")).toContain("escalated_by");
+      expect(check.query("SELECT 1 FROM sqlite_master WHERE name = 'idx_events_id_level'").all()).toHaveLength(0);
+      expect(check.query("SELECT 1 FROM events WHERE message = 'old build'").all()).toHaveLength(1);
+    } finally {
+      check.close();
+    }
+    for (const file of [DB, `${DB}-wal`]) {
+      const f = Bun.file(file);
+      if (!(await f.exists())) continue;
+      const bytes = Buffer.from(await f.arrayBuffer()).toString("latin1");
       expect(bytes).not.toContain("EVT-DATA-SENTINEL-32");
     }
   });
@@ -357,51 +391,31 @@ describe("/report-event", () => {
     expect(res.status).toBe(200);
   });
 
-  test("data over 8 KB is stored as a truncated preview", async () => {
-    const peer_id = await register("bigdata", "cli");
-    const r = await post<{ event_id: number }>("/report-event", {
-      peer_id,
-      message: "x",
-      data: { blob: "a".repeat(20_000) },
-    });
-    const data = JSON.parse(stored(r.event_id).data!);
-    expect(data.truncated).toBe(true);
-    expect(typeof data.preview).toBe("string");
-    expect(data.preview.length).toBe(8000);
-  });
-
-  test("small data round-trips, and a 10 KB message is clipped with a marker", async () => {
+  test("data in a report is not stored, and a 10 KB message is clipped with a marker", async () => {
     const peer_id = await register("bigmsg", "cli");
     const r = await post<{ event_id: number }>("/report-event", {
       peer_id,
       message: "m".repeat(10_000),
-      data: { a: 1 },
+      data: { secret: "EVT-REPORT-DATA-33" },
     });
     const row = stored(r.event_id);
     expect(row.message!.length).toBeLessThanOrEqual(4096);
     expect(row.message!.endsWith("…[truncated]")).toBe(true);
-    expect(JSON.parse(row.data!)).toEqual({ a: 1 });
+    expect(Object.keys(row)).not.toContain("data");
   });
 
-  test("a stop event stores a fixed message and no data; other loggers keep theirs", async () => {
+  test("a stop event stores a fixed message; other loggers keep theirs", async () => {
     const peer_id = await register("stopper", "cli");
     const body = {
       peer_id,
       level: "warning",
       source: "hook",
       message: "Patient J. Doe, DOB 1/2/1980",
-      data: { last_assistant_message: "private" },
     };
     const stop = await post<{ event_id: number }>("/report-event", { ...body, logger: "stop" });
-    expect(stored(stop.event_id)).toMatchObject({
-      message: "turn ended",
-      data: null,
-      level: "warning",
-      source: "hook",
-    });
+    expect(stored(stop.event_id)).toMatchObject({ message: "turn ended", level: "warning", source: "hook" });
     const other = await post<{ event_id: number }>("/report-event", { ...body, logger: "notification" });
     expect(stored(other.event_id)).toMatchObject({ message: body.message });
-    expect(JSON.parse(stored(other.event_id).data!)).toEqual(body.data);
   });
 });
 
@@ -515,7 +529,7 @@ describe("input requests", () => {
     const answerer = await register("esc-answerer", "cli");
     const { request_id } = await ask({ peer_id: id, question: "q" });
     expect((await call("/escalate-request", { request_id, peer_id: id, note: "urgent" })).status).toBe(200);
-    expect(row(request_id)).toMatchObject({ state: "escalated", escalation_note: "urgent" });
+    expect(row(request_id)).toMatchObject({ state: "escalated", escalation_note: "urgent", escalated_by: id });
     expect(row(request_id).escalated_at).toBeTruthy();
     expect((await call("/escalate-request", { request_id, peer_id: id })).status).toBe(409);
     expect((await call("/escalate-request", { request_id: "nope", peer_id: id })).status).toBe(404);
@@ -816,12 +830,16 @@ describe("digest and cursor", () => {
     expect(d.pending.map((r) => r.id)).toContain(p.request_id);
     expect(d.pending.map((r) => r.id)).not.toContain(e.request_id);
     const esc = d.escalated.find((r) => r.id === e.request_id)!;
-    expect(esc).toMatchObject({ question: "escalated q", escalation_note: "needs a human", peer_id: peer });
+    expect(esc).toMatchObject({
+      question: "escalated q",
+      escalation_note: "needs a human",
+      escalated_by: peer,
+      peer_id: peer,
+    });
     expect(typeof esc.escalated_at).toBe("string");
     expect(d.escalated.map((r) => r.id)).not.toContain(p.request_id);
     expect(d.pending.find((r) => r.id === p.request_id)).toMatchObject({
       peer_id: peer,
-      session_key: null,
       waiting_for: "input needed",
       urgency: "normal",
       source: "tool",
@@ -928,11 +946,11 @@ describe("digest and cursor", () => {
     expect(text).toContain("from desktop");
     expect(text).toContain("keyed");
     const row = out.pending.find((r) => r.id === "dg-desk-req")!;
-    expect(row.session_key).toBeNull();
+    expect(row).not.toHaveProperty("session_key");
     expect(row.peer_id).toBe(d.id);
-    expect(out.escalated.find((r) => r.id === "dg-desk-esc")!.session_key).toBeNull();
+    expect(out.escalated.find((r) => r.id === "dg-desk-esc")).not.toHaveProperty("session_key");
     const peer = out.peers.find((p) => p.id === d.id)!;
-    expect(peer.session_key).toBeNull();
+    expect(peer).not.toHaveProperty("session_key");
     expect(peer.cwd).not.toContain("cs_digest_x");
   });
 
@@ -950,10 +968,10 @@ describe("digest and cursor", () => {
     });
     const out = await digest({ min_level: "debug", since_id: 0 });
     expect(JSON.stringify(out)).not.toContain("cs_unmapped_tok");
-    expect(out.pending.find((r) => r.id === "dg-unmapped-cs")!.session_key).toBeNull();
+    expect(out.pending.find((r) => r.id === "dg-unmapped-cs")).not.toHaveProperty("session_key");
   });
 
-  test("peers[] lists public fields with the newest session key for a CLI peer", async () => {
+  test("peers[] lists public fields and no session key", async () => {
     const id = await regKey("dg-peer-key", LIVE_PIDS[0]!);
     sql((db) => {
       db.run(
@@ -962,8 +980,40 @@ describe("digest and cursor", () => {
       );
     });
     const p = (await digest({})).peers.find((x) => x.id === id)!;
-    expect(p).toMatchObject({ session_key: "dg-peer-key-newer", summary: "dg-peer-key", peer_type: "cli" });
-    expect(Object.keys(p).sort()).toEqual(["cwd", "id", "last_seen", "peer_type", "session_key", "summary"]);
+    expect(p).toMatchObject({ summary: "dg-peer-key", peer_type: "cli" });
+    expect(Object.keys(p).sort()).toEqual(["cwd", "id", "last_seen", "peer_type", "summary"]);
+  });
+
+  test("a CLI session key never appears in the digest, mapped or not", async () => {
+    // /close-requests acts on a session key with only the install secret, so
+    // a key read from the digest could cancel another session's requests.
+    const start = highest();
+    const id = (
+      await post<{ id: string }>("/register", {
+        pid: LIVE_PIDS[0],
+        cwd: "/tmp/dg-cli",
+        git_root: null,
+        tty: null,
+        summary: "dg-cli",
+        peer_type: "cli",
+        session_key: "dg-cli-key-mapped",
+      })
+    ).id;
+    await report({ session_key: "dg-cli-key-mapped", message: "mapped evt", level: "warning" });
+    await report({ session_key: "dg-cli-key-loose", message: "loose evt", level: "warning" });
+    await post("/request-input", { session_key: "dg-cli-key-mapped", question: "mapped q" });
+    const loose = await post<{ request_id: string }>("/request-input", {
+      session_key: "dg-cli-key-loose",
+      question: "loose q",
+    });
+    await post("/escalate-request", { peer_id: id, request_id: loose.request_id });
+    const out = await digest({ min_level: "debug", since_id: start });
+    const text = JSON.stringify(out);
+    expect(text).not.toContain("dg-cli-key-mapped");
+    expect(text).not.toContain("dg-cli-key-loose");
+    expect(text).toContain("mapped evt");
+    expect(out.events.find((e) => e.message === "mapped evt")).toMatchObject({ peer_id: id });
+    expect(out.events.find((e) => e.message === "loose evt")).toMatchObject({ peer_id: null });
   });
 
   test("ack is monotonic and clamped to the highest event id", async () => {
@@ -1034,9 +1084,9 @@ describe("digest and cursor", () => {
     const start = highest();
     await post("/report-event", { session_key: "dg-late-key", message: "early", level: "warning" });
     const before = await digest({ since_id: start });
-    expect(before.events[0]).toMatchObject({ peer_id: null, session_key: "dg-late-key" });
+    expect(before.events[0]).toMatchObject({ peer_id: null });
     const id = await regKey("dg-late-key", LIVE_PIDS[1]!);
     const after = await digest({ since_id: start });
-    expect(after.events[0]).toMatchObject({ peer_id: id, session_key: "dg-late-key" });
+    expect(after.events[0]).toMatchObject({ peer_id: id });
   });
 });

@@ -136,11 +136,11 @@ export interface Subject {
   session_key?: string;
 }
 
-/** A request or event row as the digest shows it. A Desktop session_key is never included. */
+/** A request or event row as the digest shows it. Session keys are never included. */
 export interface DigestRow {
   id: string | number;
+  /** The row's peer, or the peer its session key maps to; null for an unmapped session. */
   peer_id: PeerId | null;
-  session_key: string | null;
 }
 
 export interface DigestRequest extends DigestRow {
@@ -154,6 +154,7 @@ export interface DigestRequest extends DigestRow {
 
 export interface DigestEscalated extends DigestRequest {
   escalated_at: string | null;
+  escalated_by: PeerId | null;
   escalation_note: string | null;
 }
 
@@ -168,7 +169,6 @@ export interface DigestEvent extends DigestRow {
 
 export interface DigestPeer {
   id: PeerId;
-  session_key: string | null;
   summary: string;
   cwd: string;
   peer_type: PeerType;

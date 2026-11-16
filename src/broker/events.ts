@@ -19,21 +19,10 @@ export const fail = (status: Fail["status"], error: string): Fail => ({ ok: fals
 export const FIELD_MAX = 256;
 
 const TRUNCATED = "…[truncated]";
-const DATA_MAX = 8192;
-const DATA_PREVIEW = 8000;
 
 /** Cap text at `max` chars, marking the cut. */
 export function clip(text: string, max = 4096): string {
   return text.length <= max ? text : text.slice(0, max - TRUNCATED.length) + TRUNCATED;
-}
-
-/** JSON for the `data` column; over 8 KB it becomes a marked preview, never an error. */
-export function clipData(data: unknown): string | null {
-  if (data === undefined) return null;
-  const json = JSON.stringify(data);
-  if (json === undefined) return null;
-  if (json.length <= DATA_MAX) return json;
-  return JSON.stringify({ truncated: true, preview: json.slice(0, DATA_PREVIEW) });
 }
 
 /** The prefix of a Desktop session token, a bearer credential that is never stored as a key. */
@@ -80,7 +69,6 @@ type ReportEventRequest = Subject & {
   message: string;
   source?: "tool" | "hook";
   logger?: string;
-  data?: unknown;
 };
 
 export function handleReportEvent(b: ReportEventRequest): { ok: true; event_id: number } | Fail {
@@ -93,12 +81,12 @@ export function handleReportEvent(b: ReportEventRequest): { ok: true; event_id: 
   const subject = subjectOf(b);
   if ("status" in subject) return subject;
   // A stop event records only that a turn ended: the assistant's last message
-  // can carry case details, so neither it nor its data is kept.
+  // can carry case details, so it is not kept.
   const isStop = b.logger === "stop";
   const r = db
     .query(
-      `INSERT INTO events (peer_id, session_key, level, source, logger, message, data, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO events (peer_id, session_key, level, source, logger, message, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       subject.peer_id,
@@ -107,7 +95,6 @@ export function handleReportEvent(b: ReportEventRequest): { ok: true; event_id: 
       source,
       b.logger == null ? null : clip(b.logger, FIELD_MAX),
       isStop ? "turn ended" : clip(b.message),
-      isStop ? null : clipData(b.data),
       new Date().toISOString(),
     );
   return { ok: true, event_id: Number(r.lastInsertRowid) };

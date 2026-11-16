@@ -167,12 +167,19 @@ db.run(`
     source      TEXT NOT NULL DEFAULT 'tool',
     logger      TEXT,
     message     TEXT NOT NULL,
-    data        TEXT,
     created_at  TEXT NOT NULL
   )
 `);
 db.run("CREATE INDEX IF NOT EXISTS idx_events_peer ON events (peer_id, id)");
-db.run("CREATE INDEX IF NOT EXISTS idx_events_id_level ON events (id, level)");
+// Earlier builds of this branch kept agent-written JSON in events.data, which
+// nothing read, and an (id, level) index the rowid already covers. Dropping
+// the column leaves its old pages in the main file until a checkpoint, so the
+// first sweep owes one.
+db.run("DROP INDEX IF EXISTS idx_events_id_level");
+export const DROPPED_EVENT_DATA = (db.query("PRAGMA table_info(events)").all() as { name: string }[]).some(
+  (c) => c.name === "data",
+);
+if (DROPPED_EVENT_DATA) db.run("ALTER TABLE events DROP COLUMN data");
 db.run(`
   CREATE TABLE IF NOT EXISTS input_requests (
     id              TEXT PRIMARY KEY,
@@ -187,12 +194,18 @@ db.run(`
     answered_by     TEXT,
     answered_via    TEXT,
     escalated_at    TEXT,
+    escalated_by    TEXT,
     escalation_note TEXT,
     created_at      TEXT NOT NULL,
     question_at     TEXT,
     answered_at     TEXT
   )
 `);
+if (
+  !(db.query("PRAGMA table_info(input_requests)").all() as { name: string }[]).some((c) => c.name === "escalated_by")
+) {
+  db.run("ALTER TABLE input_requests ADD COLUMN escalated_by TEXT");
+}
 db.run("CREATE INDEX IF NOT EXISTS idx_requests_state_session ON input_requests (state, session_key)");
 db.run("CREATE INDEX IF NOT EXISTS idx_requests_session ON input_requests (session_key)");
 db.run(`
