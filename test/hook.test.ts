@@ -269,6 +269,34 @@ describe("hook.ts", () => {
       expect(got.find((h) => h.path === "/close-requests")!.body).toEqual({ session_key: "s-reply" });
     });
 
+    // A channel push or a background task's report reaches the session as a
+    // prompt too (verified on Claude Code 2.1.325: the hook's prompt is the
+    // <channel …> block). Only the human typing answers a request.
+    test("UserPromptSubmit from a peer message or task report keeps requests open, and still checks mail", async () => {
+      for (const prompt of [
+        '<channel source="claude-peers" from_id="abc" from_summary="" from_cwd="" sent_at="x">\nhi\n</channel>',
+        "<task-notification>\n<task-id>t1</task-id>\n</task-notification>",
+      ]) {
+        const n = hits.length;
+        const r = await runHook({ hook_event_name: "UserPromptSubmit", session_id: "s-machine", prompt }, stub.port);
+        expect(r.exitCode).toBe(0);
+        expect(since(n).map((h) => h.path)).toEqual(["/unread"]);
+      }
+    });
+
+    test("a typed prompt that merely mentions a channel tag still closes requests", async () => {
+      const n = hits.length;
+      await runHook(
+        { hook_event_name: "UserPromptSubmit", session_id: "s-typed", prompt: "why did <channel source=x> fire?" },
+        stub.port,
+      );
+      expect(
+        since(n)
+          .map((h) => h.path)
+          .sort(),
+      ).toEqual(["/close-requests", "/unread"]);
+    });
+
     test("UserPromptSubmit with no host process still closes requests", async () => {
       const n = hits.length;
       await runHook(

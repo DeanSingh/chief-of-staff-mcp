@@ -37,7 +37,13 @@ function post(path: string, body: unknown): Promise<Response> {
   });
 }
 
-type HookInput = { session_id?: unknown; notification_type?: unknown; message?: unknown; source?: unknown };
+type HookInput = {
+  session_id?: unknown;
+  notification_type?: unknown;
+  message?: unknown;
+  source?: unknown;
+  prompt?: unknown;
+};
 
 /**
  * Notification: a blocked agent raises one input request for its session (the
@@ -59,19 +65,31 @@ function notify(session_key: string, input: HookInput): Promise<Response> {
 }
 
 /**
- * UserPromptSubmit: the human answered at the terminal, so the session's open
- * requests are closed; and stdout is added to the model's context, so the
- * unread line is the nudge that gets mail read even when channel push missed
- * it. The two requests run side by side to stay inside the hook's budget.
+ * Prompts Claude Code submits on its own: a channel push (a peer message) and
+ * a background task's report both fire UserPromptSubmit, with the prompt
+ * starting with one of these tags. They are not the human answering.
  */
-async function promptSubmitted(session_key: string | null): Promise<void> {
+const MACHINE_PROMPTS = ["<channel ", "<task-notification>"];
+
+const isMachinePrompt = (prompt: unknown): boolean =>
+  typeof prompt === "string" && MACHINE_PROMPTS.some((tag) => prompt.startsWith(tag));
+
+/**
+ * UserPromptSubmit: when the human typed it, they answered at the terminal, so
+ * the session's open requests are closed; and stdout is added to the model's
+ * context, so the unread line is the nudge that gets mail read even when
+ * channel push missed it. The two requests run side by side to stay inside
+ * the hook's budget.
+ */
+async function promptSubmitted(session_key: string | null, prompt: unknown): Promise<void> {
   const pid = hostPid(process.ppid);
   const unread = async () => {
     if (!pid) return;
     const { count } = (await (await post("/unread", { pid })).json()) as { count: number };
     if (count > 0) console.log(`You have ${count} unread peer message(s). Call check_messages now to read them.`);
   };
-  await Promise.all([session_key ? post("/close-requests", { session_key }) : null, unread()]);
+  const typed = session_key && !isMachinePrompt(prompt);
+  await Promise.all([typed ? post("/close-requests", { session_key }) : null, unread()]);
 }
 
 export async function runHook(): Promise<void> {
@@ -89,7 +107,7 @@ export async function runHook(): Promise<void> {
       return;
     }
     case "UserPromptSubmit":
-      return promptSubmitted(session_key);
+      return promptSubmitted(session_key, input.prompt);
     // Notification and Stop are filed by session key alone: no host walk.
     case "Notification":
       if (session_key) await notify(session_key, input);
