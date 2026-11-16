@@ -45,17 +45,17 @@ describe("install-hooks", () => {
     expect(s.hooks.UserPromptSubmit).toEqual([{ hooks: [{ type: "command", command: OURS, timeout: 1 }] }]);
   });
 
-  test("registers all four events, and a re-run leaves exactly one entry for each", async () => {
+  test("registers all five events, and a re-run leaves exactly one entry for each", async () => {
     const first = await install();
     const again = Bun.spawn(["bun", `${ROOT}/cli.ts`, "install-hooks", "--settings", first.path], {
       stdout: "pipe",
     });
     expect(await again.exited).toBe(0);
     expect(await new Response(again.stdout).text()).toContain(
-      "Installed SessionStart, UserPromptSubmit, Notification and Stop hooks",
+      "Installed SessionStart, UserPromptSubmit, Notification, Stop and SessionEnd hooks",
     );
     const s = await first.read();
-    for (const event of ["SessionStart", "UserPromptSubmit", "Notification", "Stop"]) {
+    for (const event of ["SessionStart", "UserPromptSubmit", "Notification", "Stop", "SessionEnd"]) {
       const ours = s.hooks[event].flatMap((g: any) => g.hooks).filter((h: any) => h.command === OURS);
       expect(ours).toEqual([{ type: "command", command: OURS, timeout: 1 }]);
     }
@@ -209,6 +209,23 @@ describe("broker commands", () => {
       expect(r.out).toContain("turn done");
       expect(r.out).toContain(`next: --since ${to}`);
       expect(r.out).not.toContain("cli-dg");
+    });
+
+    test("control characters in agent text are not printed to the terminal", async () => {
+      await broker.post("/report-event", {
+        session_key: "cli-esc",
+        level: "warning",
+        message: "before\u001b[2J\u001b]0;pwned\u0007after\u009b31m",
+      });
+      const r = await cli("digest", "--since", String(to));
+      expect(r.out).toContain("before");
+      expect(r.out).toContain("after");
+      const control = [...r.out].filter((c) => {
+        const n = c.charCodeAt(0);
+        return (n <= 0x1f && c !== "\n") || (n >= 0x7f && n <= 0x9f);
+      });
+      expect(control).toEqual([]);
+      to = (JSON.parse((await cli("digest", "--json")).out) as { cursor: { to: number } }).cursor.to;
     });
 
     test("--json prints the raw digest", async () => {

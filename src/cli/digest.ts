@@ -34,7 +34,19 @@ function age(iso: string): string {
   return `${Math.floor(s / 86400)}d`;
 }
 
-const oneLine = (text: string) => text.replace(/\s+/g, " ").trim();
+/** C0, DEL and C1 control characters: ESC, BEL and CSI could move the cursor, rewrite lines or set the title. */
+const isControl = (c: string) => {
+  const n = c.charCodeAt(0);
+  return n <= 0x1f || (n >= 0x7f && n <= 0x9f);
+};
+
+/** One line of agent-written text, safe for a terminal: whitespace runs become one space, control characters are dropped. */
+const oneLine = (text: string) =>
+  [...text.replace(/\s+/g, " ")]
+    .filter((c) => !isControl(c))
+    .join("")
+    .trim();
+
 const who = (peer_id: string | null) => peer_id ?? "-";
 
 function requests(title: string, rows: DigestRequest[]): string[] {

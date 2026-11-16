@@ -1,7 +1,8 @@
 /**
  * The Claude Code hook: identity on SessionStart, the unread nudge and
  * request closing on UserPromptSubmit, and decision-queue capture on
- * Notification and Stop. See hook.ts at the repo root.
+ * Notification and Stop, and closing requests on SessionEnd. See hook.ts at
+ * the repo root.
  */
 
 import { authHeaders, readSecret } from "./shared/auth.ts";
@@ -33,14 +34,14 @@ function post(path: string, body: unknown): Promise<Response> {
     method: "POST",
     headers: authHeaders(),
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(800),
+    // Leaves the 1 s hook timeout room for bun's start-up, the stdin read and the host walk.
+    signal: AbortSignal.timeout(600),
   });
 }
 
 type HookInput = {
   session_id?: unknown;
   notification_type?: unknown;
-  message?: unknown;
   source?: unknown;
   prompt?: unknown;
 };
@@ -49,16 +50,25 @@ type HookInput = {
  * Notification: a blocked agent raises one input request for its session (the
  * broker keeps one open hook request per session); a permission prompt is a
  * warning, because no one but the human may answer it; anything else is a
- * debug event that names only its type, never its text.
+ * debug event. Every row carries fixed text, never the notification's own
+ * message: Claude Code builds agent_needs_input's from the agent's question,
+ * which can carry case details.
  */
 function notify(session_key: string, input: HookInput): Promise<Response> {
   const type = typeof input.notification_type === "string" ? input.notification_type : "unknown";
-  const message = typeof input.message === "string" && input.message ? input.message : type;
   if (type === "agent_needs_input") {
-    return post("/request-input", { session_key, question: message, waiting_for: "input needed", source: "hook" });
+    const body = { session_key, question: "waiting for input", waiting_for: "input needed", source: "hook" };
+    return post("/request-input", body);
   }
   if (type === "permission_prompt") {
-    return post("/report-event", { session_key, level: "warning", logger: "notification", message, source: "hook" });
+    const body = {
+      session_key,
+      level: "warning",
+      logger: "notification",
+      message: "permission prompt",
+      source: "hook",
+    };
+    return post("/report-event", body);
   }
   const debug = `notification: ${type}`;
   return post("/report-event", { session_key, level: "debug", logger: "notification", message: debug, source: "hook" });
@@ -67,7 +77,9 @@ function notify(session_key: string, input: HookInput): Promise<Response> {
 /**
  * Prompts Claude Code submits on its own: a channel push (a peer message) and
  * a background task's report both fire UserPromptSubmit, with the prompt
- * starting with one of these tags. They are not the human answering.
+ * starting with one of these tags. They are not the human answering. Checked
+ * on Claude Code 2.1.325. A prompt this list misses closes requests early; the
+ * broker records every close as a notice event, so that shows in the digest.
  */
 const MACHINE_PROMPTS = ["<channel ", "<task-notification>"];
 
@@ -82,14 +94,16 @@ const isMachinePrompt = (prompt: unknown): boolean =>
  * the hook's budget.
  */
 async function promptSubmitted(session_key: string | null, prompt: unknown): Promise<void> {
+  // Started before the host walk, which /close-requests doesn't need.
+  const close = session_key && !isMachinePrompt(prompt) ? post("/close-requests", { session_key }) : null;
   const pid = hostPid(process.ppid);
   const unread = async () => {
     if (!pid) return;
     const { count } = (await (await post("/unread", { pid })).json()) as { count: number };
     if (count > 0) console.log(`You have ${count} unread peer message(s). Call check_messages now to read them.`);
   };
-  const typed = session_key && !isMachinePrompt(prompt);
-  await Promise.all([typed ? post("/close-requests", { session_key }) : null, unread()]);
+  // allSettled: a failed close must not cut the nudge short.
+  await Promise.allSettled([close, unread()]);
 }
 
 export async function runHook(): Promise<void> {
@@ -111,6 +125,10 @@ export async function runHook(): Promise<void> {
     // Notification and Stop are filed by session key alone: no host walk.
     case "Notification":
       if (session_key) await notify(session_key, input);
+      return;
+    // The session is over, so no one will answer its open requests there.
+    case "SessionEnd":
+      if (session_key) await post("/close-requests", { session_key });
       return;
     case "Stop":
       // Only that a turn ended: the assistant's last message can carry case details.

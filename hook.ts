@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
  * claude-peers Claude Code hook entrypoint. Registered for SessionStart,
- * UserPromptSubmit, Notification and Stop by `bun cli.ts install-hooks`;
+ * UserPromptSubmit, Notification, Stop and SessionEnd by `bun cli.ts install-hooks`;
  * reads the hook payload on stdin and dispatches on hook_event_name.
  *
  * SessionStart: the MCP server reads CLAUDE_CODE_SESSION_ID once at spawn, so
@@ -16,7 +16,8 @@
  *
  * Notification and Stop: decision-queue capture, filed by session id. A
  * blocked agent raises an input request; a permission prompt is a warning;
- * Stop records only that a turn ended.
+ * Stop records only that a turn ended. SessionEnd closes the session's open
+ * requests: no one will answer them there.
  *
  * Hooks must never slow or break a session: short-timeout requests, every
  * error swallowed, always exit 0, never launch the broker. Stdout is injected

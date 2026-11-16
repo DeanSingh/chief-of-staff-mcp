@@ -52,14 +52,14 @@ export function isOurDesktopWakeCommand(text: string): boolean {
 }
 
 /** The hook events hook.ts handles, in the order install-hooks reports them. */
-const HOOK_EVENTS = ["SessionStart", "UserPromptSubmit", "Notification", "Stop"];
+const HOOK_EVENTS = ["SessionStart", "UserPromptSubmit", "Notification", "Stop", "SessionEnd"];
 
 /** `install-hooks`: install the hooks and /desktop-wake for the checkout at `root`. */
 export async function installHooks(root: string): Promise<void> {
   // Registers hook.ts for SessionStart, so a resumed conversation reclaims its
   // peer id; for UserPromptSubmit, the unread-mail nudge and closing the
-  // session's open requests; and for Notification and Stop, the decision
-  // queue's capture (see hook.ts). The command is generated from this file's own
+  // session's open requests; for Notification and Stop, the decision queue's
+  // capture; and for SessionEnd, closing the session's requests (see hook.ts). The command is generated from this file's own
   // location, so re-run this after moving the repo. Our entry is recognised
   // by its trailing "# claude-peers" shell comment: re-running replaces it in
   // place instead of appending a duplicate, and anything else is untouched.
@@ -105,7 +105,9 @@ export async function installHooks(root: string): Promise<void> {
     } catch {}
     throw e;
   }
-  console.log(`Installed SessionStart, UserPromptSubmit, Notification and Stop hooks in ${path}:\n  ${command}`);
+  console.log(
+    `Installed SessionStart, UserPromptSubmit, Notification, Stop and SessionEnd hooks in ${path}:\n  ${command}`,
+  );
 
   // The /desktop-wake slash command, user-wide so it works from any project.
   // It runs this checkout's cli.ts by absolute path, like the hook above. A

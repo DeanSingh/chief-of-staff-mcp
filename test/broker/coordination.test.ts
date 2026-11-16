@@ -591,6 +591,51 @@ describe("input requests", () => {
     expect((await call("/close-requests", { session_key: 5 })).status).toBe(400);
   });
 
+  // A close the human didn't make (an unlisted auto-submitted prompt) must be
+  // visible, so each close that changes something leaves a notice event.
+  test("a close that cancels requests leaves a notice event; one that cancels none leaves nothing", async () => {
+    await ask({ session_key: "close-evt", question: "1" });
+    await ask({ session_key: "close-evt", question: "2" });
+    const events = () => {
+      const db = new Database(DB, { readonly: true });
+      try {
+        return db
+          .query("SELECT level, source, logger, message FROM events WHERE session_key = 'close-evt'")
+          .all() as Record<string, string>[];
+      } finally {
+        db.close();
+      }
+    };
+    await call("/close-requests", { session_key: "close-evt" });
+    expect(events()).toEqual([
+      { level: "notice", source: "hook", logger: "close-requests", message: "2 open requests closed at the terminal" },
+    ]);
+    await call("/close-requests", { session_key: "close-evt" });
+    expect(events()).toHaveLength(1);
+  });
+
+  test("close refuses a Desktop token as a session_key, and never stores it", async () => {
+    const d = await post<{ id: string }>("/register", {
+      pid: LIVE_PIDS[1],
+      cwd: "cs_close_tok",
+      git_root: null,
+      tty: null,
+      summary: "desk-close",
+      peer_type: "desktop",
+      session_token: "cs_close_tok",
+    });
+    const { request_id } = await ask({ peer_id: d.id, question: "q" });
+    expect((await call("/close-requests", { session_key: "cs_close_tok" })).status).toBe(400);
+    expect((await call("/close-requests", { session_key: "cs_other" })).status).toBe(400);
+    expect(row(request_id).state).toBe("pending");
+    const db = new Database(DB, { readonly: true });
+    try {
+      expect(db.query("SELECT 1 FROM events WHERE session_key LIKE 'cs_%'").all()).toHaveLength(0);
+    } finally {
+      db.close();
+    }
+  });
+
   test("close also cancels the mapped peer's requests made by peer_id", async () => {
     const id = await regKeyed("close-mapped", LIVE_PIDS[0]!);
     const { request_id } = await ask({ peer_id: id, question: "q" });
