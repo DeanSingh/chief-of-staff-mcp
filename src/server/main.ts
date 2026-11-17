@@ -18,6 +18,7 @@ import {
 import { pollAndPushMessages } from "./delivery.ts";
 import { registerHandlers } from "./handlers.ts";
 import { log, tightenLogFile } from "./log.ts";
+import { noteRole } from "./role.ts";
 import { mcp } from "./mcp.ts";
 import { cliRegisterBody, desktopRegisterBody, getGitRoot, getTty, heartbeatHost } from "./sessions.ts";
 import { desktopPeers, state } from "./state.ts";
@@ -126,8 +127,9 @@ export async function main() {
     }
     for (const [sessionId, entry] of desktopPeers) {
       beats.push(
-        brokerFetch<{ wake_url?: string }>("/heartbeat", { id: entry.peerId }, entry.peerId)
+        brokerFetch<{ wake_url?: string; cos?: boolean }>("/heartbeat", { id: entry.peerId }, entry.peerId)
           .then((r) => {
+            noteRole(entry.peerId, r.cos === true);
             // The wake mode was switched (globally or for this session): tell
             // the session on its next tool call.
             if (r.wake_url === entry.wakeUrl) return;

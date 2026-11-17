@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -93,6 +94,10 @@ class McpClient {
   async call(name: string, args: Record<string, unknown>): Promise<string> {
     const r = await this.request("tools/call", { name, arguments: args });
     return (r.result?.content ?? []).map((c: { text: string }) => c.text).join("\n");
+  }
+  async toolNames(): Promise<string[]> {
+    const r = await this.request("tools/list", {});
+    return r.result.tools.map((t: { name: string }) => t.name);
   }
   async checkMessagesDescription(): Promise<string> {
     const r = await this.request("tools/list", {});
@@ -378,6 +383,139 @@ describe("desktop wake mode", () => {
     } finally {
       desk.stop();
       await setMode({ mode: "active", clear_overrides: true });
+    }
+  }, 30_000);
+});
+
+describe("chief of staff tools", () => {
+  const COORDINATOR = ["get_digest", "answer_request", "escalate_request", "ack_digest"];
+  // As `bun cli.ts cos` and the hook do: the install secret, no peer credential.
+  const operator = async (path: string, body: Record<string, unknown>) => {
+    const secret = readSecret(secretPath(DB))!;
+    const res = await fetch(`${HTTP}${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${secret}` },
+      body: JSON.stringify(body),
+    });
+    return res.json() as Promise<any>;
+  };
+  const requestRow = (id: string) => {
+    const db = new Database(DB, { readonly: true });
+    try {
+      return db.query("SELECT state, answer, escalated_at FROM input_requests WHERE id = ?").get(id);
+    } finally {
+      db.close();
+    }
+  };
+  const cursorRow = (peer: string) => {
+    const db = new Database(DB, { readonly: true });
+    try {
+      return db.query("SELECT position FROM digest_cursors WHERE peer_id = ?").get(peer);
+    } finally {
+      db.close();
+    }
+  };
+
+  test("the named CLI session gets the tools, answers a hook's request, and acks the digest", async () => {
+    const askerKey = `e2e-asker-${PORT}`;
+    const asker = new McpClient({ ...ENV, CLAUDE_PEERS_PEER_TYPE: "cli", CLAUDE_CODE_SESSION_ID: askerKey });
+    const cos = new McpClient({
+      ...ENV,
+      CLAUDE_PEERS_PEER_TYPE: "cli",
+      CLAUDE_CODE_SESSION_ID: `e2e-cos-${PORT}`,
+      CLAUDE_PEERS_HEARTBEAT_MS: "1000",
+    });
+    try {
+      await asker.init();
+      await cos.init();
+      const cosId = (await cos.call("list_peers", { scope: "machine" })).match(/Your peer ID: (\w+)/)![1]!;
+
+      // Not named yet: the tools are neither offered nor dispatched.
+      for (const name of COORDINATOR) expect(await cos.toolNames()).not.toContain(name);
+      expect(JSON.stringify(await cos.request("tools/call", { name: "get_digest", arguments: {} }))).toContain(
+        "Unknown tool: get_digest",
+      );
+
+      expect((await operator("/set-cos", { peer_id: cosId })).ok).toBe(true);
+      await Bun.sleep(2500); // a heartbeat tells the server
+      expect(await cos.toolNames()).toEqual(expect.arrayContaining(COORDINATOR));
+      for (const name of COORDINATOR) expect(await asker.toolNames()).not.toContain(name);
+
+      // As the Notification hook files it: by session key.
+      const { request_id } = await operator("/request-input", {
+        session_key: askerKey,
+        question: "Deploy tonight?",
+        source: "hook",
+      });
+      const digest = await cos.call("get_digest", {});
+      const head = digest.match(/^cursor (\d+)→(\d+); call ack_digest with (\d+) once you have acted on it\./)!;
+      expect(head).not.toBeNull();
+      expect(head[3]).toBe(head[2]);
+      const to = Number(head[2]);
+      const body = JSON.parse(digest.slice(digest.indexOf("\n\n") + 2));
+      expect(body.pending.map((r: { id: string }) => r.id)).toContain(request_id);
+
+      const answered = await cos.call("answer_request", {
+        request_id,
+        answer: "Yes, go ahead",
+        answered_via: "cos",
+      });
+      expect(answered).toContain(`Answered request ${request_id}`);
+      expect(answered).toContain("queued — CLI peer");
+      const mail = await asker.call("check_messages", {});
+      expect(mail).toContain("Answer to your request");
+      expect(mail).toContain("Yes, go ahead");
+
+      expect(await cos.call("ack_digest", { position: to })).toContain(`Acknowledged the digest up to ${to}`);
+      expect(await cos.call("get_digest", {})).toStartWith(`cursor ${to}→`);
+    } finally {
+      asker.stop();
+      cos.stop();
+      await operator("/set-cos", { peer_id: null });
+    }
+  }, 30_000);
+
+  test("Desktop: another session on the COS's server is refused by the broker, and nothing is written", async () => {
+    const desk = new McpClient({ ...ENV, CLAUDE_PEERS_PEER_TYPE: "desktop", CLAUDE_PEERS_HEARTBEAT_MS: "1000" });
+    try {
+      await desk.init();
+      const a = await desk.call("claim_session", { label: "e2e chief" });
+      const tokenA = a.match(/cs_[0-9a-f]{12}/)![0];
+      const idA = a.match(/Your peer ID is (\w+)/)![1]!;
+      const b = await desk.call("claim_session", { label: "e2e chief" });
+      const tokenB = b.match(/cs_[0-9a-f]{12}/)![0];
+      const idB = b.match(/Your peer ID is (\w+)/)![1]!;
+      expect(idB).not.toBe(idA);
+
+      await operator("/set-cos", { peer_id: idA });
+      await Bun.sleep(2500);
+      // One server serves both sessions, so both see the tools...
+      expect(await desk.toolNames()).toEqual(expect.arrayContaining(COORDINATOR));
+
+      const { request_id } = await operator("/request-input", {
+        session_key: `e2e-desk-asker-${PORT}`,
+        question: "q?",
+      });
+      // ...but only A may use them: the broker refuses B on every one.
+      for (const [name, args] of [
+        ["get_digest", {}],
+        ["answer_request", { request_id, answer: "from B", answered_via: "cos" }],
+        ["escalate_request", { request_id, note: "from B" }],
+        ["ack_digest", { position: 1 }],
+      ] as const) {
+        const r = await desk.request("tools/call", { name, arguments: { ...args, peer_session: tokenB } });
+        expect(r.result.isError).toBe(true);
+        expect(r.result.content[0].text).toContain("only the chief of staff");
+      }
+      expect(requestRow(request_id)).toEqual({ state: "pending", answer: null, escalated_at: null });
+      expect(cursorRow(idB)).toBeNull();
+
+      expect(await desk.call("escalate_request", { request_id, note: "needs Dean", peer_session: tokenA })).toContain(
+        `Escalated request ${request_id}`,
+      );
+    } finally {
+      desk.stop();
+      await operator("/set-cos", { peer_id: null });
     }
   }, 30_000);
 });

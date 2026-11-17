@@ -7,6 +7,7 @@ import type { PeerId, RegisterResponse } from "../shared/types.ts";
 import { brokerFetch, isNotFound, remember } from "./client.ts";
 import { HOST_PID, PEER_NAME, SESSION_KEY } from "./config.ts";
 import { log } from "./log.ts";
+import { noteRole } from "./role.ts";
 import { desktopPeers, state } from "./state.ts";
 
 /**
@@ -43,7 +44,8 @@ export async function heartbeatHost(): Promise<void> {
   const id = state.myId;
   if (!id) return;
   try {
-    await brokerFetch("/heartbeat", { id }, id);
+    const beat = await brokerFetch<{ cos?: boolean }>("/heartbeat", { id }, id);
+    noteRole(id, beat.cos === true);
   } catch (e) {
     if (!isNotFound(e)) return;
     const reg = remember(

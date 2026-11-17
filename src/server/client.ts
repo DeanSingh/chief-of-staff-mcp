@@ -7,6 +7,7 @@ import { authHeaders } from "../shared/auth.ts";
 import type { PeerId, RegisterResponse } from "../shared/types.ts";
 import { BROKER_SCRIPT, BROKER_URL } from "./config.ts";
 import { log } from "./log.ts";
+import { noteRole } from "./role.ts";
 
 // --- Broker communication ---
 
@@ -18,6 +19,7 @@ const credentials = new Map<PeerId, string>();
 
 export function remember(reg: RegisterResponse): RegisterResponse {
   if (reg.peer_secret) credentials.set(reg.id, reg.peer_secret);
+  noteRole(reg.id, reg.cos === true);
   return reg;
 }
 
@@ -26,11 +28,22 @@ export class BrokerError extends Error {
   constructor(
     readonly path: string,
     readonly status: number,
-    body: string,
+    readonly body: string,
   ) {
     super(`Broker error (${path}): ${status} ${body}`);
     this.name = "BrokerError";
   }
+}
+
+/** What the broker said went wrong: its JSON `error` when it sent one, else the whole error. */
+export function brokerErrorText(e: unknown): string {
+  if (e instanceof BrokerError) {
+    try {
+      const { error } = JSON.parse(e.body) as { error?: unknown };
+      if (typeof error === "string") return error;
+    } catch {}
+  }
+  return e instanceof Error ? e.message : String(e);
 }
 
 /** The broker no longer has this peer: it was reaped and must register again. */

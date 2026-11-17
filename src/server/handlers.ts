@@ -6,7 +6,8 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import type { Peer, PeerId, PollMessagesResponse, RegisterResponse } from "../shared/types.ts";
 import { brokerFetch, isNotFound, remember } from "./client.ts";
 import { PEER_NAME, PEER_TYPE } from "./config.ts";
-import { ackMessages, appendPendingMessages, clearPreview, inboxes, unreadBanner } from "./delivery.ts";
+import { COORDINATOR_HANDLERS } from "./coordination.ts";
+import { ackMessages, appendPendingMessages, clearPreview, deliveryStatus, inboxes, unreadBanner } from "./delivery.ts";
 import { log, toolCallLogLine } from "./log.ts";
 import { mcp } from "./mcp.ts";
 import {
@@ -18,7 +19,8 @@ import {
   resolvableSession,
 } from "./sessions.ts";
 import { desktopPeers, state } from "./state.ts";
-import { SESSION_PARAM, TOOLS } from "./tools.ts";
+import { servesCos } from "./role.ts";
+import { COORDINATOR_TOOLS, SESSION_PARAM, buildTools } from "./tools.ts";
 import { WAKE_PASSIVE_NOTICE, peerListHeader, wakeCopy, wakeInstructions } from "./wake.ts";
 
 function missingSessionIdError(toolName: string): string {
@@ -118,10 +120,11 @@ export function registerHandlers(): void {
     const served = new Set([...(state.myId ? [state.myId] : []), ...[...desktopPeers.values()].map((e) => e.peerId)]);
     const previews = [...served].map((id) => inboxes.get(id)?.preview ?? "").filter(Boolean);
     const banner = unreadBanner(previews, PEER_TYPE, served.size);
-    if (!banner) return { tools: TOOLS };
+    const tools = buildTools(PEER_TYPE, servesCos());
+    if (!banner) return { tools };
 
     // Inject the banner into check_messages description
-    const dynamicTools = TOOLS.map((t) => {
+    const dynamicTools = tools.map((t) => {
       if (t.name === "check_messages") {
         return { ...t, description: `${banner}\n\n${t.description}` };
       }
@@ -154,7 +157,7 @@ export function registerHandlers(): void {
   });
 }
 
-type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean };
+export type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean };
 
 async function claimSession(
   args: ToolArgs,
@@ -306,20 +309,8 @@ async function sendMessage(
         isError: true,
       };
     }
-    // Say what actually happened, so silence from the target is never
-    // mistaken for delivery. "Sent" only ever means "queued on the broker".
-    const ageSec = result.target_last_seen
-      ? Math.max(0, Math.round((Date.now() - Date.parse(result.target_last_seen)) / 1000))
-      : null;
-    const ageText = ageSec === null ? "" : ageSec < 60 ? `${ageSec}s ago` : `${Math.round(ageSec / 60)}m ago`;
-    const status =
-      result.woke && result.woke > 0
-        ? `delivered — the peer has a live wake watch and was woken instantly`
-        : result.target_type === "cli"
-          ? `queued — CLI peer, pushed via channel if their session is running (last seen ${ageText})`
-          : `queued — desktop/cloud peer, they will see it on their next claude-peers tool call or check_messages (last seen ${ageText})`;
     return {
-      content: [{ type: "text" as const, text: `Message sent to peer ${to_id}: ${status}.` }],
+      content: [{ type: "text" as const, text: `Message sent to peer ${to_id}: ${deliveryStatus(result)}.` }],
     };
   } catch (e) {
     return {
@@ -484,8 +475,8 @@ async function checkMessages(
   }
 }
 
-type ToolArgs = Record<string, unknown> | undefined;
-type ToolHandler = (
+export type ToolArgs = Record<string, unknown> | undefined;
+export type ToolHandler = (
   args: ToolArgs,
   effectivePeerId: PeerId | null,
   sessionId: string | undefined,
@@ -499,6 +490,7 @@ const TOOL_HANDLERS = new Map<string, ToolHandler>([
   ["set_summary", setSummary],
   ["set_wake", setWake],
   ["check_messages", checkMessages],
+  ...COORDINATOR_HANDLERS,
 ]);
 
 async function handleTool(
@@ -507,7 +499,8 @@ async function handleTool(
   effectivePeerId: PeerId | null,
   sessionId: string | undefined,
 ): Promise<ToolResult> {
-  const handler = TOOL_HANDLERS.get(name);
+  // A coordinator tool this server doesn't offer is as unknown as any other.
+  const handler = COORDINATOR_TOOLS.has(name) && !servesCos() ? undefined : TOOL_HANDLERS.get(name);
   if (!handler) throw new Error(`Unknown tool: ${name}`);
   return handler(args, effectivePeerId, sessionId);
 }
