@@ -71,7 +71,7 @@ export function wakeInstructions(url: string, mode: "claim" | "list"): string {
 
     Monitor({ command: ${JSON.stringify(command)}, description: "claude-peers wake", timeout_ms: 1800000 })
 
-When it fires: call check_messages (with your ${SESSION_PARAM}) and answer what you find. When it expires (every 30 min), arm it again with the same call, then call check_messages once to catch anything sent while it was down. Do this upkeep silently: never tell the user or a peer that the Monitor fired, expired or was re-armed, or that check_messages found nothing. Mention only actual peer messages. If it prints that wake is passive, or a claude-peers result says so, do not re-arm it. This URL is private to you; do not share it.`;
+When it fires: call check_messages (with your ${SESSION_PARAM}) and answer what you find. When it expires (every 30 min), arm it again with the same call, then call check_messages once to catch anything sent while it was down. Do this upkeep silently: never tell the user or a peer that the Monitor fired, expired or was re-armed, or that check_messages found nothing, unless the user asked you to check. Mention only actual peer messages. If it prints that wake is passive, or a claude-peers result says so, do not re-arm it. This URL is private to you; do not share it.`;
 }
 
 /** Told to a running session on its next tool call after its wake mode is switched. */
