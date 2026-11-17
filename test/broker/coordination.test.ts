@@ -491,7 +491,10 @@ describe("input requests", () => {
     expect(await regKeyed("down-key", LIVE_PIDS[1]!)).toBe(id);
     const { messages } = await post<{ messages: { text: string }[] }>("/poll-messages", { id });
     // Fake peers share ids across tests, so other mail may be queued too.
-    expect(messages.map((m) => m.text)).toContain(`Answer to your request ${request_id} ("Proceed?"): yes`);
+    // Never readable as the human's own approval: the chief of staff is named as the sender.
+    expect(messages.map((m) => m.text)).toContain(
+      `Answer from the chief of staff, relaying the human, to your request ${request_id} ("Proceed?"): yes`,
+    );
   });
 
   test("a restarted peer receives the answer to a request it made before it died", async () => {
@@ -503,7 +506,9 @@ describe("input requests", () => {
     const r = await call("/answer-request", { request_id, answerer_id: answerer, answer: "wait", answered_via: "cos" });
     expect(r).toMatchObject({ status: 200, ok: true, woke: 0, target_type: "cli" });
     const { messages } = await post<{ messages: { text: string; from_id: string }[] }>("/poll-messages", { id });
-    expect(messages.map((m) => m.text)).toEqual([`Answer to your request ${request_id} ("Merge or wait?"): wait`]);
+    expect(messages.map((m) => m.text)).toEqual([
+      `Answer from the chief of staff to your request ${request_id} ("Merge or wait?"): wait`,
+    ]);
     expect(messages[0]!.from_id).toBe(answerer);
     expect(row(request_id)).toMatchObject({
       state: "answered",

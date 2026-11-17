@@ -455,16 +455,21 @@ describe("chief of staff tools", () => {
       const body = JSON.parse(digest.slice(digest.indexOf("\n\n") + 2));
       expect(body.pending.map((r: { id: string }) => r.id)).toContain(request_id);
 
-      const answered = await cos.call("answer_request", {
-        request_id,
-        answer: "Yes, go ahead",
-        answered_via: "cos",
-      });
+      // The tool has no answered_via: whatever the agent passes, it is recorded as the chief of staff's.
+      const answered = await cos.call("answer_request", { request_id, answer: "Yes, go ahead", answered_via: "human" });
       expect(answered).toContain(`Answered request ${request_id}`);
       expect(answered).toContain("queued — CLI peer");
       const mail = await asker.call("check_messages", {});
-      expect(mail).toContain("Answer to your request");
+      expect(mail).toContain(`Answer from the chief of staff to your request ${request_id}`);
       expect(mail).toContain("Yes, go ahead");
+      const db = new Database(DB, { readonly: true });
+      try {
+        expect(db.query("SELECT answered_via FROM input_requests WHERE id = ?").get(request_id)).toEqual({
+          answered_via: "cos",
+        });
+      } finally {
+        db.close();
+      }
 
       expect(await cos.call("ack_digest", { position: to })).toContain(`Acknowledged the digest up to ${to}`);
       expect(await cos.call("get_digest", {})).toStartWith(`cursor ${to}→`);
@@ -499,7 +504,7 @@ describe("chief of staff tools", () => {
       // ...but only A may use them: the broker refuses B on every one.
       for (const [name, args] of [
         ["get_digest", {}],
-        ["answer_request", { request_id, answer: "from B", answered_via: "cos" }],
+        ["answer_request", { request_id, answer: "from B" }],
         ["escalate_request", { request_id, note: "from B" }],
         ["ack_digest", { position: 1 }],
       ] as const) {

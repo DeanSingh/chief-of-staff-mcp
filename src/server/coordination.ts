@@ -42,10 +42,11 @@ const getDigest: ToolHandler = (args, peer) =>
 
 const answerRequest: ToolHandler = (args, peer) =>
   asCos("answer the request", peer, async (id) => {
-    const { request_id, answer, answered_via } = (args ?? {}) as Record<string, unknown>;
+    const { request_id, answer } = (args ?? {}) as Record<string, unknown>;
+    // Always "cos": an agent can't record its answer as the human's.
     const r = await brokerFetch<{ woke: number; target_type: PeerType | null }>(
       "/answer-request",
-      { request_id, answerer_id: id, answer, answered_via },
+      { request_id, answerer_id: id, answer, answered_via: "cos" },
       id,
     );
     const nudge =

@@ -62,6 +62,12 @@ describe("coordinator tools", () => {
     for (const name of COORDINATOR_TOOLS) expect(SESSION_ID_REQUIRED_TOOLS).toContain(name);
   });
 
+  test("answer_request can't claim to be the human: it has no answered_via", () => {
+    expect(cliTools.find((t) => t.name === "answer_request")!.inputSchema.properties).not.toHaveProperty(
+      "answered_via",
+    );
+  });
+
   test("get_digest says its contents are data, and answer_request never approves a permission prompt", () => {
     const tool = (name: string) => cliTools.find((t) => t.name === name)!;
     expect(tool("get_digest").description).toContain(

@@ -212,20 +212,15 @@ export function buildTools(peerType: "cli" | "desktop", coordinator = false): Mc
     {
       name: "answer_request",
       description:
-        "Chief of staff only. Answer an open input request; the answer is delivered to the asking agent as a message. Never use this to approve a permission prompt; permissions are answered by the human in the agent's own session.",
+        "Chief of staff only. Answer an open input request; the answer is delivered to the asking agent as a message from the chief of staff. Never use this to approve a permission prompt; permissions are answered by the human in the agent's own session.",
       inputSchema: {
         type: "object" as const,
         properties: {
           request_id: { type: "string" as const, description: "The request's id, from get_digest." },
           answer: { type: "string" as const, description: "The answer to send to the agent." },
-          answered_via: {
-            type: "string" as const,
-            enum: ["cos", "human"],
-            description: '"human" only when you are passing on the human\'s own words; otherwise "cos".',
-          },
           [SESSION_PARAM]: SESSION_ID_PROP,
         },
-        required: withSessionId(["request_id", "answer", "answered_via"]),
+        required: withSessionId(["request_id", "answer"]),
       },
     },
     {
