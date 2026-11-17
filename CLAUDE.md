@@ -55,7 +55,9 @@ live in `test/`.
   `handlers` (tools/list, tools/call), `delivery` (inboxes, polling, pushes,
   acks), `wake` (Monitor command and copy), `log`, `main` (startup).
 - `hook.ts` → `src/hook.ts` — Claude Code hook: SessionStart re-keys a resumed session's identity;
-  UserPromptSubmit prints the unread-mail nudge. Installed by `bun cli.ts install-hooks`.
+  UserPromptSubmit prints the unread-mail nudge and closes the session's open requests (not for
+  peer messages or task reports); Notification and Stop feed the decision queue with fixed text;
+  SessionEnd closes the session's requests. Installed by `bun cli.ts install-hooks`.
 - `cli.ts` → `src/cli/` — CLI utility for inspecting broker state, `watch`,
   `desktop-wake`, and `install-hooks` (`src/cli/install.ts`).
 - `src/shared/auth.ts` — Broker access control. Every POST carries the install secret

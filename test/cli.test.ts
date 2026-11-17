@@ -1,8 +1,10 @@
+import { Database } from "bun:sqlite";
 import { test, expect, describe, afterAll } from "bun:test";
 import { mkdtempSync, rmSync, statSync, lstatSync, symlinkSync, readdirSync, readlinkSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { ensureSecret, secretPath } from "../src/shared/auth.ts";
+import { useBroker } from "./broker/harness.ts";
 
 /** The repo root, where the entry files live. */
 const ROOT = dirname(import.meta.dir);
@@ -43,6 +45,22 @@ describe("install-hooks", () => {
     expect(s.hooks.UserPromptSubmit).toEqual([{ hooks: [{ type: "command", command: OURS, timeout: 1 }] }]);
   });
 
+  test("registers all five events, and a re-run leaves exactly one entry for each", async () => {
+    const first = await install();
+    const again = Bun.spawn(["bun", `${ROOT}/cli.ts`, "install-hooks", "--settings", first.path], {
+      stdout: "pipe",
+    });
+    expect(await again.exited).toBe(0);
+    expect(await new Response(again.stdout).text()).toContain(
+      "Installed SessionStart, UserPromptSubmit, Notification, Stop and SessionEnd hooks",
+    );
+    const s = await first.read();
+    for (const event of ["SessionStart", "UserPromptSubmit", "Notification", "Stop", "SessionEnd"]) {
+      const ours = s.hooks[event].flatMap((g: any) => g.hooks).filter((h: any) => h.command === OURS);
+      expect(ours).toEqual([{ type: "command", command: OURS, timeout: 1 }]);
+    }
+  });
+
   test("running twice leaves exactly one entry", async () => {
     const first = await install();
     const proc = Bun.spawn(["bun", `${ROOT}/cli.ts`, "install-hooks", "--settings", first.path], {
@@ -63,7 +81,10 @@ describe("install-hooks", () => {
       })
     ).read();
     expect(s.model).toBe("opus");
-    expect(s.hooks.Stop).toEqual([{ hooks: [{ type: "command", command: "say done" }] }]);
+    expect(s.hooks.Stop).toEqual([
+      { hooks: [{ type: "command", command: "say done" }] },
+      { hooks: [{ type: "command", command: OURS, timeout: 1 }] },
+    ]);
     expect(s.hooks.SessionStart[0]).toEqual({ matcher: "startup", hooks: [{ type: "command", command: "echo hi" }] });
     expect(commands(s)).toContain(OURS);
   });
@@ -154,7 +175,95 @@ describe("install-hooks", () => {
   });
 });
 
+const broker = useBroker();
+
 describe("broker commands", () => {
+  async function cli(...args: string[]) {
+    const proc = Bun.spawn(["bun", `${ROOT}/cli.ts`, ...args], {
+      env: { ...process.env, CLAUDE_PEERS_PORT: String(broker.PORT), CLAUDE_PEERS_DB: broker.DB },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [out, err] = [await new Response(proc.stdout).text(), await new Response(proc.stderr).text()];
+    return { code: await proc.exited, out, err };
+  }
+
+  describe("digest", () => {
+    let to = 0;
+    test("prints what is waiting, the events, and where to resume", async () => {
+      await broker.post("/request-input", { session_key: "cli-dg", question: "Ship the migration tonight?" });
+      await broker.post("/report-event", { session_key: "cli-dg", level: "warning", message: "tests are red" });
+      const last = await broker.post<{ event_id: number }>("/report-event", {
+        session_key: "cli-dg",
+        message: "turn done",
+      });
+      to = last.event_id;
+      const r = await cli("digest");
+      expect(r.code).toBe(0);
+      expect(r.out).toContain("Waiting on you (1)");
+      expect(r.out).toContain("Ship the migration tonight?");
+      expect(r.out).toContain("Escalated (0)");
+      expect(r.out).toContain("Events since 0");
+      expect(r.out).toContain("warning");
+      expect(r.out).toContain("tests are red");
+      expect(r.out).toContain("turn done");
+      expect(r.out).toContain(`next: --since ${to}`);
+      expect(r.out).not.toContain("cli-dg");
+    });
+
+    test("control characters in agent text are not printed to the terminal", async () => {
+      await broker.post("/report-event", {
+        session_key: "cli-esc",
+        level: "warning",
+        message: "before\u001b[2J\u001b]0;pwned\u0007after\u009b31m",
+      });
+      const r = await cli("digest", "--since", String(to));
+      expect(r.out).toContain("before");
+      expect(r.out).toContain("after");
+      const control = [...r.out].filter((c) => {
+        const n = c.charCodeAt(0);
+        return (n <= 0x1f && c !== "\n") || (n >= 0x7f && n <= 0x9f);
+      });
+      expect(control).toEqual([]);
+      to = (JSON.parse((await cli("digest", "--json")).out) as { cursor: { to: number } }).cursor.to;
+    });
+
+    test("--json prints the raw digest", async () => {
+      const r = await cli("digest", "--json");
+      expect(r.code).toBe(0);
+      const d = JSON.parse(r.out);
+      expect(d.cursor.to).toBe(to);
+      expect(d.pending).toHaveLength(1);
+    });
+
+    test("--since <to> shows no events, and a read never moves a cursor", async () => {
+      const r = await cli("digest", "--since", String(to));
+      expect(r.code).toBe(0);
+      expect(r.out).toContain(`Events since ${to}`);
+      expect(r.out).not.toContain("tests are red");
+      const db = new Database(broker.DB, { readonly: true });
+      try {
+        expect(db.query("SELECT COUNT(*) AS n FROM digest_cursors").get()).toEqual({ n: 0 });
+      } finally {
+        db.close();
+      }
+    });
+
+    test("--level and --limit filter, and a bad value is an error, not a crash", async () => {
+      const warn = await cli("digest", "--level", "warning");
+      expect(warn.out).toContain("tests are red");
+      expect(warn.out).not.toContain("turn done");
+      const one = await cli("digest", "--limit", "1");
+      expect(one.out).toContain("tests are red");
+      expect(one.out).not.toContain("turn done");
+      expect(one.out).toContain("next: --since");
+      const bad = await cli("digest", "--level", "loud");
+      expect(bad.code).toBe(1);
+      expect(bad.err).toContain("min_level must be one of");
+      expect(bad.err).not.toContain("    at ");
+    });
+  });
+
   test("send carries the install secret", async () => {
     const seen: Array<string | null> = [];
     const stub = Bun.serve({

@@ -1,5 +1,8 @@
 /**
- * The SessionStart and UserPromptSubmit hook. See hook.ts at the repo root.
+ * The Claude Code hook: identity on SessionStart, the unread nudge and
+ * request closing on UserPromptSubmit, and decision-queue capture on
+ * Notification and Stop, and closing requests on SessionEnd. See hook.ts at
+ * the repo root.
  */
 
 import { authHeaders, readSecret } from "./shared/auth.ts";
@@ -31,26 +34,113 @@ function post(path: string, body: unknown): Promise<Response> {
     method: "POST",
     headers: authHeaders(),
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(800),
+    // Leaves the 1 s hook timeout room for bun's start-up, the stdin read and the host walk.
+    signal: AbortSignal.timeout(600),
   });
 }
 
-export async function runHook(): Promise<void> {
-  const input = JSON.parse(await Bun.stdin.text());
-  const event = input?.hook_event_name;
-  if (event !== "SessionStart" && event !== "UserPromptSubmit") return;
-  const pid = hostPid(process.ppid);
-  // No secret yet means no broker has ever run: nothing to tell it.
-  if (!pid || !readSecret()) return;
+type HookInput = {
+  session_id?: unknown;
+  notification_type?: unknown;
+  source?: unknown;
+  prompt?: unknown;
+};
 
-  if (event === "SessionStart") {
-    if (typeof input.session_id !== "string") return;
-    await post("/session-start", { session_key: input.session_id, pid, source: input.source ?? "" });
-    return;
+/**
+ * Notification: a blocked agent raises one input request for its session (the
+ * broker keeps one open hook request per session); a permission prompt is a
+ * warning, because no one but the human may answer it; anything else is a
+ * debug event. Every row carries fixed text, never the notification's own
+ * message: Claude Code builds agent_needs_input's from the agent's question,
+ * which can carry case details.
+ */
+function notify(session_key: string, input: HookInput): Promise<Response> {
+  const type = typeof input.notification_type === "string" ? input.notification_type : "unknown";
+  if (type === "agent_needs_input") {
+    const body = { session_key, question: "waiting for input", waiting_for: "input needed", source: "hook" };
+    return post("/request-input", body);
   }
+  if (type === "permission_prompt") {
+    const body = {
+      session_key,
+      level: "warning",
+      logger: "notification",
+      message: "permission prompt",
+      source: "hook",
+    };
+    return post("/report-event", body);
+  }
+  const debug = `notification: ${type}`;
+  return post("/report-event", { session_key, level: "debug", logger: "notification", message: debug, source: "hook" });
+}
 
-  // UserPromptSubmit: stdout is added to the model's context, so this line is
-  // the nudge that gets mail read even when channel push missed it.
-  const { count } = (await (await post("/unread", { pid })).json()) as { count: number };
-  if (count > 0) console.log(`You have ${count} unread peer message(s). Call check_messages now to read them.`);
+/**
+ * Prompts Claude Code submits on its own: a channel push (a peer message) and
+ * a background task's report both fire UserPromptSubmit, with the prompt
+ * starting with one of these tags. They are not the human answering. Checked
+ * on Claude Code 2.1.325. A prompt this list misses closes requests early; the
+ * broker records every close as a notice event, so that shows in the digest.
+ */
+const MACHINE_PROMPTS = ["<channel ", "<task-notification>"];
+
+const isMachinePrompt = (prompt: unknown): boolean =>
+  typeof prompt === "string" && MACHINE_PROMPTS.some((tag) => prompt.startsWith(tag));
+
+/**
+ * UserPromptSubmit: when the human typed it, they answered at the terminal, so
+ * the session's open requests are closed; and stdout is added to the model's
+ * context, so the unread line is the nudge that gets mail read even when
+ * channel push missed it. The two requests run side by side to stay inside
+ * the hook's budget.
+ */
+async function promptSubmitted(session_key: string | null, prompt: unknown): Promise<void> {
+  // Started before the host walk, which /close-requests doesn't need.
+  const close = session_key && !isMachinePrompt(prompt) ? post("/close-requests", { session_key }) : null;
+  const pid = hostPid(process.ppid);
+  const unread = async () => {
+    if (!pid) return;
+    const { count } = (await (await post("/unread", { pid })).json()) as { count: number };
+    if (count > 0) console.log(`You have ${count} unread peer message(s). Call check_messages now to read them.`);
+  };
+  // allSettled: a failed close must not cut the nudge short.
+  await Promise.allSettled([close, unread()]);
+}
+
+export async function runHook(): Promise<void> {
+  const input = JSON.parse(await Bun.stdin.text()) as HookInput & { hook_event_name?: unknown };
+  const event = input?.hook_event_name;
+  // No secret yet means no broker has ever run: nothing to tell it.
+  if (!readSecret()) return;
+  const session_key = typeof input.session_id === "string" && input.session_id ? input.session_id : null;
+
+  switch (event) {
+    case "SessionStart": {
+      const pid = hostPid(process.ppid);
+      if (!pid || !session_key) return;
+      await post("/session-start", { session_key, pid, source: input.source ?? "" });
+      return;
+    }
+    case "UserPromptSubmit":
+      return promptSubmitted(session_key, input.prompt);
+    // Notification and Stop are filed by session key alone: no host walk.
+    case "Notification":
+      if (session_key) await notify(session_key, input);
+      return;
+    // The session is over, so no one will answer its open requests there.
+    case "SessionEnd":
+      if (session_key) await post("/close-requests", { session_key, reason: "session_end" });
+      return;
+    case "Stop":
+      // Only that a turn ended: the assistant's last message can carry case details.
+      if (session_key) {
+        await post("/report-event", {
+          session_key,
+          level: "info",
+          logger: "stop",
+          message: "turn ended",
+          source: "hook",
+        });
+      }
+      return;
+  }
 }

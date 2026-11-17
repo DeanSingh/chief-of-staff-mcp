@@ -66,18 +66,46 @@ export function handleRequestInput(b: RequestInputBody): { ok: true; request_id:
   return { ok: true, request_id: id };
 }
 
-/** Cancel a session's open requests, e.g. when the human answers at the terminal. */
-export function handleCloseRequests(b: { session_key: string }): { ok: true; closed: number } | Fail {
+/** Why a session's requests were closed, as answered_via and in the notice. */
+const CLOSE_REASONS = {
+  terminal: "closed at the terminal",
+  session_end: "closed when the session ended",
+} as const;
+type CloseReason = keyof typeof CLOSE_REASONS;
+
+/** Cancel a session's open requests: the human answered at the terminal, or the session ended. */
+export function handleCloseRequests(b: { session_key: string; reason?: string }): { ok: true; closed: number } | Fail {
   if (typeof b.session_key !== "string" || !b.session_key) return fail(400, "session_key is required");
-  const mapped = db.query("SELECT peer_id FROM peer_sessions WHERE session_key = ?").get(b.session_key) as {
-    peer_id: string;
-  } | null;
-  const r = db.run(
-    `UPDATE input_requests SET state = 'canceled', answered_via = 'terminal', answered_at = ?
-     WHERE ${OPEN} AND (session_key = ? OR peer_id = ?)`,
-    [new Date().toISOString(), b.session_key, mapped?.peer_id ?? null],
-  );
-  return { ok: true, closed: r.changes };
+  const reason = (b.reason ?? "terminal") as CloseReason;
+  if (!Object.hasOwn(CLOSE_REASONS, reason)) return fail(400, "reason must be terminal or session_end");
+  // The same rules as every other session_key route: a Desktop token is never
+  // accepted, so it can never be recorded in the close's event.
+  const subject = subjectOf({ session_key: b.session_key });
+  if ("status" in subject) return subject;
+  const now = new Date().toISOString();
+  const closed = db.transaction(() => {
+    const r = db.run(
+      `UPDATE input_requests SET state = 'canceled', answered_via = ?, answered_at = ?
+       WHERE ${OPEN} AND (session_key = ? OR peer_id = ?)`,
+      [reason, now, b.session_key, subject.peer_id],
+    );
+    // The hook closes on any prompt it doesn't recognize as Claude Code's own,
+    // so a wrong close is possible: record each one where the digest shows it.
+    if (r.changes > 0) {
+      db.run(
+        `INSERT INTO events (peer_id, session_key, level, source, logger, message, created_at)
+         VALUES (?, ?, 'notice', 'hook', 'close-requests', ?, ?)`,
+        [
+          subject.peer_id,
+          b.session_key,
+          `${r.changes} open request${r.changes === 1 ? "" : "s"} ${CLOSE_REASONS[reason]}`,
+          now,
+        ],
+      );
+    }
+    return r.changes;
+  })();
+  return { ok: true, closed };
 }
 
 export function handleEscalateRequest(b: { request_id: string; peer_id: string; note?: string }): { ok: true } | Fail {

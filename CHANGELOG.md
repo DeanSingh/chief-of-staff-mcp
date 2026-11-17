@@ -20,9 +20,16 @@ Notable changes. There are no tagged releases yet; `main` is the release.
 
 ### Added
 
+- Hook capture for the decision queue: `install-hooks` also registers
+  `Notification`, `Stop` and `SessionEnd`. A blocked agent raises one input
+  request per session, a permission prompt is a warning event, and typing in
+  the session or ending it closes its open requests (a peer message or task
+  report does not). No agent text from `Stop` is recorded (#22).
+- `bun cli.ts digest`: the decision queue from the terminal, with
+  `--since`, `--limit`, `--level` and `--json`. It never moves a cursor, and
+  strips control characters from agent text (#22).
 - Decision queue in the broker: `events`, input requests with answer
-  delivery, and a digest with an acknowledged cursor. No caller yet; hook
-  capture comes separately (#20).
+  delivery, and a digest with an acknowledged cursor (#20).
 - Desktop wake mode: active or passive, globally or per agent, with
   `bun cli.ts desktop-wake`, `/desktop-wake` and the `set_wake` tool. Passive
   is the default (#10).
