@@ -87,10 +87,12 @@ when one holds the role.
 
 Two residuals, both because agents run as the same user:
 
-- An agent that runs a shell command can read the install secret and call
-  the broker directly, including `/set-cos`. That is out of scope: a shell
-  command is a visible step that needs permission, while calling a tool is
-  not.
+- Agents run shell commands, often without anyone approving each one (auto
+  mode). So `bun cli.ts cos` names or clears only from a terminal (stdin and
+  stdout are TTYs) and only after the peer's id is typed back. That stops a
+  misled agent, for example one following a peer message. It doesn't stop a
+  hostile one: anything running as this user can fake a terminal, or read
+  the install secret and call `/set-cos` directly.
 - `/session-start` takes the session key from its caller. The session key is
   readable to the same uid (it's in `~/.claude/projects` filenames), so once
   the chief of staff's process is gone, another process that sends its key

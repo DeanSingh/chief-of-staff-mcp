@@ -2,6 +2,12 @@
  * `bun cli.ts cos`: name the chief of staff, the one peer the broker lets
  * answer, escalate and read the digest as a peer. Only this command, run by
  * the human, sets the role: no MCP tool, registration or peer message can.
+ *
+ * Naming or clearing needs a terminal and the peer's id typed back. Agents
+ * run commands without a terminal, often without anyone approving them, and
+ * a summary is text an agent writes, so a name match alone must never be
+ * enough. This stops a misled agent, not a determined one: anything that can
+ * run commands as this user can fake a terminal or call the broker directly.
  */
 
 import { brokerFetch } from "./client.ts";
@@ -16,6 +22,16 @@ async function allPeers(): Promise<PeerRow[]> {
 
 /** A peer's name as people know it: its summary, else the Desktop label in its cwd. */
 const nameOf = (p: PeerRow) => p.summary || p.cwd;
+
+const fromTerminal = () => process.stdin.isTTY === true && process.stdout.isTTY === true;
+
+/** Exits unless the person at the terminal types `id` back. */
+function confirm(id: string, what: string): void {
+  const typed = prompt(`Type ${id} to confirm ${what}:`);
+  if (typed?.trim() === id) return;
+  console.log("Not changed.");
+  process.exit(1);
+}
 
 /** The one peer `target` names, by id or a unique part of its name. Exits if there isn't one. */
 async function resolvePeer(target: string): Promise<PeerRow> {
@@ -52,16 +68,28 @@ export async function cos(): Promise<void> {
   const target = args.join(" ").trim();
   try {
     if (!target) return await show();
-    if (target === "--clear") {
-      await brokerFetch("/set-cos", { peer_id: null });
-      console.log("No chief of staff.");
-      return;
-    }
-    if (target.startsWith("-")) {
+    if (target.startsWith("-") && target !== "--clear") {
       console.error(USAGE);
       process.exit(1);
     }
+    if (!fromTerminal()) {
+      console.error(
+        "Naming the chief of staff needs a terminal: run `bun cli.ts cos` in your own terminal, not through an agent.",
+      );
+      process.exit(1);
+    }
+    if (target === "--clear") {
+      const { peer_id } = await brokerFetch<{ peer_id: string | null }>("/cos-status", {});
+      if (peer_id) {
+        confirm(peer_id, "removing it as chief of staff");
+        await brokerFetch("/set-cos", { peer_id: null });
+      }
+      console.log("No chief of staff.");
+      return;
+    }
     const peer = await resolvePeer(target);
+    console.log(`${peer.id}  ${peer.peer_type ?? "cli"}  ${peer.cwd}  ${peer.summary.slice(0, 70)}`);
+    confirm(peer.id, "making it the chief of staff");
     await brokerFetch("/set-cos", { peer_id: peer.id });
     console.log(`Chief of staff is now ${peer.id}  ${nameOf(peer).slice(0, 70)}`);
     console.log(

@@ -108,7 +108,7 @@ The broker can keep a record of what agents report and ask, for a chief of staff
 
 ### Running a chief of staff
 
-Pick the session that coordinates, and name it from your terminal:
+Pick the session that coordinates, and name it from your own terminal. It shows the peer and asks you to type its id back; without a terminal (an agent running the command) it refuses. Run it in a terminal window, not with Claude Code's `!`, which can't take the typed confirmation.
 
 ```bash
 bun cli.ts cos "Chief of Staff"   # a peer id, or a unique part of its summary or Desktop label
@@ -125,7 +125,7 @@ Within one heartbeat (15 s) that session's server offers it four tools:
 | `escalate_request` | Mark a request as needing you                                                           |
 | `ack_digest`       | Move its cursor, so the next digest starts there                                        |
 
-- **One at a time.** Naming a new chief of staff takes the role from the old one. Only this command sets it: no tool, registration or peer message can, and every change is a `notice` event in the digest.
+- **One at a time.** Naming a new chief of staff takes the role from the old one. Only this command sets it: no tool, registration or peer message can, and every change is a `notice` event in the digest. Naming by part of a summary still asks for the id, because summaries are written by agents.
 - **It stays with the session.** A CLI session keeps it across restarts, `/resume` and `/clear`. A Desktop session keeps it while it keeps its `peer_session` token; a new `claim_session` is a new peer, even with the same label, and must be named again.
 - **Desktop sessions share a server.** Every Desktop session runs through one claude-peers server, and the tool list is per server, so when the chief of staff is a Desktop session every Desktop session sees the four tools. Only the chief of staff can use them: the broker refuses the rest.
 - **Permissions stay with you.** `answer_request` answers questions; it can never approve a permission prompt, which only you can answer in that session.
