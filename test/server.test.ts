@@ -150,6 +150,14 @@ describe("wake instructions", () => {
     expect(wakeInstructions(URL_A, "claim")).toMatch(/arm it again with the same call, then call check_messages once/);
   });
 
+  test("wake upkeep is silent: no reports of fires, expiries, re-arms or empty checks", () => {
+    for (const mode of ["claim", "list"] as const) {
+      expect(wakeInstructions(URL_A, mode)).toContain(
+        "Do this upkeep silently: never tell the user or a peer that the Monitor fired, expired or was re-armed, or that check_messages found nothing. Mention only actual peer messages.",
+      );
+    }
+  });
+
   test("claim_session copy says arm now; list_peers copy only if not already running", async () => {
     expect(wakeInstructions(URL_A, "claim")).toContain("To be woken when a peer messages you, arm this Monitor now");
     const list = wakeInstructions(URL_A, "list");

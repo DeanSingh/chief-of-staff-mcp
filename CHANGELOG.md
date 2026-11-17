@@ -6,6 +6,9 @@ Notable changes. There are no tagged releases yet; `main` is the release.
 
 ### Changed
 
+- The wake copy tells Desktop agents to keep the Monitor running silently:
+  no reports that it fired, expired or was re-armed, or that a check found
+  nothing (#23).
 - The wake copy states the session's mode and how it is set (`/desktop-wake`,
   `set_wake`, or the broker's default), on claim, on `list_peers`, and when
   a switch either way reaches a running session (#19).
