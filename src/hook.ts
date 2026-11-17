@@ -131,11 +131,13 @@ export async function runHook(): Promise<void> {
       if (session_key) await post("/close-requests", { session_key, reason: "session_end" });
       return;
     case "Stop":
-      // Only that a turn ended: the assistant's last message can carry case details.
+      // Only that a turn ended: the assistant's last message can carry case
+      // details. At debug, because it fires after every turn of every agent and
+      // would crowd the default digest.
       if (session_key) {
         await post("/report-event", {
           session_key,
-          level: "info",
+          level: "debug",
           logger: "stop",
           message: "turn ended",
           source: "hook",
