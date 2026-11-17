@@ -264,6 +264,55 @@ describe("broker commands", () => {
     });
   });
 
+  describe("cos", () => {
+    const reg = async (summary: string, extra: Record<string, unknown>) =>
+      (
+        await broker.post<{ id: string }>("/register", {
+          pid: process.pid,
+          cwd: "/",
+          git_root: null,
+          tty: null,
+          summary,
+          ...extra,
+        })
+      ).id;
+    const holder = async () => (await broker.post<{ peer_id: string | null }>("/cos-status", {})).peer_id;
+
+    test("with no chief of staff, says so", async () => {
+      const r = await cli("cos");
+      expect(r.code).toBe(0);
+      expect(r.out).toContain("No chief of staff.");
+    });
+
+    test("names a peer by id, shows it, and clears it", async () => {
+      const id = await reg("Chief of Staff agent", { peer_type: "desktop", session_token: "cs_clicos0000001" });
+      const named = await cli("cos", id);
+      expect(named.code).toBe(0);
+      expect(named.out).toContain(`Chief of staff is now ${id}`);
+      expect(await holder()).toBe(id);
+      expect((await cli("cos")).out).toContain(`Chief of staff: ${id}  Chief of Staff agent`);
+      const cleared = await cli("cos", "--clear");
+      expect(cleared.code).toBe(0);
+      expect(cleared.out).toContain("No chief of staff.");
+      expect(await holder()).toBeNull();
+    });
+
+    test("names a peer by a unique part of its summary; an ambiguous or unknown name changes nothing", async () => {
+      const id = await reg("COS-unique-label", { peer_type: "desktop", session_token: "cs_clicos0000002" });
+      await reg("twin agent", { peer_type: "desktop", session_token: "cs_clicos0000003" });
+      await reg("twin agent", { peer_type: "desktop", session_token: "cs_clicos0000004" });
+      expect((await cli("cos", "cos-unique")).code).toBe(0);
+      expect(await holder()).toBe(id);
+      const twins = await cli("cos", "twin");
+      expect(twins.code).toBe(1);
+      expect(twins.err).toContain('"twin" matches 2 peers');
+      const none = await cli("cos", "nobody-by-this-name");
+      expect(none.code).toBe(1);
+      expect(none.err).toContain('No peer matches "nobody-by-this-name"');
+      expect(await holder()).toBe(id);
+    });
+  });
+
   test("send carries the install secret", async () => {
     const seen: Array<string | null> = [];
     const stub = Bun.serve({
