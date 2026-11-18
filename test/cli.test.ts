@@ -264,6 +264,113 @@ describe("broker commands", () => {
     });
   });
 
+  describe("cos", () => {
+    const reg = async (summary: string, token: string) =>
+      (
+        await broker.post<{ id: string }>("/register", {
+          pid: process.pid,
+          cwd: `/ (${summary})`,
+          git_root: null,
+          tty: null,
+          summary,
+          peer_type: "desktop",
+          session_token: token,
+        })
+      ).id;
+    const holder = async () => (await broker.post<{ peer_id: string | null }>("/cos-status", {})).peer_id;
+
+    /**
+     * Runs `bun cli.ts cos ...` on a pseudo-terminal, as a person at a terminal
+     * would, typing `answer` when it asks for confirmation.
+     */
+    async function inTerminal(args: string[], answer: string) {
+      // Python's pty works on macOS and Linux alike, and tolerates a non-tty stdin.
+      const PTY = "import os, pty, sys\nsys.exit(os.waitstatus_to_exitcode(pty.spawn(sys.argv[1:])))";
+      const argv = ["python3", "-c", PTY, "bun", `${ROOT}/cli.ts`, "cos", ...args];
+      const proc = Bun.spawn(argv, {
+        env: { ...process.env, CLAUDE_PEERS_PORT: String(broker.PORT), CLAUDE_PEERS_DB: broker.DB },
+        stdin: "pipe",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const reader = (proc.stdout as ReadableStream<Uint8Array>).getReader();
+      const dec = new TextDecoder();
+      let out = "";
+      let answered = false;
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        out += dec.decode(value);
+        if (!answered && out.includes("to confirm")) {
+          answered = true;
+          (proc.stdin as import("bun").FileSink).write(`${answer}\n`);
+          (proc.stdin as import("bun").FileSink).flush();
+        }
+      }
+      (proc.stdin as import("bun").FileSink).end();
+      return { code: await proc.exited, out: out.replaceAll("\r", "") };
+    }
+
+    test("with no chief of staff, says so; showing needs no terminal", async () => {
+      const r = await cli("cos");
+      expect(r.code).toBe(0);
+      expect(r.out).toContain("No chief of staff.");
+    });
+
+    test("without a terminal, naming or clearing is refused and nothing changes", async () => {
+      const id = await reg("COS by agent", "cs_clicos0000010");
+      const named = await cli("cos", id);
+      expect(named.code).toBe(1);
+      expect(named.err).toContain("needs a terminal");
+      expect(await holder()).toBeNull();
+      await inTerminal([id], id);
+      expect(await holder()).toBe(id);
+      const cleared = await cli("cos", "--clear");
+      expect(cleared.code).toBe(1);
+      expect(await holder()).toBe(id);
+      await inTerminal(["--clear"], id);
+      expect(await holder()).toBeNull();
+    });
+
+    test("names a peer once its id is typed back, shows it, and clears it", async () => {
+      const id = await reg("Chief of Staff agent", "cs_clicos0000001");
+      const named = await inTerminal([id], id);
+      expect(named.code).toBe(0);
+      expect(named.out).toContain(`${id}  desktop  / (Chief of Staff agent)`);
+      expect(named.out).toContain(`Chief of staff is now ${id}`);
+      expect(await holder()).toBe(id);
+      expect((await cli("cos")).out).toContain(`Chief of staff: ${id}  Chief of Staff agent`);
+      const cleared = await inTerminal(["--clear"], id);
+      expect(cleared.code).toBe(0);
+      expect(cleared.out).toContain("No chief of staff.");
+      expect(await holder()).toBeNull();
+    });
+
+    test("a name match shows the peer and changes nothing unless its id is typed back", async () => {
+      const id = await reg("COS-unique-label", "cs_clicos0000002");
+      const wrong = await inTerminal(["cos-unique"], "yes");
+      expect(wrong.code).toBe(1);
+      expect(wrong.out).toContain(`${id}  desktop`);
+      expect(wrong.out).toContain("Not changed.");
+      expect(await holder()).toBeNull();
+      expect((await inTerminal(["cos-unique"], id)).code).toBe(0);
+      expect(await holder()).toBe(id);
+    });
+
+    test("an ambiguous or unknown name changes nothing", async () => {
+      const before = await holder();
+      await reg("twin agent", "cs_clicos0000003");
+      await reg("twin agent", "cs_clicos0000004");
+      const twins = await inTerminal(["twin"], "");
+      expect(twins.code).toBe(1);
+      expect(twins.out).toContain('"twin" matches 2 peers');
+      const none = await inTerminal(["nobody-by-this-name"], "");
+      expect(none.code).toBe(1);
+      expect(none.out).toContain('No peer matches "nobody-by-this-name"');
+      expect(await holder()).toBe(before);
+    });
+  });
+
   test("send carries the install secret", async () => {
     const seen: Array<string | null> = [];
     const stub = Bun.serve({

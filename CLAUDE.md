@@ -38,7 +38,7 @@ live in `test/`.
   `wake` (wake mode, relay), `peers` (heartbeat, summary, list, unread),
   `messages` (send, poll, ack, `/watch` feed), `events` (`/report-event`),
   `requests` (input requests), `digest` (digest and acknowledged cursor),
-  `http` (request gate, routes).
+  `cos` (the chief-of-staff role and its check), `http` (request gate, routes).
   Peer identity is durable for CLI peers: `peer_sessions` maps
   `CLAUDE_CODE_SESSION_ID` to a peer id, so a restarted CLI session reclaims
   its id and mail sent to it *before* it died is still delivered. Desktop
@@ -53,13 +53,15 @@ live in `test/`.
   `config`, `client` (broker requests, launch), `sessions` (host peer and
   Desktop session identity), `state`, `mcp`, `tools` (definitions),
   `handlers` (tools/list, tools/call), `delivery` (inboxes, polling, pushes,
-  acks), `wake` (Monitor command and copy), `log`, `main` (startup).
+  acks), `wake` (Monitor command and copy), `role` (whether this server serves
+  the chief of staff), `coordination` (its four tools), `log`, `main` (startup).
 - `hook.ts` → `src/hook.ts` — Claude Code hook: SessionStart re-keys a resumed session's identity;
   UserPromptSubmit prints the unread-mail nudge and closes the session's open requests (not for
   peer messages or task reports); Notification and Stop feed the decision queue with fixed text;
   SessionEnd closes the session's requests. Installed by `bun cli.ts install-hooks`.
 - `cli.ts` → `src/cli/` — CLI utility for inspecting broker state, `watch`,
-  `desktop-wake`, and `install-hooks` (`src/cli/install.ts`).
+  `desktop-wake`, `digest`, `cos` (names the chief of staff), and
+  `install-hooks` (`src/cli/install.ts`).
 - `src/shared/auth.ts` — Broker access control. Every POST carries the install secret
   (`<db>.secret`, 0600, created by the broker); routes that act as a peer also carry
   that peer's credential from `/register`. The broker also refuses browser-shaped

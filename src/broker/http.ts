@@ -17,6 +17,7 @@ import type {
   SetSummaryRequest,
 } from "../shared/types.ts";
 import { PORT } from "./config.ts";
+import { cosRefusal, handleCosStatus, handleSetCos, isCos } from "./cos.ts";
 import { SECRET, selectAllPeers } from "./db.ts";
 import { handleAckDigest, handleGetDigest } from "./digest.ts";
 import { handleReportEvent, reply } from "./events.ts";
@@ -102,12 +103,20 @@ type Body = Record<string, any>;
 
 /** POST routes. A route not listed here is a 404. */
 const ROUTES = new Map<string, (body: Body) => Response>([
-  ["/register", (b) => Response.json(handleRegister(b as RegisterRequest))],
+  [
+    "/register",
+    (b) => {
+      const reg = handleRegister(b as RegisterRequest);
+      return Response.json(isCos(reg.id) ? { ...reg, cos: true } : reg);
+    },
+  ],
   [
     "/heartbeat",
     (b) => {
       const beat = handleHeartbeat(b as HeartbeatRequest);
-      return Response.json(beat, { status: beat.ok ? 200 : 404 });
+      // A server learns here, within one heartbeat, that its peer was named or stripped.
+      const told = beat.ok && isCos(b.id) ? { ...beat, cos: true } : beat;
+      return Response.json(told, { status: beat.ok ? 200 : 404 });
     },
   ],
   [
@@ -143,6 +152,9 @@ const ROUTES = new Map<string, (body: Body) => Response>([
   ["/close-requests", (b) => reply(handleCloseRequests(b as Parameters<typeof handleCloseRequests>[0]))],
   ["/get-digest", (b) => reply(handleGetDigest(b as Parameters<typeof handleGetDigest>[0]))],
   ["/ack-digest", (b) => reply(handleAckDigest(b as Parameters<typeof handleAckDigest>[0]))],
+  // Operator routes for `bun cli.ts cos`: the install secret alone. No MCP tool calls them.
+  ["/cos-status", () => Response.json(handleCosStatus())],
+  ["/set-cos", (b) => reply(handleSetCos(b))],
   ["/session-start", (b) => Response.json(handleSessionStart(b as SessionStartRequest))],
   ["/unread", (b) => Response.json(handleUnread(b as { pid: number }))],
   [
@@ -187,6 +199,9 @@ async function handlePost(req: Request, path: string): Promise<Response> {
         { status: 403 },
       );
     }
+    // After the credential check, so the caller named in the body is the caller.
+    const refused = cosRefusal(path, body);
+    if (refused) return reply(refused);
     const route = ROUTES.get(path);
     return route ? route(body) : Response.json({ error: "not found" }, { status: 404 });
   } catch (e) {

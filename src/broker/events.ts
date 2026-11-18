@@ -6,7 +6,7 @@
 import { EVENT_LEVELS, type EventLevel, type Subject } from "../shared/types.ts";
 import { db } from "./db.ts";
 
-export type Fail = { ok: false; error: string; status: 400 | 404 | 409 };
+export type Fail = { ok: false; error: string; status: 400 | 403 | 404 | 409 };
 
 /** A route result as an HTTP response: a Fail carries its status, success is 200. */
 export function reply(r: { ok: boolean }): Response {

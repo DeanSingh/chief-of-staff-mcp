@@ -57,6 +57,8 @@ export interface RegisterResponse {
   wake_url?: string; // Desktop only: <relay>/<topic> as the broker publishes it; the server builds the Monitor copy from this
   /** This peer's credential: send it as the PEER_HEADER on routes that act as this peer. */
   peer_secret?: string;
+  /** Set when this peer is the chief of staff. Registration only reports the role; it never grants it. */
+  cos?: true;
 }
 
 export interface HeartbeatRequest {

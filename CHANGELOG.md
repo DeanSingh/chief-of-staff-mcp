@@ -25,6 +25,11 @@ Notable changes. There are no tagged releases yet; `main` is the release.
 
 ### Added
 
+- The chief of staff: `bun cli.ts cos` names one peer, and only it can
+  answer or escalate requests and read or acknowledge the digest as a peer;
+  the broker checks the role on every call. Its server offers it
+  `get_digest`, `answer_request`, `escalate_request` and `ack_digest`; every
+  other session's tools are unchanged (#25).
 - Hook capture for the decision queue: `install-hooks` also registers
   `Notification`, `Stop` and `SessionEnd`. A blocked agent raises one input
   request per session, a permission prompt is a warning event, and typing in

@@ -148,7 +148,10 @@ export function handleAnswerRequest(b: AnswerBody): { ok: true; woke: number; ta
   if (!to_id) return fail(409, "no peer to deliver the answer to");
 
   const answer = clip(b.answer);
-  const text = `Answer to your request ${row.id} ("${clip(row.question, 120)}"): ${answer}`;
+  // Only the chief of staff can answer, and the asker must never read its
+  // answer as the human's own approval, so the sender is always named.
+  const from = b.answered_via === "human" ? "the chief of staff, relaying the human," : "the chief of staff";
+  const text = `Answer from ${from} to your request ${row.id} ("${clip(row.question, 120)}"): ${answer}`;
   // The conditional UPDATE is the arbiter between concurrent answers; the
   // message is inserted only for the one that wins.
   const won = db.transaction(() => {

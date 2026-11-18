@@ -9,6 +9,12 @@ import { LIVE_PIDS, headersFor, useBroker } from "./harness.ts";
 
 const { HTTP, DB, restartBroker, register, post, relay, connectWatch } = useBroker();
 
+/** Names `id` the chief of staff, the only peer the broker lets answer, escalate or read the digest as a peer. */
+const asCos = async (id: string) => {
+  await post("/set-cos", { peer_id: id });
+  return id;
+};
+
 const daysAgo = (n: number) => new Date(Date.now() - n * 24 * 60 * 60 * 1000).toISOString();
 
 describe("coordination retention", () => {
@@ -458,7 +464,7 @@ describe("input requests", () => {
     expect(row(h.request_id).question!.length).toBeLessThanOrEqual(1024);
     expect(row(h.request_id).question!.endsWith("…[truncated]")).toBe(true);
     const peer_id = await regKeyed("cap-key", LIVE_PIDS[0]!);
-    const answerer = await register("cap-answerer", "cli");
+    const answerer = await asCos(await register("cap-answerer", "cli"));
     const r = await ask({ peer_id, question: "q" });
     await call("/answer-request", {
       request_id: r.request_id,
@@ -474,7 +480,7 @@ describe("input requests", () => {
     const id = await regKeyed("down-key", LIVE_PIDS[0]!);
     const { request_id } = await ask({ peer_id: id, question: "Proceed?" });
     await post("/unregister", { id });
-    const answerer = await register("down-answerer", "cli");
+    const answerer = await asCos(await register("down-answerer", "cli"));
     const r = await call("/answer-request", {
       request_id,
       answerer_id: answerer,
@@ -485,7 +491,10 @@ describe("input requests", () => {
     expect(await regKeyed("down-key", LIVE_PIDS[1]!)).toBe(id);
     const { messages } = await post<{ messages: { text: string }[] }>("/poll-messages", { id });
     // Fake peers share ids across tests, so other mail may be queued too.
-    expect(messages.map((m) => m.text)).toContain(`Answer to your request ${request_id} ("Proceed?"): yes`);
+    // Never readable as the human's own approval: the chief of staff is named as the sender.
+    expect(messages.map((m) => m.text)).toContain(
+      `Answer from the chief of staff, relaying the human, to your request ${request_id} ("Proceed?"): yes`,
+    );
   });
 
   test("a restarted peer receives the answer to a request it made before it died", async () => {
@@ -493,11 +502,13 @@ describe("input requests", () => {
     const { request_id } = await ask({ peer_id: id, question: "Merge or wait?" });
     await post("/unregister", { id });
     expect(await regKeyed("restart-key", LIVE_PIDS[1]!)).toBe(id);
-    const answerer = await register("answerer", "cli");
+    const answerer = await asCos(await register("answerer", "cli"));
     const r = await call("/answer-request", { request_id, answerer_id: answerer, answer: "wait", answered_via: "cos" });
     expect(r).toMatchObject({ status: 200, ok: true, woke: 0, target_type: "cli" });
     const { messages } = await post<{ messages: { text: string; from_id: string }[] }>("/poll-messages", { id });
-    expect(messages.map((m) => m.text)).toEqual([`Answer to your request ${request_id} ("Merge or wait?"): wait`]);
+    expect(messages.map((m) => m.text)).toEqual([
+      `Answer from the chief of staff to your request ${request_id} ("Merge or wait?"): wait`,
+    ]);
     expect(messages[0]!.from_id).toBe(answerer);
     expect(row(request_id)).toMatchObject({
       state: "answered",
@@ -510,8 +521,9 @@ describe("input requests", () => {
 
   test("two concurrent answers: one wins, the other is a 409, the stored answer is the winner's", async () => {
     const id = await register("racer", "cli");
-    const a = await register("answer-a", "cli");
-    const b = await register("answer-b", "cli");
+    // Only the chief of staff may answer, so the race is between two of its calls.
+    const a = await asCos(await register("answer-a", "cli"));
+    const b = a;
     const { request_id } = await ask({ peer_id: id, question: "q" });
     const rs = await Promise.all([
       call("/answer-request", { request_id, answerer_id: a, answer: "from a", answered_via: "cos" }),
@@ -525,8 +537,8 @@ describe("input requests", () => {
   });
 
   test("escalate moves pending to escalated once; an escalated request can still be answered", async () => {
-    const id = await register("escalator", "cli");
-    const answerer = await register("esc-answerer", "cli");
+    const id = await asCos(await register("escalator", "cli"));
+    const answerer = id;
     const { request_id } = await ask({ peer_id: id, question: "q" });
     expect((await call("/escalate-request", { request_id, peer_id: id, note: "urgent" })).status).toBe(200);
     expect(row(request_id)).toMatchObject({ state: "escalated", escalation_note: "urgent", escalated_by: id });
@@ -562,7 +574,7 @@ describe("input requests", () => {
   });
 
   test("a hook request updates an escalated hook row without changing its state", async () => {
-    const peer_id = await register("hook-esc", "cli");
+    const peer_id = await asCos(await register("hook-esc", "cli"));
     const a = await ask({ peer_id, question: "first", source: "hook" });
     await call("/escalate-request", { request_id: a.request_id, peer_id });
     const b = await ask({ peer_id, question: "second", source: "hook" });
@@ -686,7 +698,7 @@ describe("input requests", () => {
 
   test("answering a peer that no longer exists is a 409, leaves the request pending and mails nothing", async () => {
     const keyless = await register("keyless-asker", "cli");
-    const answerer = await register("keyless-answerer", "cli");
+    const answerer = await asCos(await register("keyless-answerer", "cli"));
     // Ids are shared across tests by pid: make sure this one has no session mapping.
     const seed = new Database(DB);
     seed.run("DELETE FROM peer_sessions WHERE peer_id = ?", [keyless]);
@@ -720,7 +732,7 @@ describe("input requests", () => {
   });
 
   test("answering a hook-only request with no resolvable peer is a 409 and changes nothing", async () => {
-    const answerer = await register("lonely-answerer", "cli");
+    const answerer = await asCos(await register("lonely-answerer", "cli"));
     const { request_id } = await ask({ session_key: "unmapped-hook", question: "q", source: "hook" });
     const r = await call("/answer-request", { request_id, answerer_id: answerer, answer: "a", answered_via: "cos" });
     expect(r.status).toBe(409);
@@ -732,7 +744,7 @@ describe("input requests", () => {
 
   test("answer validation: bad answered_via 400, unknown id 404, closed 409, bad types 400", async () => {
     const id = await register("validator", "cli");
-    const answerer = await register("val-answerer", "cli");
+    const answerer = await asCos(await register("val-answerer", "cli"));
     const { request_id } = await ask({ peer_id: id, question: "q" });
     const ans = (extra: Record<string, unknown>) =>
       call("/answer-request", { request_id, answerer_id: answerer, answer: "a", answered_via: "cos", ...extra });
@@ -762,7 +774,7 @@ describe("input requests", () => {
 
   test("an answer wakes a connected watcher", async () => {
     const id = await register("watched", "cli");
-    const answerer = await register("watch-answerer", "cli");
+    const answerer = await asCos(await register("watch-answerer", "cli"));
     const w = await connectWatch(id);
     await w.next(); // "watching"
     const { request_id } = await ask({ peer_id: id, question: "q" });
@@ -782,7 +794,7 @@ describe("input requests", () => {
       peer_type: "desktop",
       session_token: "cs_answer_desktop",
     });
-    const answerer = await register("desk-answerer", "cli");
+    const answerer = await asCos(await register("desk-answerer", "cli"));
     const { request_id } = await ask({ peer_id: d.id, question: "q" });
     const before = relay.hits.length;
     const r = await call("/answer-request", { request_id, answerer_id: answerer, answer: "a", answered_via: "cos" });
@@ -869,7 +881,7 @@ describe("digest and cursor", () => {
     ).id;
 
   test("a read does not advance the cursor; an ack does", async () => {
-    const peer = await register("dg-reader", "cli");
+    const peer = await asCos(await register("dg-reader", "cli"));
     const { event_id } = await report({ peer_id: peer, message: "e1", level: "warning" });
     const a = await digest({ peer_id: peer });
     const b = await digest({ peer_id: peer });
@@ -883,7 +895,7 @@ describe("digest and cursor", () => {
   });
 
   test("pending and escalated requests land in separate arrays, with the escalation fields", async () => {
-    const peer = await register("dg-asker", "cli");
+    const peer = await asCos(await register("dg-asker", "cli"));
     const p = await post<{ request_id: string }>("/request-input", { peer_id: peer, question: "pending q" });
     const e = await post<{ request_id: string }>("/request-input", { peer_id: peer, question: "escalated q" });
     await post("/escalate-request", { peer_id: peer, request_id: e.request_id, note: "needs a human" });
@@ -908,7 +920,7 @@ describe("digest and cursor", () => {
   });
 
   test("min_level defaults to info: debug events are skipped but the cursor passes them", async () => {
-    const peer = await register("dg-level", "cli");
+    const peer = await asCos(await register("dg-level", "cli"));
     const start = highest();
     await report({ peer_id: peer, message: "d1", level: "debug" });
     await report({ peer_id: peer, message: "d2", level: "debug" });
@@ -925,7 +937,7 @@ describe("digest and cursor", () => {
   });
 
   test("the default limit is 200 and truncation ends the cursor at the last returned id; 5000 is capped to 1000", async () => {
-    const peer = await register("dg-limit", "cli");
+    const peer = await asCos(await register("dg-limit", "cli"));
     const start = highest();
     sql((db) => {
       const ins = db.prepare(
@@ -948,7 +960,7 @@ describe("digest and cursor", () => {
   });
 
   test("validation: bad min_level, limit, since_id or position is a 400", async () => {
-    const peer = await register("dg-valid", "cli");
+    const peer = await asCos(await register("dg-valid", "cli"));
     for (const bad of [
       { min_level: "loud" },
       { limit: 0 },
@@ -1067,6 +1079,7 @@ describe("digest and cursor", () => {
       session_key: "dg-cli-key-loose",
       question: "loose q",
     });
+    await asCos(id);
     await post("/escalate-request", { peer_id: id, request_id: loose.request_id });
     const out = await digest({ min_level: "debug", since_id: start });
     const text = JSON.stringify(out);
@@ -1078,7 +1091,7 @@ describe("digest and cursor", () => {
   });
 
   test("ack is monotonic and clamped to the highest event id", async () => {
-    const peer = await register("dg-ack", "cli");
+    const peer = await asCos(await register("dg-ack", "cli"));
     sql((db) => {
       const ins = db.prepare(
         "INSERT INTO events (level, source, message, created_at) VALUES ('info', 'tool', 'pad', ?)",
@@ -1093,7 +1106,7 @@ describe("digest and cursor", () => {
   });
 
   test("ack does not regress once events have been swept", async () => {
-    const peer = await register("dg-swept", "cli");
+    const peer = await asCos(await register("dg-swept", "cli"));
     await report({ peer_id: peer, message: "x" });
     const top = highest();
     expect((await call<{ position: number }>("/ack-digest", { peer_id: peer, position: top })).position).toBe(top);
@@ -1124,7 +1137,7 @@ describe("digest and cursor", () => {
   });
 
   test("naming a peer needs that peer's credential, on both routes", async () => {
-    const peer = await register("dg-gate", "cli");
+    const peer = await asCos(await register("dg-gate", "cli"));
     const bare = { "content-type": "application/json", authorization: headersFor(DB, "/x", {}).authorization! };
     for (const [path, body] of [
       ["/get-digest", { peer_id: peer }],

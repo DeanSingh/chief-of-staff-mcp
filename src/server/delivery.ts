@@ -230,3 +230,18 @@ export async function pollAndPushMessages() {
   pruneInboxes(inboxes, peerIds);
   await Promise.all(peerIds.map(pollForPeer));
 }
+
+/**
+ * What happened to a message or answer the broker queued, so silence from the
+ * target is never mistaken for delivery. "Sent" only ever means "queued on
+ * the broker".
+ */
+export function deliveryStatus(r: { woke?: number; target_type?: string | null; target_last_seen?: string }): string {
+  const ageSec = r.target_last_seen
+    ? Math.max(0, Math.round((Date.now() - Date.parse(r.target_last_seen)) / 1000))
+    : null;
+  const age = ageSec === null ? "" : ` (last seen ${ageSec < 60 ? `${ageSec}s` : `${Math.round(ageSec / 60)}m`} ago)`;
+  if (r.woke && r.woke > 0) return "delivered — the peer has a live wake watch and was woken instantly";
+  if (r.target_type === "cli") return `queued — CLI peer, pushed via channel if their session is running${age}`;
+  return `queued — desktop/cloud peer, they will see it on their next claude-peers tool call or check_messages${age}`;
+}

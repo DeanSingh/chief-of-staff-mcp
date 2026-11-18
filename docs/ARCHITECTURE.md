@@ -55,7 +55,8 @@ handlers and the poll loop all read and update it. Per-peer delivery state
 `hook.ts` runs as Claude Code's SessionStart and UserPromptSubmit hook. It
 re-keys a resumed session to its original peer id and prints an unread-mail
 nudge. `cli.ts` inspects the broker, sends as the operator, runs the
-`/watch` feed for a Monitor, switches wake mode and installs the hooks.
+`/watch` feed for a Monitor, switches wake mode, names the chief of staff
+and installs the hooks.
 
 ## Access control
 
@@ -69,6 +70,34 @@ secret; the model keeps out browsers and other users. Routes that take a
 `session_key` instead of a peer id, `/close-requests`, and `/get-digest`
 without a `peer_id` need only the install secret, so attribution by session
 key is not authenticated.
+
+### The chief of staff
+
+One peer id holds the chief-of-staff role, stored in the broker's settings
+(`src/broker/cos.ts`). Only `/set-cos`, which `bun cli.ts cos` calls, sets
+it: registration, `/session-start` and the MCP tools never do. The gate in
+`src/broker/http.ts` checks the role after the credential check, so
+`/answer-request`, `/escalate-request`, `/ack-digest` and `/get-digest` with a
+`peer_id` refuse any caller that isn't the chief of staff. Register and
+heartbeat responses carry `cos: true` for it, and its MCP server then offers
+the coordinator tools (`src/server/role.ts`, `src/server/coordination.ts`).
+Hiding the tools is a convenience; the broker check is the control. A Desktop
+server serves many sessions with one tool list, so all of them see the tools
+when one holds the role.
+
+Two residuals, both because agents run as the same user:
+
+- Agents run shell commands, often without anyone approving each one (auto
+  mode). So `bun cli.ts cos` names or clears only from a terminal (stdin and
+  stdout are TTYs) and only after the peer's id is typed back. That stops a
+  misled agent, for example one following a peer message. It doesn't stop a
+  hostile one: anything running as this user can fake a terminal, or read
+  the install secret and call `/set-cos` directly.
+- `/session-start` takes the session key from its caller. The session key is
+  readable to the same uid (it's in `~/.claude/projects` filenames), so once
+  the chief of staff's process is gone, another process that sends its key
+  re-keys onto its peer id and holds the role. While it is live, the broker
+  refuses that as a conflict.
 
 ## Waking a session
 
