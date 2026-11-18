@@ -4,9 +4,9 @@
  */
 
 import { test, expect, describe, afterAll } from "bun:test";
-import { ROOT, LIVE_PIDS, headersFor, postTo, useBroker } from "./harness.ts";
+import { LIVE_PIDS, freePort, headersFor, postTo, removeDb, startBroker, useBroker } from "./harness.ts";
 
-const { PORT, HTTP, DB, post, restartBroker, register } = useBroker();
+const { HTTP, DB, post, restartBroker, register } = useBroker();
 
 describe("peer identity", () => {
   test("desktop peers keyed by session_token keep their id across server processes", async () => {
@@ -395,14 +395,21 @@ describe("peer identity", () => {
   test("migration: INSERT OR IGNORE copies desktop_tokens to peer_sessions at startup", async () => {
     // This test ONLY exercises the startup migration (INSERT OR IGNORE ... FROM desktop_tokens),
     // not the handleRegister write path. It spawns a separate broker against a pre-seeded DB.
-    const MIGRATION_TEST_PORT = PORT + 100;
+    const MIGRATION_TEST_PORT = freePort();
     const MIGRATION_TEST_DB = `${import.meta.dir}/.test-broker-migration-${MIGRATION_TEST_PORT}.db`;
     const MIGRATION_TEST_HTTP = `http://127.0.0.1:${MIGRATION_TEST_PORT}`;
 
+    const migrationEnv = {
+      ...process.env,
+      CLAUDE_PEERS_PORT: String(MIGRATION_TEST_PORT),
+      CLAUDE_PEERS_DB: MIGRATION_TEST_DB,
+    };
     const migrationPost = <T>(path: string, body: unknown) =>
       postTo<T>(MIGRATION_TEST_HTTP, MIGRATION_TEST_DB, path, body);
 
-    // Step 1: Seed a temp DB with a desktop_tokens row (no peer_sessions table yet)
+    // Step 1: Seed a temp DB with a desktop_tokens row (no peer_sessions table yet).
+    // A run killed mid-test leaves its DB behind, so start from none.
+    await removeDb(MIGRATION_TEST_DB);
     const { Database } = await import("bun:sqlite");
     const seedDb = new Database(MIGRATION_TEST_DB);
     seedDb.run(`
@@ -425,25 +432,8 @@ describe("peer identity", () => {
     let migProc: ReturnType<typeof Bun.spawn> | null = null;
 
     try {
-      // Step 2: Spawn a broker against this seeded DB
-      migProc = Bun.spawn(["bun", `${ROOT}/broker.ts`], {
-        env: { ...process.env, CLAUDE_PEERS_PORT: String(MIGRATION_TEST_PORT), CLAUDE_PEERS_DB: MIGRATION_TEST_DB },
-        stdout: "ignore",
-        stderr: "ignore",
-      });
-
-      // Step 3: Wait for startup
-      let started = false;
-      for (let i = 0; i < 50; i++) {
-        try {
-          if ((await fetch(`${MIGRATION_TEST_HTTP}/health`)).ok) {
-            started = true;
-            break;
-          }
-        } catch {}
-        await Bun.sleep(100);
-      }
-      if (!started) throw new Error("Migration broker did not start");
+      // Steps 2-3: Spawn a broker against this seeded DB and wait for startup
+      migProc = await startBroker(migrationEnv);
 
       // Step 4: Verify migration copied the row, through the public surface.
       // The seed above only creates desktop_tokens. peer_sessions is
@@ -472,25 +462,8 @@ describe("peer identity", () => {
       await migProc.exited; // Deterministically wait for process to actually exit
       await Bun.sleep(200); // Give port time to be released by OS
 
-      // Step 5b: Spawn second broker on same port
-      migProc = Bun.spawn(["bun", `${ROOT}/broker.ts`], {
-        env: { ...process.env, CLAUDE_PEERS_PORT: String(MIGRATION_TEST_PORT), CLAUDE_PEERS_DB: MIGRATION_TEST_DB },
-        stdout: "ignore",
-        stderr: "ignore",
-      });
-
-      // Step 6: Wait for restart
-      let restarted = false;
-      for (let i = 0; i < 50; i++) {
-        try {
-          if ((await fetch(`${MIGRATION_TEST_HTTP}/health`)).ok) {
-            restarted = true;
-            break;
-          }
-        } catch {}
-        await Bun.sleep(100);
-      }
-      if (!restarted) throw new Error("Migration broker (restart) did not start");
+      // Steps 5b-6: Spawn a second broker on the same port and wait for it
+      migProc = await startBroker(migrationEnv);
 
       // Re-running the migration on restart must not disturb the mapping:
       // the same session_key still resolves to the same peer_id, no error.
@@ -521,12 +494,7 @@ describe("peer identity", () => {
         } catch {} // Wait for process to actually exit
       }
       // Delete temp files - only after process is truly gone
-      for (const suffix of ["", "-wal", "-shm", ".secret"]) {
-        const filePath = MIGRATION_TEST_DB + suffix;
-        try {
-          await Bun.file(filePath).delete();
-        } catch {} // Missing file is OK
-      }
+      await removeDb(MIGRATION_TEST_DB);
     }
   });
 });

@@ -3,7 +3,7 @@
  */
 
 import { test, expect, describe, afterAll } from "bun:test";
-import { ROOT, LIVE_PIDS, headersFor, postTo, useBroker } from "./harness.ts";
+import { ROOT, LIVE_PIDS, freePort, headersFor, postTo, removeDb, startBroker, useBroker } from "./harness.ts";
 
 const { PORT, HTTP, DB, BROKER_ENV, relay, post, restartBroker } = useBroker();
 
@@ -161,21 +161,11 @@ describe("wake relay", () => {
     ] as const
   ).entries()) {
     test(`relay ${label}: no topic, no publish`, async () => {
-      const OFF_PORT = PORT + 200 + i;
+      const OFF_PORT = freePort();
       const OFF_HTTP = `http://127.0.0.1:${OFF_PORT}`;
       const OFF_DB = `${import.meta.dir}/.test-broker-off-${OFF_PORT}.db`;
-      const off = Bun.spawn(["bun", `${ROOT}/broker.ts`], {
-        env: { ...env, CLAUDE_PEERS_PORT: String(OFF_PORT), CLAUDE_PEERS_DB: OFF_DB },
-        stdout: "ignore",
-        stderr: "ignore",
-      });
+      const off = await startBroker({ ...env, CLAUDE_PEERS_PORT: String(OFF_PORT), CLAUDE_PEERS_DB: OFF_DB });
       try {
-        for (let i = 0; i < 50; i++) {
-          try {
-            if ((await fetch(`${OFF_HTTP}/health`)).ok) break;
-          } catch {}
-          await Bun.sleep(100);
-        }
         const d = await regDesktop(`cs_wake_off${i}`, OFF_HTTP, OFF_DB);
         expect(d.id).toBeDefined();
         expect(d.wake_topic).toBeUndefined();
@@ -188,32 +178,21 @@ describe("wake relay", () => {
       } finally {
         off.kill();
         await off.exited;
-        for (const suffix of ["", "-wal", "-shm", ".secret"]) {
-          try {
-            await Bun.file(OFF_DB + suffix).delete();
-          } catch {}
-        }
+        await removeDb(OFF_DB);
       }
     });
   }
 
   test("an HTTP error from the relay is logged, without the topic", async () => {
-    const ERR_PORT = PORT + 300;
+    const ERR_PORT = freePort();
     const ERR_HTTP = `http://127.0.0.1:${ERR_PORT}`;
     const ERR_DB = `${import.meta.dir}/.test-broker-err-${ERR_PORT}.db`;
-    const b = Bun.spawn(["bun", `${ROOT}/broker.ts`], {
-      env: { ...BROKER_ENV, CLAUDE_PEERS_PORT: String(ERR_PORT), CLAUDE_PEERS_DB: ERR_DB },
-      stdout: "ignore",
-      stderr: "pipe",
-    });
+    const b = await startBroker(
+      { ...BROKER_ENV, CLAUDE_PEERS_PORT: String(ERR_PORT), CLAUDE_PEERS_DB: ERR_DB },
+      "pipe",
+    );
     relay.status = 429;
     try {
-      for (let i = 0; i < 50; i++) {
-        try {
-          if ((await fetch(`${ERR_HTTP}/health`)).ok) break;
-        } catch {}
-        await Bun.sleep(100);
-      }
       const d = await regDesktop("cs_wake_err", ERR_HTTP, ERR_DB);
       const s = await regCli(ERR_HTTP, ERR_DB);
       await postTo(ERR_HTTP, ERR_DB, "/send-message", { from_id: s.id, to_id: d.id, text: "x" });
@@ -227,11 +206,7 @@ describe("wake relay", () => {
       relay.status = 200;
       b.kill();
       await b.exited;
-      for (const suffix of ["", "-wal", "-shm", ".secret"]) {
-        try {
-          await Bun.file(ERR_DB + suffix).delete();
-        } catch {}
-      }
+      await removeDb(ERR_DB);
     }
   });
 
