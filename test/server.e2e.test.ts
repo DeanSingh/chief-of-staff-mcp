@@ -40,6 +40,10 @@ class McpClient {
   private buf = "";
   private nextId = 1;
   private waiting = new Map<number, (v: any) => void>();
+  /** Methods of the notifications the server sent, in order. */
+  notifications: string[] = [];
+  /** The server's capabilities from initialize. */
+  capabilities: any;
   constructor(env: Record<string, string | undefined>) {
     const proc = Bun.spawn(["bun", `${ROOT}/server.ts`], {
       env,
@@ -60,6 +64,8 @@ class McpClient {
             if (msg.id !== undefined && this.waiting.has(msg.id)) {
               this.waiting.get(msg.id)!(msg);
               this.waiting.delete(msg.id);
+            } else if (msg.id === undefined && typeof msg.method === "string") {
+              this.notifications.push(msg.method);
             }
           } catch {
             /* notification or noise */
@@ -84,11 +90,12 @@ class McpClient {
     });
   }
   async init() {
-    await this.request("initialize", {
+    const r = await this.request("initialize", {
       protocolVersion: "2025-06-18",
       capabilities: {},
       clientInfo: { name: "e2e", version: "0" },
     });
+    this.capabilities = r.result.capabilities;
     this.write({ jsonrpc: "2.0", method: "notifications/initialized" });
   }
   async call(name: string, args: Record<string, unknown>): Promise<string> {
@@ -430,6 +437,9 @@ describe("chief of staff tools", () => {
       await cos.init();
       const cosId = (await cos.call("list_peers", { scope: "machine" })).match(/Your peer ID: (\w+)/)![1]!;
 
+      // Claude Code re-lists a server's tools on list_changed only when it declares this.
+      expect(cos.capabilities.tools.listChanged).toBe(true);
+
       // Not named yet: the tools are neither offered nor dispatched.
       for (const name of COORDINATOR) expect(await cos.toolNames()).not.toContain(name);
       expect(JSON.stringify(await cos.request("tools/call", { name: "get_digest", arguments: {} }))).toContain(
@@ -438,8 +448,10 @@ describe("chief of staff tools", () => {
 
       expect((await operator("/set-cos", { peer_id: cosId })).ok).toBe(true);
       await Bun.sleep(2500); // a heartbeat tells the server
+      expect(cos.notifications).toContain("notifications/tools/list_changed");
       expect(await cos.toolNames()).toEqual(expect.arrayContaining(COORDINATOR));
       for (const name of COORDINATOR) expect(await asker.toolNames()).not.toContain(name);
+      expect(asker.notifications).not.toContain("notifications/tools/list_changed");
 
       // As the Notification hook files it: by session key.
       const { request_id } = await operator("/request-input", {

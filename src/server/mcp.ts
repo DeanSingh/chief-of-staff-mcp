@@ -48,7 +48,9 @@ export const mcp = new Server(
   {
     capabilities: {
       experimental: { "claude/channel": {} },
-      tools: {},
+      // Claude Code re-lists our tools on list_changed only when this is
+      // declared; the chief of staff's tools appear that way.
+      tools: { listChanged: true },
       logging: {},
     },
     instructions: SERVER_INSTRUCTIONS,

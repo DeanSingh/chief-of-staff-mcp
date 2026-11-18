@@ -1,9 +1,11 @@
-import { test, expect, describe } from "bun:test";
+import { test, expect, describe, spyOn } from "bun:test";
 import { dirname } from "node:path";
 import { BrokerError, isNotFound } from "../src/server/client.ts";
 import { pruneInboxes, unreadBanner } from "../src/server/delivery.ts";
 import { tightenLogFile, toolCallLogLine } from "../src/server/log.ts";
-import { SERVER_INSTRUCTIONS } from "../src/server/mcp.ts";
+import { SERVER_INSTRUCTIONS, mcp } from "../src/server/mcp.ts";
+import { noteRole, offerCos, servesCos } from "../src/server/role.ts";
+import { state } from "../src/server/state.ts";
 import { cliRegisterBody, desktopRegisterBody, isAmbiguousSession, resolvableSession } from "../src/server/sessions.ts";
 import { SESSION_ID_REQUIRED_TOOLS, SESSION_PARAM, buildTools } from "../src/server/tools.ts";
 import {
@@ -76,6 +78,44 @@ describe("coordinator tools", () => {
     expect(tool("answer_request").description).toContain(
       "Never use this to approve a permission prompt; permissions are answered by the human in the agent's own session.",
     );
+  });
+});
+
+describe("chief-of-staff role", () => {
+  test("a server that takes the named id after learning the role still tells the client", () => {
+    const sent = spyOn(mcp, "notification").mockResolvedValue(undefined);
+    try {
+      // `claude --continue`: the server starts as a fresh peer, and /register
+      // reports the role for the named id before the server switches to it.
+      state.myId = "fresh001";
+      noteRole("named001", true);
+      state.myId = "named001";
+      noteRole("named001", true); // the next heartbeat
+      expect(servesCos()).toBe(true);
+      expect(sent).toHaveBeenCalledWith({ method: "notifications/tools/list_changed" });
+    } finally {
+      noteRole("named001", false);
+      state.myId = null;
+      sent.mockRestore();
+    }
+  });
+
+  test("a notice the client never acted on is sent again until the client re-lists", () => {
+    const sent = spyOn(mcp, "notification").mockRejectedValue(new Error("not connected"));
+    try {
+      state.myId = "named002";
+      noteRole("named002", true); // lost: the send failed
+      noteRole("named002", true); // the next heartbeat tries again
+      expect(sent).toHaveBeenCalledTimes(2);
+      offerCos(); // the client re-listed
+      noteRole("named002", true);
+      expect(sent).toHaveBeenCalledTimes(2);
+    } finally {
+      noteRole("named002", false);
+      offerCos();
+      state.myId = null;
+      sent.mockRestore();
+    }
   });
 });
 

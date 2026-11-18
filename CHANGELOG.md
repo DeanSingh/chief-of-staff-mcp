@@ -48,6 +48,10 @@ Notable changes. There are no tagged releases yet; `main` is the release.
 
 ### Fixed
 
+- The chief of staff's tools now appear in its running session. The server
+  declares `tools.listChanged`, without which Claude Code ignored the
+  re-list notice, and a session restarted with `claude --continue`, which
+  takes its named id only after startup, is now told too (#26).
 - `bun cli.ts watch` exits with the broker's reason when its credentials
   are refused (#12).
 - A reaped peer re-registers on its next heartbeat (#9, #5).
