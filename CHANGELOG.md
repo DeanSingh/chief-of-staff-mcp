@@ -6,6 +6,8 @@ Notable changes. There are no tagged releases yet; `main` is the release.
 
 ### Changed
 
+- The `Stop` hook's "turn ended" event is `debug`, not `info`, so the
+  default digest leaves it out (#24).
 - The wake copy tells Desktop agents to keep the Monitor running silently:
   no reports that it fired, expired or was re-armed, or that a check found
   nothing (#23).

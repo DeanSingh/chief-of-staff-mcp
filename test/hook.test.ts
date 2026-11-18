@@ -275,7 +275,7 @@ describe("hook.ts", () => {
       }
     });
 
-    test("Stop reports a turn ended, without the assistant's last message", async () => {
+    test("Stop reports a turn ended at debug, without the assistant's last message", async () => {
       const n = hits.length;
       const r = await runHook(
         { hook_event_name: "Stop", session_id: "s-stop", stop_hook_active: false, last_assistant_message: "secret" },
@@ -286,7 +286,7 @@ describe("hook.ts", () => {
       expect(since(n).map((h) => h.path)).toEqual(["/report-event"]);
       expect(since(n)[0]!.body).toEqual({
         session_key: "s-stop",
-        level: "info",
+        level: "debug",
         logger: "stop",
         message: "turn ended",
         source: "hook",
