@@ -99,8 +99,10 @@ Two residuals, both because agents run as the same user:
 - `/claim-cos` is a prompt only the person can submit: the model can't, and
   a Skill call fires no UserPromptSubmit (checked on Claude Code 2.1.327).
   An agent can run `claude -p /claim-cos`, so the hook acts only when its
-  Claude Code process has a controlling terminal, the same bar as above. The
-  hook blocks the prompt, so the model never sees it, and the command files
+  Claude Code process has a controlling terminal, the same bar as above. A
+  hostile agent can still get past it by injecting keystrokes: driving a fake
+  terminal with `script` or `expect`, or typing into the person's real session
+  with `tmux send-keys` or `osascript`. The hook blocks the prompt, so the model never sees it, and the command files
   set `disable-model-invocation`, so they add nothing to any agent's context.
 - `/session-start` takes the session key from its caller. The session key is
   readable to the same uid (it's in `~/.claude/projects` filenames), so once
