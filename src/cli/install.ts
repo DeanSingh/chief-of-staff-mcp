@@ -50,8 +50,8 @@ If the command fails, show the error as-is.
 /**
  * The /claim-cos or /release-cos command file. The hook carries the command
  * out and blocks the prompt, so this body reaches the model only when the hook
- * didn't run. The model can't invoke it: a Skill call fires no hook, so it
- * would only ever report that nothing changed.
+ * didn't run, or ran out of time. The model can't invoke it: a Skill call
+ * fires no hook, so it would only ever report.
  */
 export function cosCommand(release: boolean): string {
   const name = release ? "/release-cos" : "/claim-cos";
@@ -64,7 +64,7 @@ disable-model-invocation: true
 ---
 ${COMMAND_MARK}
 
-The claude-peers hook carries out ${name} before it reaches you, so you are reading this only because the hook didn't run. Tell the user that nothing changed, and that \`bun cli.ts install-hooks\` installs the hook, or \`bun cli.ts cos\` in their own terminal names the chief of staff. Do nothing else.
+The claude-peers hook carries out ${name} before it reaches you, so you are reading this only because the hook didn't run or ran out of time. Tell the user that the role may not have changed, that \`bun cli.ts cos\` shows who holds it, and that \`bun cli.ts install-hooks\` installs the hook. Do nothing else.
 `;
 }
 

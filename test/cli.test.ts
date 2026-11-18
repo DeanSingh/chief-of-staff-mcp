@@ -144,7 +144,7 @@ describe("install-hooks", () => {
         description: "Make this session the claude-peers chief of staff",
         "disable-model-invocation": true,
       });
-      expect(claim).toContain("only because the hook didn't run");
+      expect(claim).toContain("the role may not have changed, that `bun cli.ts cos` shows who holds it");
       expect(out).toContain("Installed /claim-cos");
       expect(out).toContain("release-cos.md: it exists and isn't from claude-peers");
       expect(await Bun.file(join(dir, "commands", "release-cos.md")).text()).toBe("mine");

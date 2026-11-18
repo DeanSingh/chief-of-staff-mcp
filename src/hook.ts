@@ -131,7 +131,8 @@ async function cosCommand(session_key: string | null, release: boolean): Promise
     const res = await post("/claim-cos", release ? { session_key, release } : { session_key });
     return claimResult(release, (await res.json()) as Claimed);
   } catch {
-    return "Couldn't reach the claude-peers broker; nothing changed. Try again, or use `bun cli.ts cos` in a terminal.";
+    // A timeout can land after the broker acted, so this can't promise nothing changed.
+    return "No answer from the claude-peers broker, so the role may not have changed; `bun cli.ts cos` shows who holds it.";
   }
 }
 

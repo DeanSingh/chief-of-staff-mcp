@@ -426,7 +426,7 @@ describe("hook.ts", () => {
  * `claude -p` is. Python's pty and setsid work on macOS and Linux alike.
  */
 let inputs = 0;
-async function runHookIn(terminal: boolean, input: unknown) {
+async function runHookIn(terminal: boolean, input: unknown, port = stub.port) {
   const file = join(DIR, `input-${inputs++}.json`);
   await Bun.write(file, JSON.stringify(input));
   const py = terminal
@@ -437,7 +437,7 @@ async function runHookIn(terminal: boolean, input: unknown) {
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
-    env: { ...process.env, CLAUDE_PEERS_PORT: String(stub.port), CLAUDE_PEERS_HOST_COMM: "sh", CLAUDE_PEERS_DB: DB },
+    env: { ...process.env, CLAUDE_PEERS_PORT: String(port), CLAUDE_PEERS_HOST_COMM: "sh", CLAUDE_PEERS_DB: DB },
   });
   await proc.exited;
   const out = (await new Response(proc.stdout).text()).replaceAll("\r", "").trim();
@@ -483,6 +483,12 @@ describe("/claim-cos and /release-cos", () => {
   test("a session with no peer is told nothing changed", async () => {
     claimReply = { status: 404, body: { ok: false, error: "this session has no claude-peers peer" } };
     expect((await runHookIn(true, prompt("/claim-cos")))?.reason).toContain("no claude-peers peer");
+  });
+
+  // The request may have reached the broker before the hook gave up on it.
+  test("no answer from the broker: the role may not have changed", async () => {
+    const out = await runHookIn(true, prompt("/claim-cos"), 1);
+    expect(out?.reason).toContain("the role may not have changed; `bun cli.ts cos` shows who holds it");
   });
 
   test("a peer message or longer prompt that contains the command is an ordinary prompt", async () => {
