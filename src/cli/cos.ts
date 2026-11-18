@@ -1,7 +1,8 @@
 /**
  * `bun cli.ts cos`: name the chief of staff, the one peer the broker lets
- * answer, escalate and read the digest as a peer. Only this command, run by
- * the human, sets the role: no MCP tool, registration or peer message can.
+ * answer, escalate and read the digest as a peer. Only this command and
+ * /claim-cos, both run by the human, set the role: no MCP tool, registration
+ * or peer message can.
  *
  * Naming or clearing needs a terminal and the peer's id typed back. Agents
  * run commands without a terminal, often without anyone approving them, and

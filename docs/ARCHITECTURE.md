@@ -74,8 +74,11 @@ key is not authenticated.
 ### The chief of staff
 
 One peer id holds the chief-of-staff role, stored in the broker's settings
-(`src/broker/cos.ts`). Only `/set-cos`, which `bun cli.ts cos` calls, sets
-it: registration, `/session-start` and the MCP tools never do. The gate in
+(`src/broker/cos.ts`). Only `/set-cos`, which `bun cli.ts cos` calls, and
+`/claim-cos`, which the hook calls when you type `/claim-cos` or
+`/release-cos` in a CLI session, set it: registration, `/session-start` and
+the MCP tools never do. `/claim-cos` names the CLI peer the session key maps
+to, or, with `release`, clears the role if that peer holds it. The gate in
 `src/broker/http.ts` checks the role after the credential check, so
 `/answer-request`, `/escalate-request`, `/ack-digest` and `/get-digest` with a
 `peer_id` refuse any caller that isn't the chief of staff. Register and
@@ -93,6 +96,12 @@ Two residuals, both because agents run as the same user:
   misled agent, for example one following a peer message. It doesn't stop a
   hostile one: anything running as this user can fake a terminal, or read
   the install secret and call `/set-cos` directly.
+- `/claim-cos` is a prompt only the person can submit: the model can't, and
+  a Skill call fires no UserPromptSubmit (checked on Claude Code 2.1.327).
+  An agent can run `claude -p /claim-cos`, so the hook acts only when its
+  Claude Code process has a controlling terminal, the same bar as above. The
+  hook blocks the prompt, so the model never sees it, and the command files
+  set `disable-model-invocation`, so they add nothing to any agent's context.
 - `/session-start` takes the session key from its caller. The session key is
   readable to the same uid (it's in `~/.claude/projects` filenames), so once
   the chief of staff's process is gone, another process that sends its key
