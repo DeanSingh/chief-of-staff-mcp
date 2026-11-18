@@ -24,12 +24,26 @@ export function servesCos(): boolean {
   return false;
 }
 
-/** Records what the broker said about `id`, and has the client re-list tools when that changes what we offer. */
+/** Whether the client was last offered the coordinator tools. */
+let offered = false;
+
+/** What tools/list offers now; the client has seen it once this returns. */
+export function offerCos(): boolean {
+  offered = servesCos();
+  return offered;
+}
+
+/**
+ * Records what the broker said about `id`, and has the client re-list tools
+ * when what it was offered no longer matches. Compares against the offer, not
+ * the last call: /register can report the role for an id the server switches
+ * to only afterwards, so the change may surface on a later heartbeat.
+ */
 export function noteRole(id: PeerId, cos: boolean): void {
-  const before = servesCos();
   if (cos) cosPeers.add(id);
   else cosPeers.delete(id);
-  if (servesCos() === before) return;
-  log(`Chief-of-staff tools ${before ? "withdrawn" : "offered"} (peer ${id})`);
+  if (servesCos() === offered) return;
+  offered = !offered;
+  log(`Chief-of-staff tools ${offered ? "offered" : "withdrawn"} (peer ${id})`);
   mcp.notification({ method: "notifications/tools/list_changed" }).catch(() => {});
 }

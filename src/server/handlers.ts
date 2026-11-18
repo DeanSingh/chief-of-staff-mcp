@@ -19,7 +19,7 @@ import {
   resolvableSession,
 } from "./sessions.ts";
 import { desktopPeers, state } from "./state.ts";
-import { servesCos } from "./role.ts";
+import { offerCos, servesCos } from "./role.ts";
 import { COORDINATOR_TOOLS, SESSION_PARAM, buildTools } from "./tools.ts";
 import { WAKE_PASSIVE_NOTICE, peerListHeader, wakeCopy, wakeInstructions } from "./wake.ts";
 
@@ -120,7 +120,7 @@ export function registerHandlers(): void {
     const served = new Set([...(state.myId ? [state.myId] : []), ...[...desktopPeers.values()].map((e) => e.peerId)]);
     const previews = [...served].map((id) => inboxes.get(id)?.preview ?? "").filter(Boolean);
     const banner = unreadBanner(previews, PEER_TYPE, served.size);
-    const tools = buildTools(PEER_TYPE, servesCos());
+    const tools = buildTools(PEER_TYPE, offerCos());
     if (!banner) return { tools };
 
     // Inject the banner into check_messages description
