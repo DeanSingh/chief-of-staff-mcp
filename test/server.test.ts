@@ -4,7 +4,7 @@ import { BrokerError, isNotFound } from "../src/server/client.ts";
 import { pruneInboxes, unreadBanner } from "../src/server/delivery.ts";
 import { tightenLogFile, toolCallLogLine } from "../src/server/log.ts";
 import { SERVER_INSTRUCTIONS, mcp } from "../src/server/mcp.ts";
-import { noteRole, servesCos } from "../src/server/role.ts";
+import { noteRole, offerCos, servesCos } from "../src/server/role.ts";
 import { state } from "../src/server/state.ts";
 import { cliRegisterBody, desktopRegisterBody, isAmbiguousSession, resolvableSession } from "../src/server/sessions.ts";
 import { SESSION_ID_REQUIRED_TOOLS, SESSION_PARAM, buildTools } from "../src/server/tools.ts";
@@ -95,6 +95,24 @@ describe("chief-of-staff role", () => {
       expect(sent).toHaveBeenCalledWith({ method: "notifications/tools/list_changed" });
     } finally {
       noteRole("named001", false);
+      state.myId = null;
+      sent.mockRestore();
+    }
+  });
+
+  test("a notice the client never acted on is sent again until the client re-lists", () => {
+    const sent = spyOn(mcp, "notification").mockRejectedValue(new Error("not connected"));
+    try {
+      state.myId = "named002";
+      noteRole("named002", true); // lost: the send failed
+      noteRole("named002", true); // the next heartbeat tries again
+      expect(sent).toHaveBeenCalledTimes(2);
+      offerCos(); // the client re-listed
+      noteRole("named002", true);
+      expect(sent).toHaveBeenCalledTimes(2);
+    } finally {
+      noteRole("named002", false);
+      offerCos();
       state.myId = null;
       sent.mockRestore();
     }

@@ -37,13 +37,15 @@ export function offerCos(): boolean {
  * Records what the broker said about `id`, and has the client re-list tools
  * when what it was offered no longer matches. Compares against the offer, not
  * the last call: /register can report the role for an id the server switches
- * to only afterwards, so the change may surface on a later heartbeat.
+ * to only afterwards, so the change may surface on a later heartbeat. Only
+ * tools/list moves the offer, so a notice that was lost (a failed send, or
+ * one sent before the client initialized) goes again on every heartbeat until
+ * the client re-lists.
  */
 export function noteRole(id: PeerId, cos: boolean): void {
   if (cos) cosPeers.add(id);
   else cosPeers.delete(id);
   if (servesCos() === offered) return;
-  offered = !offered;
-  log(`Chief-of-staff tools ${offered ? "offered" : "withdrawn"} (peer ${id})`);
+  log(`Chief-of-staff tools ${offered ? "withdrawn" : "offered"} (peer ${id})`);
   mcp.notification({ method: "notifications/tools/list_changed" }).catch(() => {});
 }
