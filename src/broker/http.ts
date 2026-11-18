@@ -17,7 +17,7 @@ import type {
   SetSummaryRequest,
 } from "../shared/types.ts";
 import { PORT } from "./config.ts";
-import { cosRefusal, handleCosStatus, handleSetCos, isCos } from "./cos.ts";
+import { cosRefusal, handleClaimCos, handleCosStatus, handleSetCos, isCos } from "./cos.ts";
 import { SECRET, selectAllPeers } from "./db.ts";
 import { handleAckDigest, handleGetDigest } from "./digest.ts";
 import { handleReportEvent, reply } from "./events.ts";
@@ -155,6 +155,8 @@ const ROUTES = new Map<string, (body: Body) => Response>([
   // Operator routes for `bun cli.ts cos`: the install secret alone. No MCP tool calls them.
   ["/cos-status", () => Response.json(handleCosStatus())],
   ["/set-cos", (b) => reply(handleSetCos(b))],
+  // The hook, for /claim-cos and /release-cos typed in a session: the install secret alone.
+  ["/claim-cos", (b) => reply(handleClaimCos(b))],
   ["/session-start", (b) => Response.json(handleSessionStart(b as SessionStartRequest))],
   ["/unread", (b) => Response.json(handleUnread(b as { pid: number }))],
   [

@@ -233,3 +233,47 @@ describe("who holds the role", () => {
     expect(await cosNow()).toBe(id);
   });
 });
+
+describe("claiming from the session", () => {
+  const claim = (session_key: unknown, release?: boolean) =>
+    call<{ ok: boolean; peer_id: string | null; previous?: string | null; self?: string; error?: string }>(
+      "/claim-cos",
+      release ? { session_key, release } : { session_key },
+    );
+
+  test("names the CLI peer the session key maps to, and reports who held it", async () => {
+    const old = await regCli("claim-old");
+    await nameCos(old);
+    const id = await regCli("claim-me");
+    const r = await claim("claim-me");
+    expect(r).toMatchObject({ status: 200, ok: true, peer_id: id, previous: old, self: id });
+    expect(await cosNow()).toBe(id);
+  });
+
+  test("an unknown or malformed session key changes nothing", async () => {
+    const id = await regCli("claim-keep");
+    await nameCos(id);
+    expect((await claim("claim-nobody")).status).toBe(404);
+    expect((await claim("")).status).toBe(400);
+    expect((await claim(7)).status).toBe(400);
+    expect(await cosNow()).toBe(id);
+  });
+
+  test("a Desktop token is refused: Desktop sessions run no hooks", async () => {
+    const id = await regCli("claim-keep2");
+    await nameCos(id);
+    await regDesktop("cs_claimdesk0001", "Desk");
+    expect((await claim("cs_claimdesk0001")).status).toBe(404);
+    expect(await cosNow()).toBe(id);
+  });
+
+  test("release clears the role only for the session holding it", async () => {
+    const holder = await regCli("claim-holder");
+    const other = await regCli("claim-other");
+    await nameCos(holder);
+    expect(await claim("claim-other", true)).toMatchObject({ status: 200, ok: true, peer_id: holder, self: other });
+    expect(await cosNow()).toBe(holder);
+    expect(await claim("claim-holder", true)).toMatchObject({ status: 200, ok: true, peer_id: null, previous: holder });
+    expect(await cosNow()).toBeNull();
+  });
+});

@@ -57,7 +57,8 @@ live in `test/`.
   the chief of staff), `coordination` (its four tools), `log`, `main` (startup).
 - `hook.ts` → `src/hook.ts` — Claude Code hook: SessionStart re-keys a resumed session's identity;
   UserPromptSubmit prints the unread-mail nudge and closes the session's open requests (not for
-  peer messages or task reports); Notification and Stop feed the decision queue with fixed text;
+  peer messages or task reports), and carries out `/claim-cos` and `/release-cos` typed in a
+  session with a terminal; Notification and Stop feed the decision queue with fixed text;
   SessionEnd closes the session's requests. Installed by `bun cli.ts install-hooks`.
 - `cli.ts` → `src/cli/` — CLI utility for inspecting broker state, `watch`,
   `desktop-wake`, `digest`, `cos` (names the chief of staff), and

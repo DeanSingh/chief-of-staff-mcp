@@ -25,6 +25,11 @@ Notable changes. There are no tagged releases yet; `main` is the release.
 
 ### Added
 
+- `/claim-cos` and `/release-cos`: type one in a CLI session to make it the
+  chief of staff, or give the role up. The hook carries it out and blocks the
+  prompt, only when the session has a terminal, so an agent can't run it
+  through `claude -p`, and the model can't invoke either command.
+  `install-hooks` installs both (#27).
 - The chief of staff: `bun cli.ts cos` names one peer, and only it can
   answer or escalate requests and read or acknowledge the digest as a peer;
   the broker checks the role on every call. Its server offers it

@@ -86,6 +86,56 @@ const MACHINE_PROMPTS = ["<channel ", "<task-notification>"];
 const isMachinePrompt = (prompt: unknown): boolean =>
   typeof prompt === "string" && MACHINE_PROMPTS.some((tag) => prompt.startsWith(tag));
 
+/** The slash commands the hook carries out itself: true releases the role. */
+const COS_COMMANDS = new Map([
+  ["/claim-cos", false],
+  ["/release-cos", true],
+]);
+
+/** True when `pid` has a controlling terminal: a person's session, not an agent's `claude -p`. */
+function hasTerminal(pid: number): boolean {
+  const tty = new TextDecoder().decode(Bun.spawnSync(["ps", "-o", "tty=", "-p", String(pid)]).stdout).trim();
+  return tty !== "" && tty !== "?" && tty !== "??";
+}
+
+type Claimed = { ok: boolean; peer_id?: string | null; previous?: string | null; self?: string; error?: string };
+
+/** What the person is told after the broker answered. */
+function claimResult(release: boolean, r: Claimed): string {
+  if (!r.ok) return `${r.error ?? "the broker refused"}; nothing changed.`;
+  const me = `This session (${r.self})`;
+  if (release) {
+    return r.previous === r.self
+      ? `${me} is no longer the chief of staff.`
+      : `${me} isn't the chief of staff${r.peer_id ? ` (${r.peer_id} is)` : ""}; nothing changed.`;
+  }
+  if (r.previous === r.self) return `${me} is already the chief of staff.`;
+  const replaced = r.previous ? `, replacing ${r.previous}` : "";
+  return `${me} is now the chief of staff${replaced}. Its coordinator tools appear within one heartbeat (15 s).`;
+}
+
+/**
+ * /claim-cos or /release-cos, typed in this session. The prompt is the human's
+ * own: the model can't submit one, and a Skill call fires no UserPromptSubmit
+ * (checked on Claude Code 2.1.327). An agent can still run `claude -p
+ * /claim-cos`, so the session must have a terminal, the bar `bun cli.ts cos`
+ * sets. The prompt is blocked, so the model never sees it.
+ */
+async function cosCommand(session_key: string | null, release: boolean): Promise<string> {
+  const pid = hostPid(process.ppid);
+  if (!pid || !hasTerminal(pid)) {
+    return "Naming the chief of staff needs a person at a terminal, and this session has none; nothing changed. Use `bun cli.ts cos` in your own terminal.";
+  }
+  if (!session_key) return "Claude Code gave this session no id; nothing changed.";
+  try {
+    const res = await post("/claim-cos", release ? { session_key, release } : { session_key });
+    return claimResult(release, (await res.json()) as Claimed);
+  } catch {
+    // A timeout can land after the broker acted, so this can't promise nothing changed.
+    return "No answer from the claude-peers broker, so the role may not have changed; `bun cli.ts cos` shows who holds it.";
+  }
+}
+
 /**
  * UserPromptSubmit: when the human typed it, they answered at the terminal, so
  * the session's open requests are closed; and stdout is added to the model's
@@ -94,6 +144,12 @@ const isMachinePrompt = (prompt: unknown): boolean =>
  * the hook's budget.
  */
 async function promptSubmitted(session_key: string | null, prompt: unknown): Promise<void> {
+  const command = typeof prompt === "string" ? COS_COMMANDS.get(prompt.trim()) : undefined;
+  if (command !== undefined) {
+    const reason = `claude-peers: ${await cosCommand(session_key, command)}`;
+    console.log(JSON.stringify({ decision: "block", reason }));
+    return;
+  }
   // Started before the host walk, which /close-requests doesn't need.
   const close = session_key && !isMachinePrompt(prompt) ? post("/close-requests", { session_key }) : null;
   const pid = hostPid(process.ppid);

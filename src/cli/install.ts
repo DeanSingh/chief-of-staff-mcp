@@ -1,6 +1,7 @@
 /**
- * `bun cli.ts install-hooks`: the settings.json hooks and the /desktop-wake
- * command, both pointing at this checkout's root entry files.
+ * `bun cli.ts install-hooks`: the settings.json hooks, pointing at this
+ * checkout's root entry files, and the /desktop-wake, /claim-cos and
+ * /release-cos commands.
  */
 
 import { chmodSync, mkdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
@@ -15,8 +16,8 @@ export function hookCommand(dir: string): string {
   return `bun '${`${dir}/hook.ts`.replace(/'/g, `'\\''`)}' # claude-peers`;
 }
 
-/** The line that marks ~/.claude/commands/desktop-wake.md as install-hooks' own. */
-export const DESKTOP_WAKE_MARK =
+/** The line that marks a ~/.claude/commands file as install-hooks' own. */
+export const COMMAND_MARK =
   "<!-- # claude-peers: written by `bun cli.ts install-hooks`; re-run it after moving the repo. -->";
 
 /**
@@ -39,16 +40,65 @@ export function desktopWakeCommand(dir: string): string | null {
   return `---
 ${frontmatter.join("\n")}
 ---
-${DESKTOP_WAKE_MARK}
+${COMMAND_MARK}
 
 Run \`${run} $ARGUMENTS\` and show the user its output. Do not run anything else.
 If the command fails, show the error as-is.
 `;
 }
 
-/** True when `text` is a /desktop-wake file install-hooks wrote, so re-running may replace it. */
-export function isOurDesktopWakeCommand(text: string): boolean {
-  return text.split("\n").includes(DESKTOP_WAKE_MARK);
+/**
+ * The /claim-cos or /release-cos command file. The hook carries the command
+ * out and blocks the prompt, so this body reaches the model only when the hook
+ * didn't run, or ran out of time. The model can't invoke it: a Skill call
+ * fires no hook, so it would only ever report.
+ */
+export function cosCommand(release: boolean): string {
+  const name = release ? "/release-cos" : "/claim-cos";
+  const description = release
+    ? "Stop this session being the claude-peers chief of staff"
+    : "Make this session the claude-peers chief of staff";
+  return `---
+description: ${JSON.stringify(description)}
+disable-model-invocation: true
+---
+${COMMAND_MARK}
+
+The claude-peers hook carries out ${name} before it reaches you, so you are reading this only because the hook didn't run or ran out of time. Tell the user that the role may not have changed, that \`bun cli.ts cos\` shows who holds it, and that \`bun cli.ts install-hooks\` installs the hook. Do nothing else.
+`;
+}
+
+/** True when `text` is a command file install-hooks wrote, so re-running may replace it. */
+export function isOurCommand(text: string): boolean {
+  return text.split("\n").includes(COMMAND_MARK);
+}
+
+/**
+ * The slash commands, user-wide so they work from any project. /desktop-wake
+ * runs this checkout's cli.ts by absolute path, like the hook. A file of the
+ * same name that isn't ours is left alone.
+ */
+async function installCommands(dir: string, root: string): Promise<void> {
+  const commands: Array<[string, string | null]> = [
+    ["desktop-wake", desktopWakeCommand(root)],
+    ["claim-cos", cosCommand(false)],
+    ["release-cos", cosCommand(true)],
+  ];
+  for (const [name, text] of commands) {
+    const cmdPath = `${dir}/${name}.md`;
+    const cmdFile = Bun.file(cmdPath);
+    if (!text) {
+      console.log(
+        `Skipped ${cmdPath}: this checkout's path has a line break or backtick. Move the repo to use /${name}.`,
+      );
+    } else if ((await cmdFile.exists()) && !isOurCommand(await cmdFile.text())) {
+      console.log(`Skipped ${cmdPath}: it exists and isn't from claude-peers.`);
+    } else {
+      mkdirSync(dir, { recursive: true });
+      await Bun.write(cmdPath, text);
+      console.log(`Installed /${name} in ${cmdPath}`);
+    }
+  }
 }
 
 /** The hook events hook.ts handles, in the order install-hooks reports them. */
@@ -109,22 +159,6 @@ export async function installHooks(root: string): Promise<void> {
     `Installed SessionStart, UserPromptSubmit, Notification, Stop and SessionEnd hooks in ${path}:\n  ${command}`,
   );
 
-  // The /desktop-wake slash command, user-wide so it works from any project.
-  // It runs this checkout's cli.ts by absolute path, like the hook above. A
-  // file of the same name that isn't ours is left alone.
-  const cmdPath = `${dirname(path)}/commands/desktop-wake.md`;
-  const cmdFile = Bun.file(cmdPath);
-  const wakeCommand = desktopWakeCommand(root);
-  if (!wakeCommand) {
-    console.log(
-      `Skipped ${cmdPath}: this checkout's path has a line break or backtick. Move the repo to use /desktop-wake.`,
-    );
-  } else if ((await cmdFile.exists()) && !isOurDesktopWakeCommand(await cmdFile.text())) {
-    console.log(`Skipped ${cmdPath}: it exists and isn't from claude-peers.`);
-  } else {
-    mkdirSync(dirname(cmdPath), { recursive: true });
-    await Bun.write(cmdPath, wakeCommand);
-    console.log(`Installed /desktop-wake in ${cmdPath}`);
-  }
+  await installCommands(`${dirname(path)}/commands`, root);
   return;
 }

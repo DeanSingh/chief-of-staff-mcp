@@ -131,6 +131,28 @@ describe("install-hooks", () => {
     }
   });
 
+  test("installs /claim-cos and /release-cos, which the model can't invoke, and spares someone else's", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cp-cos-cmd-"));
+    try {
+      const path = join(dir, "settings.json");
+      await Bun.write(join(dir, "commands", "release-cos.md"), "mine");
+      const proc = Bun.spawn(["bun", `${ROOT}/cli.ts`, "install-hooks", "--settings", path], { stdout: "pipe" });
+      expect(await proc.exited).toBe(0);
+      const out = await new Response(proc.stdout).text();
+      const claim = await Bun.file(join(dir, "commands", "claim-cos.md")).text();
+      expect(Bun.YAML.parse(claim.split("---\n")[1]!)).toEqual({
+        description: "Make this session the claude-peers chief of staff",
+        "disable-model-invocation": true,
+      });
+      expect(claim).toContain("the role may not have changed, that `bun cli.ts cos` shows who holds it");
+      expect(out).toContain("Installed /claim-cos");
+      expect(out).toContain("release-cos.md: it exists and isn't from claude-peers");
+      expect(await Bun.file(join(dir, "commands", "release-cos.md")).text()).toBe("mine");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("install-hooks replaces settings.json by rename, not in place", async () => {
     const path = join(DIR, `atomic-${n++}.json`);
     await Bun.write(path, JSON.stringify({ model: "opus" }));

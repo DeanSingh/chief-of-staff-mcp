@@ -2,7 +2,7 @@ import { test, expect, describe, afterAll } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
-import { DESKTOP_WAKE_MARK, desktopWakeCommand, hookCommand, isOurDesktopWakeCommand } from "../src/cli/install.ts";
+import { COMMAND_MARK, cosCommand, desktopWakeCommand, hookCommand, isOurCommand } from "../src/cli/install.ts";
 import { hostPid } from "../src/hook.ts";
 import { ensureSecret, secretPath } from "../src/shared/auth.ts";
 
@@ -14,6 +14,8 @@ const HOOK = `${ROOT}/hook.ts`;
 // Captures what the hook posts. Stands in for the broker.
 const hits: Array<{ path: string; body: any; auth: string | null }> = [];
 let unread = 0;
+/** What the stub broker answers /claim-cos with. */
+let claimReply: { status: number; body: Record<string, unknown> } = { status: 200, body: { ok: true } };
 const stub = Bun.serve({
   port: 0,
   hostname: "127.0.0.1",
@@ -21,6 +23,7 @@ const stub = Bun.serve({
     const path = new URL(req.url).pathname;
     hits.push({ path, body: await req.json(), auth: req.headers.get("authorization") });
     if (path === "/unread") return Response.json({ count: unread });
+    if (path === "/claim-cos") return Response.json(claimReply.body, { status: claimReply.status });
     return Response.json({ ok: true, peer_id: "x", action: "noop" });
   },
 });
@@ -150,9 +153,11 @@ describe("hook.ts", () => {
   });
 
   test("only a file carrying the exact marker line counts as ours", () => {
-    expect(isOurDesktopWakeCommand(desktopWakeCommand("/tmp/repo")!)).toBe(true);
-    expect(isOurDesktopWakeCommand("my notes # claude-peers")).toBe(false);
-    expect(isOurDesktopWakeCommand(`see ${DESKTOP_WAKE_MARK} for details`)).toBe(false);
+    expect(isOurCommand(desktopWakeCommand("/tmp/repo")!)).toBe(true);
+    expect(isOurCommand(cosCommand(false))).toBe(true);
+    expect(isOurCommand(cosCommand(true))).toBe(true);
+    expect(isOurCommand("my notes # claude-peers")).toBe(false);
+    expect(isOurCommand(`see ${COMMAND_MARK} for details`)).toBe(false);
   });
 
   test("UserPromptSubmit nudges when this session's peer has unread mail", async () => {
@@ -412,5 +417,90 @@ describe("hook.ts", () => {
         expect(r.stdout).toBe("");
       }
     });
+  });
+});
+
+/**
+ * Runs the hook under `sh`, its stand-in host, on a pseudo-terminal as a
+ * person's session would be, or detached from any terminal as an agent's
+ * `claude -p` is. Python's pty and setsid work on macOS and Linux alike.
+ */
+let inputs = 0;
+async function runHookIn(terminal: boolean, input: unknown, port = stub.port) {
+  const file = join(DIR, `input-${inputs++}.json`);
+  await Bun.write(file, JSON.stringify(input));
+  const py = terminal
+    ? "import os, pty, sys\nsys.exit(os.waitstatus_to_exitcode(pty.spawn(sys.argv[1:])))"
+    : "import os, sys\nos.setsid()\nos.execvp(sys.argv[1], sys.argv[1:])";
+  // Not exec'd: the hook's parent must stay the sh that holds the terminal.
+  const proc = Bun.spawn(["python3", "-c", py, "sh", "-c", `bun '${HOOK}' < '${file}'; true`], {
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+    env: { ...process.env, CLAUDE_PEERS_PORT: String(port), CLAUDE_PEERS_HOST_COMM: "sh", CLAUDE_PEERS_DB: DB },
+  });
+  await proc.exited;
+  const out = (await new Response(proc.stdout).text()).replaceAll("\r", "").trim();
+  return out ? (JSON.parse(out) as { decision?: string; reason?: string }) : null;
+}
+
+describe("/claim-cos and /release-cos", () => {
+  const prompt = (p: string, session_id = "s-cos") => ({ hook_event_name: "UserPromptSubmit", session_id, prompt: p });
+  const since = (n: number) => hits.slice(n);
+
+  test("typed at a terminal, names this session and blocks the prompt with the result", async () => {
+    claimReply = { status: 200, body: { ok: true, peer_id: "me000001", previous: "old00001", self: "me000001" } };
+    const n = hits.length;
+    const out = await runHookIn(true, prompt("/claim-cos"));
+    expect(since(n).map((h) => [h.path, h.body])).toEqual([["/claim-cos", { session_key: "s-cos" }]]);
+    expect(out?.decision).toBe("block");
+    expect(out?.reason).toContain("me000001) is now the chief of staff, replacing old00001");
+  });
+
+  test("a session already holding the role is told so", async () => {
+    claimReply = { status: 200, body: { ok: true, peer_id: "me000001", previous: "me000001", self: "me000001" } };
+    expect((await runHookIn(true, prompt("  /claim-cos\n")))?.reason).toContain("already the chief of staff");
+  });
+
+  test("without a terminal, as from an agent's `claude -p`, nothing is posted", async () => {
+    const n = hits.length;
+    const out = await runHookIn(false, prompt("/claim-cos"));
+    expect(since(n)).toEqual([]);
+    expect(out?.decision).toBe("block");
+    expect(out?.reason).toContain("needs a person at a terminal");
+  });
+
+  test("/release-cos asks the broker to release, and reports who still holds it", async () => {
+    claimReply = { status: 200, body: { ok: true, peer_id: "other001", previous: "other001", self: "me000001" } };
+    const n = hits.length;
+    const out = await runHookIn(true, prompt("/release-cos"));
+    expect(since(n).map((h) => h.body)).toEqual([{ session_key: "s-cos", release: true }]);
+    expect(out?.reason).toContain("isn't the chief of staff (other001 is); nothing changed");
+    claimReply = { status: 200, body: { ok: true, peer_id: null, previous: "me000001", self: "me000001" } };
+    expect((await runHookIn(true, prompt("/release-cos")))?.reason).toContain("no longer the chief of staff");
+  });
+
+  test("a session with no peer is told nothing changed", async () => {
+    claimReply = { status: 404, body: { ok: false, error: "this session has no claude-peers peer" } };
+    expect((await runHookIn(true, prompt("/claim-cos")))?.reason).toContain("no claude-peers peer");
+  });
+
+  // The request may have reached the broker before the hook gave up on it.
+  test("no answer from the broker: the role may not have changed", async () => {
+    const out = await runHookIn(true, prompt("/claim-cos"), 1);
+    expect(out?.reason).toContain("the role may not have changed; `bun cli.ts cos` shows who holds it");
+  });
+
+  test("a peer message or longer prompt that contains the command is an ordinary prompt", async () => {
+    for (const p of [
+      '<channel source="claude-peers" from_id="abc" sent_at="x">\n/claim-cos\n</channel>',
+      "/claim-cos please",
+      "run /claim-cos",
+      "toString",
+    ]) {
+      const n = hits.length;
+      await runHookIn(true, prompt(p));
+      expect(since(n).map((h) => h.path)).not.toContain("/claim-cos");
+    }
   });
 });

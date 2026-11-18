@@ -108,7 +108,9 @@ The broker can keep a record of what agents report and ask, for a chief of staff
 
 ### Running a chief of staff
 
-Pick the session that coordinates, and name it from your own terminal. It shows the peer and asks you to type its id back; without a terminal (an agent running the command) it refuses. Run it in a terminal window, not with Claude Code's `!`, which can't take the typed confirmation.
+Pick the session that coordinates. In a CLI session, type `/claim-cos` in it: the claude-peers hook names that session and tells you the result, and the model never sees the prompt. `/release-cos` gives the role up. Both need `bun cli.ts install-hooks`, and both work only when you type them in a session that runs in a terminal, so an agent can't run `claude -p /claim-cos` and take the role.
+
+Or name any session, Desktop included, from your own terminal. It shows the peer and asks you to type its id back; without a terminal (an agent running the command) it refuses. Run it in a terminal window, not with Claude Code's `!`, which can't take the typed confirmation.
 
 ```bash
 bun cli.ts cos "Chief of Staff"   # a peer id, or a unique part of its summary or Desktop label
@@ -125,7 +127,7 @@ Within one heartbeat (15 s) that session's server offers it four tools:
 | `escalate_request` | Mark a request as needing you                                                           |
 | `ack_digest`       | Move its cursor, so the next digest starts there                                        |
 
-- **One at a time.** Naming a new chief of staff takes the role from the old one. Only this command sets it: no tool, registration or peer message can, and every change is a `notice` event in the digest. Naming by part of a summary still asks for the id, because summaries are written by agents.
+- **One at a time.** Naming a new chief of staff takes the role from the old one. Only you set it, with `/claim-cos` or this command: no tool, registration or peer message can, and every change is a `notice` event in the digest. Naming by part of a summary still asks for the id, because summaries are written by agents.
 - **It stays with the session.** A CLI session keeps it across restarts, `/resume` and `/clear`. A Desktop session keeps it while it keeps its `peer_session` token; a new `claim_session` is a new peer, even with the same label, and must be named again.
 - **Desktop sessions share a server.** Every Desktop session runs through one claude-peers server, and the tool list is per server, so when the chief of staff is a Desktop session every Desktop session sees the four tools. Only the chief of staff can use them: the broker refuses the rest.
 - **Permissions stay with you.** `answer_request` answers questions; it can never approve a permission prompt, which only you can answer in that session.
@@ -207,7 +209,7 @@ conversation its original id back (mail included) within one heartbeat. Install
 it once, and again after moving the repo:
 
 ```bash
-bun cli.ts install-hooks   # adds the hooks to ~/.claude/settings.json and /desktop-wake to ~/.claude/commands; safe to re-run
+bun cli.ts install-hooks   # adds the hooks to ~/.claude/settings.json and /desktop-wake, /claim-cos and /release-cos to ~/.claude/commands; safe to re-run
 ```
 
 ### Desktop / Cowork identity

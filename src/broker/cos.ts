@@ -1,9 +1,10 @@
 /**
  * The chief-of-staff role. Exactly one peer may hold it, named by the human
- * from the terminal (`bun cli.ts cos <peer>`). No registration, re-key or MCP
- * tool can grant or move it. The broker checks it against the authenticated
- * caller on every coordinator call: that check is the control, and hiding the
- * tools from other sessions is only a convenience.
+ * from the terminal (`bun cli.ts cos <peer>`) or by typing `/claim-cos` in a
+ * CLI session. No registration, re-key or MCP tool can grant or move it. The
+ * broker checks it against the authenticated caller on every coordinator call:
+ * that check is the control, and hiding the tools from other sessions is only
+ * a convenience.
  *
  * The role belongs to a peer id. A CLI peer keeps its id across restarts,
  * `/resume` and `/clear` (all map back to it through peer_sessions); a Desktop
@@ -64,4 +65,27 @@ export function handleSetCos(b: { peer_id?: unknown }): { ok: true; peer_id: str
 
 export function handleCosStatus(): { ok: true; peer_id: string | null } {
   return { ok: true, peer_id: cosPeer() };
+}
+
+type Claimed = { ok: true; peer_id: string | null; previous: string | null; self: string };
+
+/**
+ * `/claim-cos` and `/release-cos` typed in a CLI session: the hook passes the
+ * session's key, having checked the human typed the command at a terminal.
+ * A claim names the CLI peer the key maps to; a release clears the role only
+ * if that peer holds it. Desktop sessions run no hooks, so their tokens never
+ * resolve here. Like /set-cos, it needs the install secret alone.
+ */
+export function handleClaimCos(b: { session_key?: unknown; release?: unknown }): Claimed | Fail {
+  const key = b?.session_key;
+  if (typeof key !== "string" || !key) return fail(400, "session_key is required");
+  const row = db.query("SELECT peer_id FROM peer_sessions WHERE session_key = ? AND peer_type = 'cli'").get(key) as {
+    peer_id: string;
+  } | null;
+  if (!row) return fail(404, "this session has no claude-peers peer");
+  const previous = cosPeer();
+  const holds = previous === row.peer_id;
+  if (b.release === true && !holds) return { ok: true, peer_id: previous, previous, self: row.peer_id };
+  const set = handleSetCos({ peer_id: b.release === true ? null : row.peer_id });
+  return set.ok ? { ...set, previous, self: row.peer_id } : set;
 }
