@@ -56,7 +56,9 @@ export async function postTo<T>(http: string, db: string, path: string, body: un
 
 async function waitForHealth(http: string, proc: ReturnType<typeof Bun.spawn>, what: string): Promise<void> {
   for (let i = 0; i < 50; i++) {
-    if (proc.exitCode !== null) throw new Error(`broker failed to bind on ${what} (port not released?)`);
+    // The usual cause is a taken port, but the exit code tells a crash apart.
+    if (proc.exitCode !== null)
+      throw new Error(`broker exited with code ${proc.exitCode} before it answered (${what})`);
     try {
       if ((await fetch(`${http}/health`)).ok) return;
     } catch {}

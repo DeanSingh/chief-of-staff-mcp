@@ -15,7 +15,7 @@ test("a broker whose port another program holds fails at once, not at the test's
   const started = Date.now();
   try {
     const start = startBroker({ ...process.env, CLAUDE_PEERS_PORT: String(other.port), CLAUDE_PEERS_DB: db });
-    await expect(start).rejects.toThrow("failed to bind");
+    await expect(start).rejects.toThrow("broker exited with code");
     expect(Date.now() - started).toBeLessThan(4000);
   } finally {
     other.stop(true);
