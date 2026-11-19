@@ -56,7 +56,9 @@ export async function postTo<T>(http: string, db: string, path: string, body: un
 
 async function waitForHealth(http: string, proc: ReturnType<typeof Bun.spawn>, what: string): Promise<void> {
   for (let i = 0; i < 50; i++) {
-    if (proc.exitCode !== null) throw new Error(`broker failed to bind on ${what} (port not released?)`);
+    // The usual cause is a taken port, but the exit code tells a crash apart.
+    if (proc.exitCode !== null)
+      throw new Error(`broker exited with code ${proc.exitCode} before it answered (${what})`);
     try {
       if ((await fetch(`${http}/health`)).ok) return;
     } catch {}
@@ -65,8 +67,39 @@ async function waitForHealth(http: string, proc: ReturnType<typeof Bun.spawn>, w
   throw new Error(`broker did not ${what}`);
 }
 
+/**
+ * A port nothing listens on now, chosen by the OS. A random pick from a fixed
+ * range can land on another program's port (Chrome's DevTools sits at 9334):
+ * the broker then can't bind, and the test waits out its timeout.
+ */
+export function freePort(): number {
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
+  const port = server.port as number;
+  server.stop(true);
+  return port;
+}
+
+/** Spawns a broker with this env and waits until it answers; throws at once if it exits first. */
+export async function startBroker(
+  env: Record<string, string | undefined>,
+  stderr: "ignore" | "pipe" = "ignore",
+): Promise<ReturnType<typeof Bun.spawn>> {
+  const proc = Bun.spawn(["bun", `${ROOT}/broker.ts`], { env, stdout: "ignore", stderr });
+  await waitForHealth(`http://127.0.0.1:${env.CLAUDE_PEERS_PORT}`, proc, "start");
+  return proc;
+}
+
+/** Deletes a test broker's DB and the files beside it; missing ones are fine. */
+export async function removeDb(db: string): Promise<void> {
+  for (const suffix of ["", "-wal", "-shm", ".secret"]) {
+    try {
+      await Bun.file(db + suffix).delete();
+    } catch {}
+  }
+}
+
 export function useBroker() {
-  const PORT = 7899 + 1000 + Math.floor(Math.random() * 500);
+  const PORT = freePort();
   const HTTP = `http://127.0.0.1:${PORT}`;
   const WS = `ws://127.0.0.1:${PORT}`;
   const DB = `${import.meta.dir}/.test-broker-${PORT}.db`;
@@ -97,7 +130,6 @@ export function useBroker() {
   };
 
   let proc: ReturnType<typeof Bun.spawn>;
-  const spawn = () => Bun.spawn(["bun", `${ROOT}/broker.ts`], { env: BROKER_ENV, stdout: "ignore", stderr: "ignore" });
 
   const post = <T>(path: string, body: unknown) => postTo<T>(HTTP, DB, path, body);
 
@@ -108,8 +140,7 @@ export function useBroker() {
     proc.kill();
     await proc.exited;
     await Bun.sleep(200); // Give port time to be released by OS
-    proc = spawn();
-    await waitForHealth(HTTP, proc, "restart");
+    proc = await startBroker(BROKER_ENV);
   }
 
   let pidCursor = 0;
@@ -157,18 +188,13 @@ export function useBroker() {
   }
 
   beforeAll(async () => {
-    proc = spawn();
-    await waitForHealth(HTTP, proc, "start");
+    proc = await startBroker(BROKER_ENV);
   });
 
   afterAll(async () => {
     proc.kill();
     relayServer.stop(true);
-    for (const suffix of ["", "-wal", "-shm", ".secret"]) {
-      try {
-        await Bun.file(DB + suffix).delete();
-      } catch {}
-    }
+    await removeDb(DB);
   });
 
   return { PORT, HTTP, WS, DB, BROKER_ENV, relay, post, restartBroker, register, watchHeaders, connectWatch };

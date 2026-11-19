@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { peerSecret, readSecret, secretPath, PEER_HEADER } from "../src/shared/auth.ts";
+import { freePort, startBroker } from "./broker/harness.ts";
 
 /** The repo root, where the entry files live. */
 const ROOT = dirname(import.meta.dir);
@@ -11,7 +12,7 @@ const ROOT = dirname(import.meta.dir);
 // Real MCP servers (one CLI, one Desktop) over stdio against a real broker on
 // a private port: proves every route the servers use carries the install
 // secret and the right peer credential once the broker enforces them.
-const PORT = 7899 + 2000 + Math.floor(Math.random() * 500);
+const PORT = freePort();
 const HTTP = `http://127.0.0.1:${PORT}`;
 const DIR = mkdtempSync(join(tmpdir(), "cp-e2e-"));
 const DB = join(DIR, "peers.db");
@@ -150,14 +151,7 @@ async function asPeer(path: string, id: string, body: Record<string, unknown>) {
 }
 
 beforeAll(async () => {
-  broker = Bun.spawn(["bun", `${ROOT}/broker.ts`], { env: ENV, stdout: "ignore", stderr: "ignore" });
-  for (let i = 0; i < 50; i++) {
-    try {
-      if ((await fetch(`${HTTP}/health`)).ok) return;
-    } catch {}
-    await Bun.sleep(100);
-  }
-  throw new Error("broker did not start");
+  broker = await startBroker(ENV);
 });
 
 afterAll(() => {
