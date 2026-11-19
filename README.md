@@ -108,7 +108,7 @@ The broker can keep a record of what agents report and ask, for a chief of staff
 
 ### Running a chief of staff
 
-Pick the session that coordinates. In a CLI session, type `/claim-cos` in it: the claude-peers hook names that session and tells you the result, and the model never sees the prompt. `/release-cos` gives the role up. Both need `bun cli.ts install-hooks`, and both work only when you type them in a session that runs in a terminal, so an agent can't run `claude -p /claim-cos` and take the role.
+Pick the session that coordinates. In a CLI session, type `/claim-cos` in it: the claude-peers hook names that session and tells you the result, and the model never sees the prompt. `/release-cos` gives the role up. Both need `bun cli.ts install-hooks`, and both work only when you type them in a session that runs in a terminal, so an agent can't run `claude -p /claim-cos` and take the role. Claude Code shows the reply under "UserPromptSubmit operation blocked by hook": blocking the prompt is how a hook replies without a model turn, so that label is expected. The result is the line starting `claude-peers:`.
 
 Or name any session, Desktop included, from your own terminal. It shows the peer and asks you to type its id back; without a terminal (an agent running the command) it refuses. Run it in a terminal window, not with Claude Code's `!`, which can't take the typed confirmation.
 

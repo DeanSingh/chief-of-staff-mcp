@@ -36,7 +36,24 @@ CI runs the first three on Linux and macOS, and all must pass.
   hooks. New code goes in `src/`. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 - **Keep functions small.** Biome's cognitive-complexity rule is an error
   for `src/`.
+- **Update the docs in the same pull request.** A change users can see gets
+  an entry under `## Unreleased` in [CHANGELOG.md](CHANGELOG.md), ending
+  with the PR number, and README.md or docs/ARCHITECTURE.md say what now
+  happens.
+- **Commit messages** follow `type(scope): what now happens`, for example
+  `fix(server): a lost list_changed is sent again until the client re-lists`.
+  The body says why.
 - One concern per pull request, with a description of what changed and why.
+
+## Design rules
+
+- **Regular agents carry nothing new.** A feature for the chief of staff or
+  for you must not add tools or text to every other agent's context. Capture
+  what you need with hooks; the coordinator tools appear only in the session
+  that holds the role.
+- **Records hold fixed text.** What hooks write to the broker is fixed text
+  ("waiting for input"), never an agent's or a notification's own words,
+  which can carry private details.
 
 ## Merging
 
